@@ -6,7 +6,6 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-import socket
 import subprocess
 from typing import Any
 from urllib.parse import urlsplit
@@ -191,14 +190,10 @@ def main() -> None:
             if options.open_browser:
                 webbrowser.open(f"{service_url(settings)}/")
             return
-        # Detect a different process on the requested port before starting WeChat.
-        address = settings.host.strip("[]")
-        family = socket.AF_INET6 if ":" in address else socket.AF_INET
-        with socket.socket(family, socket.SOCK_STREAM) as check:
-            try:
-                check.bind((address, settings.port))
-            except OSError as exc:
-                raise ValueError(f"无法使用 {settings.host}:{settings.port}，请先停止占用该端口的旧服务或修改 WXHOOK_PORT。") from exc
+        # Uvicorn owns the listening socket and reports the original bind error.
+        # A separate bind probe can disagree with its socket reuse behaviour.
+        # Startup actions already wait for server.started, so a bind failure
+        # cannot launch WeChat or open the browser.
         asyncio.run(run_service(settings, options))
     except KeyboardInterrupt:
         pass

@@ -141,3 +141,39 @@ async def test_service_shutdown_cancels_startup_monitor(monkeypatch):
     await launcher.run_service(load_settings(), launcher.LauncherSettings(Path("Weixin.exe"), open_browser=False))
     assert entered.is_set()
     assert cancelled.is_set()
+
+
+async def test_bind_failure_does_not_launch_wechat_or_open_browser(monkeypatch):
+    async def fail_to_bind():
+        await asyncio.sleep(0)
+        raise OSError(10048, "address already in use")
+
+    server = SimpleNamespace(started=False, serve=fail_to_bind)
+    monkeypatch.setattr(launcher.uvicorn, "Server", lambda config: server)
+    browser = Mock()
+    manager = Mock()
+    monkeypatch.setattr(launcher.webbrowser, "open", browser)
+    monkeypatch.setattr(launcher, "manage_wechat", manager)
+    with pytest.raises(OSError, match="10048"):
+        await launcher.run_service(load_settings(), launcher.LauncherSettings(Path("Weixin.exe")))
+    browser.assert_not_called()
+    manager.assert_not_called()
+
+
+@pytest.mark.parametrize("code, detail", [(10013, "permission denied"), (10048, "address already in use")])
+def test_main_preserves_system_error_instead_of_assuming_port_conflict(monkeypatch, capsys, code, detail):
+    monkeypatch.setattr(launcher, "load_launcher_settings", lambda: launcher.LauncherSettings(Path("Weixin.exe")))
+    monkeypatch.setattr(launcher, "existing_service", lambda settings: False)
+
+    def fail(coroutine):
+        coroutine.close()
+        raise OSError(code, detail)
+
+    monkeypatch.setattr(launcher.asyncio, "run", fail)
+    with pytest.raises(SystemExit) as error:
+        launcher.main()
+    assert error.value.code == 1
+    output = capsys.readouterr().out
+    assert str(code) in output
+    assert detail in output
+    assert "请先停止占用" not in output
