@@ -51,7 +51,9 @@ class BodyLimitMiddleware:
                 message = messages[position]
                 position += 1
                 return message
-            return {"type": "http.request", "body": b"", "more_body": False}
+            # After replaying the buffered body, preserve disconnect semantics.
+            # Repeating an empty request here can spin forever in file responses.
+            return await receive()
 
         await self.app(scope, replay, send)
 

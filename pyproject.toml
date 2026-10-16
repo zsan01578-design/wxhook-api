@@ -29,6 +29,9 @@ wxhook-api = "wxhook_api.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+wxhook_api = ["web/*.html", "web/*.css", "web/*.js"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"

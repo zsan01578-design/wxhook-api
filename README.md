@@ -1,5 +1,71 @@
 # wxhook-api
 
+## 一键启动微信、Hook 和聊天页面
+
+测试机已将 `version.dll`、`version.yml` 放在 `Weixin.exe` 同目录后，
+只需在 PyCharm 中运行项目根目录的 **`main.py`**。
+当前打开的 `src/wxhook_api/main.py` 也支持直接运行，`python -m wxhook_api` 同样使用一键入口。
+
+首次使用请确认项目根目录 `launcher.yml` 中的微信路径：
+
+```yaml
+wechat-path: 'F:\app\Weixin\Weixin.exe'
+open-browser: true
+```
+
+一键入口会启动 Python 服务，自动打开本地聊天页面；如果 Hook 尚未响应，则启动微信（已运行的微信会复用）。
+微信自身加载旁边的 Hook DLL。程序在后台等待 Hook 和账号登录，登录后自动设置消息回调，
+不再需要额外启动另一个 HTTP 服务或手动点击“启用消息接收”。Hook 断开、账号退出后会继续等待，恢复后重新设置回调。
+扫码、确认登录仍需要在微信窗口中完成，等待期间聊天页面可以正常打开并显示启动进度。
+
+停止 PyCharm 运行或在终端按 `Ctrl+C` 会关闭 Python 服务，微信保持运行。
+如果 `8000` 已被旧版服务占用，请先停止旧服务后再运行一次。
+如果对应的一键服务已经运行，再次启动入口会打开现有页面。
+微信路径也可以通过 `WXHOOK_WECHAT_PATH` 环境变量覆盖。
+一键启动用于 Python 和微信在同一台测试机的场景。
+
+## 本地消息页面（收发文本）
+
+启动 Python 服务后，在运行微信和 Hook 的测试电脑上打开 `http://127.0.0.1:8000/`。
+页面提供微信连接检查、启用消息接收、发送文本和收到消息的回复入口，不需要安装前端工具。
+
+测试电脑更新步骤：
+
+1. 在原 Python 服务终端按 `Ctrl+C` 停止服务。
+2. 将开发电脑项目里的 `main.py`、`launcher.yml`、`src`、`tests`、`pyproject.toml`、`README.md` 同步到测试电脑的原项目目录。
+   保留测试机自己的 `.venv`、`version.yml` 和微信安装目录里的 Hook 文件。
+3. 更新后首次在 PyCharm 的项目终端执行（下面假设测试机项目在 `F:\wxhook`）：
+
+   ```powershell
+   cd F:\wxhook
+   .\.venv\Scripts\python.exe -m pip install -e .
+   ```
+
+4. 在 PyCharm 右键运行项目根目录 `main.py`。微信和聊天页面会自动打开，在微信完成登录。
+   页面顶部应显示“微信已登录”，回调状态应变为“消息接收已自动启用”。若显示旧页面，按 `Ctrl+F5` 刷新。
+5. 下次启动只需再次运行 `main.py`，无需重复安装依赖或手动启动其他服务。
+   “启用消息接收”按钮仍可用于手动重设回调。
+6. 点击 `filehelper` 填入文件传输助手 ID，输入测试文本并发送，在微信中确认消息出现。
+7. 让另一个微信账号给当前登录账号发送一条文本，页面右侧应在约 2 秒内出现消息。
+8. 点击该消息的“回复”，输入内容并发送，在对方微信确认收到。群消息的回复对象为对应群聊。
+
+验收标准：页面显示已登录、发出的文本能在微信中确认、外部账号的新消息出现在页面、回复能到达对方。
+点击“启用消息接收”成功只表示 Hook 接受回调设置，收到真实消息才表示回调链路已验证。
+
+如果发送失败，页面保留草稿并显示错误；若请求超时，请先确认微信里是否已经发送，避免重复发送。
+如果接收不到，确认页面回调状态已显示启用，Hook 与 Python 都在同一台测试电脑运行，且 Python 服务未退出。
+也可以直接访问 `http://127.0.0.1:8000/ui/messages` 查看是否有已接收的回调记录。
+
+消息列表仅在当前进程内保留最近 100 条，重启后清空；单条内容最多显示 20,000 个字符，超出会标记截断。
+第一版发送功能仅支持文本，非文本回调显示原始内容，不自动下载媒体或自动回复。
+
+可选自动测试（使用模拟 Hook，不会发送真实微信消息）：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
 基于 FastAPI 的 WeChat Hook HTTP API 桥接服务。项目根据 `默认模块(1).md` 中的接口契约实现，将本地业务调用转发到已经运行的 WeChat Hook HTTP 服务，并接收 Hook 推送的消息回调。
 
 > 当前目标版本：WeChat 4.1.10.27
@@ -49,7 +115,8 @@ FastAPI 回调入口  /receiveChatBotMsg
 | FastAPI 桥接层 | `127.0.0.1:8000` | 对外提供与文档一致的代理接口，并接收回调 |
 | WeChat Hook 上游 | `127.0.0.1:30001` | 由现有 Hook 程序提供，FastAPI 不负责启动 |
 
-FastAPI 层通过 `HookClient` 调用上游，不加载 `version.dll`，不启动 `weixin_4.1.10.27.exe`，不执行 DLL 注入，也不猜测微信进程内部实现。
+FastAPI 层通过 `HookClient` 调用上游；一键入口负责打开已安装的 `Weixin.exe`，由微信自行加载其目录中的 Hook DLL。
+Python 不直接加载或注入 `version.dll`，也不执行微信安装器 `weixin_4.1.10.27.exe`。
 
 ## 功能范围
 
@@ -81,7 +148,7 @@ FastAPI 层通过 `HookClient` 调用上游，不加载 `version.dll`，不启�
 
 - Windows
 - Python 3.11 或更高版本
-- 已运行并监听 `30001` 端口的 WeChat Hook HTTP 服务
+- 已安装对应版本微信，并将 Hook DLL、配置放置在微信主程序同目录；一键入口会启动微信并等待 `30001` 就绪
 - Git Bash、PowerShell 或其他终端均可运行
 
 检查 Python：
@@ -172,6 +239,8 @@ export WXHOOK_PORT=8000
 
 ### 模块方式启动
 
+与运行根目录 `main.py` 一样，会一键启动微信、打开聊天页面并自动设置回调。
+
 ```bash
 WXHOOK_CONFIG=F:/wxhook/version.yml .venv/Scripts/python.exe -m wxhook_api
 ```
@@ -183,6 +252,8 @@ http://127.0.0.1:8000
 ```
 
 ### Uvicorn 启动
+
+此方式只运行 API 服务，适合自行管理微信和回调的场景。
 
 ```bash
 .venv/Scripts/python.exe -m uvicorn wxhook_api.main:app --host 127.0.0.1 --port 8000

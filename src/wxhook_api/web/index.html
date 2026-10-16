@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>微信消息 · wxhook</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/ui/assets/style.css">
+  <script src="/ui/assets/app.js" defer></script>
+</head>
+<body>
+  <main class="workspace">
+    <header class="page-header">
+      <div><p class="eyebrow">WXHOOK / 本地消息工具</p><h1>微信消息</h1><p class="subtitle">连接你的微信，收发一条消息。</p></div>
+      <a class="docs-link" href="/docs" target="_blank" rel="noopener">接口文档 ↗</a>
+    </header>
+
+    <section class="connection" aria-label="服务连接">
+      <div class="connection-info"><span id="status-dot" class="dot"></span><div><strong id="hook-status">正在检查微信状态…</strong><p id="hook-address">读取服务配置中</p></div></div>
+      <div class="connection-actions"><button id="check-status" class="secondary" type="button">检查连接</button><button id="setup-callback" class="secondary" type="button">启用消息接收</button></div>
+      <p id="callback-status" class="connection-note" role="status">一键启动会自动启用消息接收，也可点击按钮手动设置。</p>
+    </section>
+
+    <div class="columns">
+      <section class="panel compose" aria-labelledby="compose-title">
+        <div class="section-heading"><span class="section-number">01</span><h2 id="compose-title">发送文本</h2></div>
+        <p class="section-description">填写好友 wxid 或群 ID，也可以从收到的消息选择回复对象。</p>
+        <form id="send-form">
+          <label for="recipient">接收对象</label>
+          <input id="recipient" name="recipient" placeholder="wxid_xxx 或 xxx@chatroom" required autocomplete="off" spellcheck="false">
+          <p class="field-note">需填写真实 ID，微信昵称不能直接用于发送。</p>
+          <label for="message">消息内容</label>
+          <textarea id="message" name="message" rows="8" placeholder="输入想发送的文字…" required maxlength="10000"></textarea>
+          <div class="compose-footer"><span>Ctrl / ⌘ + Enter 发送</span><button id="send-button" class="primary" type="submit">发送消息 <span aria-hidden="true">↗</span></button></div>
+          <p id="send-status" class="feedback" role="status" aria-live="polite"></p>
+        </form>
+        <div class="tip"><strong>先试一条</strong><p>可以填入文件传输助手 ID <button id="use-filehelper" class="text-button" type="button">filehelper</button>，发送一条测试文本。</p></div>
+      </section>
+
+      <section class="panel inbox" aria-labelledby="inbox-title">
+        <div class="inbox-heading"><div class="section-heading"><span class="section-number">02</span><h2 id="inbox-title">收到的消息</h2></div><span id="message-count" class="count">0 条</span></div>
+        <p class="section-description">新消息每 2 秒刷新 · 最近 100 条 · 重启后清空</p>
+        <p id="inbox-status" class="inbox-status" role="status"></p>
+        <div id="message-list" class="message-list"><div class="empty-state"><span class="empty-icon" aria-hidden="true">↙</span><h3>等待第一条消息</h3><p>启用消息接收后，让另一个微信账号<br>给当前账号发送一条消息。</p></div></div>
+      </section>
+    </div>
+    <footer class="page-footer">仅显示本次服务运行期间收到的消息，非文本消息展示原始内容。<span>WXHOOK · TEXT MESSAGING</span></footer>
+  </main>
+</body>
+</html>
