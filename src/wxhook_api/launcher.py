@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import csv
 import logging
 import os
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ import uvicorn
 
 from wxhook_api.core.config import PROJECT_ROOT, Settings, load_settings, load_yaml
 from wxhook_api.main import create_app
+from wxhook_api.services.desktop import show_wechat_window, wechat_process_ids
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -24,7 +24,7 @@ logger = logging.getLogger("uvicorn.error")
 @dataclass(frozen=True)
 class LauncherSettings:
     wechat_path: Path
-    open_browser: bool = True
+    open_browser: bool = False
 
 
 def load_launcher_settings(path: Path | None = None) -> LauncherSettings:
@@ -34,7 +34,7 @@ def load_launcher_settings(path: Path | None = None) -> LauncherSettings:
     executable = Path(os.getenv("WXHOOK_WECHAT_PATH") or values.get("wechat-path", "F:/app/Weixin/Weixin.exe")).expanduser()
     if not executable.is_absolute():
         executable = path.parent / executable
-    open_browser = values.get("open-browser", True)
+    open_browser = values.get("open-browser", False)
     if not isinstance(open_browser, bool):
         raise ValueError("launcher.yml 中的 open-browser 必须为 true 或 false")
     return LauncherSettings(wechat_path=executable, open_browser=open_browser)
@@ -50,16 +50,7 @@ def service_url(settings: Settings) -> str:
 
 
 def wechat_is_running(executable: Path) -> bool:
-    if os.name != "nt":
-        return False
-    result = subprocess.run(
-        ["tasklist.exe", "/FI", f"IMAGENAME eq {executable.name}", "/FO", "CSV", "/NH"],
-        capture_output=True,
-        timeout=5,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    text = result.stdout.decode(errors="replace")
-    return any(row and row[0].casefold() == executable.name.casefold() for row in csv.reader(text.splitlines()))
+    return bool(wechat_process_ids(executable))
 
 
 def start_wechat(options: LauncherSettings) -> str:
@@ -78,6 +69,36 @@ def update_status(app: Any, phase: str, message: str) -> None:
     if app.state.launcher_status != status:
         app.state.launcher_status = status
         logger.info("%s", message)
+
+
+async def present_wechat(options: LauncherSettings, timeout: float = 30) -> None:
+    """Wait for an existing or newly launched client window, then activate once."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    restored = False
+    while True:
+        try:
+            result = await asyncio.to_thread(show_wechat_window, options.wechat_path)
+        except (OSError, subprocess.SubprocessError):
+            logger.warning("无法唤起微信窗口，请点击任务栏中的微信图标。")
+            return
+        if result == "focused":
+            logger.info("已将原版微信窗口切换到前台。")
+            return
+        if result == "shown":
+            if not restored:
+                # ShowWindowAsync posts a message to WeChat's UI thread. Give
+                # that thread one opportunity to show the window before retrying.
+                restored = True
+                await asyncio.sleep(0.2)
+                continue
+            logger.info("已显示微信窗口；系统暂未允许切换焦点，请点击闪烁的微信任务栏图标。")
+            return
+        if result == "unsupported":
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            logger.warning("暂未找到微信主窗口，请确认微信已经启动。")
+            return
+        await asyncio.sleep(1)
 
 
 async def manage_wechat(app: Any, settings: Settings, options: LauncherSettings) -> None:
@@ -151,7 +172,14 @@ async def run_service(settings: Settings, options: LauncherSettings) -> None:
                 await asyncio.to_thread(webbrowser.open, f"{service_url(settings)}/")
             except Exception:
                 logger.warning("无法自动打开浏览器，请手动访问 %s/", service_url(settings))
-        await manage_wechat(app, settings, options)
+        # Open the web tool first, then bring the native client in front of it.
+        # This also runs when Hook is already available and no process is spawned.
+        window_task = asyncio.create_task(present_wechat(options))
+        try:
+            await manage_wechat(app, settings, options)
+        finally:
+            window_task.cancel()
+            await asyncio.gather(window_task, return_exceptions=True)
 
     task = asyncio.create_task(after_listening())
     try:
@@ -189,6 +217,8 @@ def main() -> None:
             print(f"消息服务已运行：{service_url(settings)}/。无需重复启动。")
             if options.open_browser:
                 webbrowser.open(f"{service_url(settings)}/")
+            start_wechat(options)
+            asyncio.run(present_wechat(options))
             return
         # Uvicorn owns the listening socket and reports the original bind error.
         # A separate bind probe can disagree with its socket reuse behaviour.

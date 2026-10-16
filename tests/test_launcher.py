@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -138,6 +138,7 @@ async def test_service_shutdown_cancels_startup_monitor(monkeypatch):
             cancelled.set()
 
     monkeypatch.setattr(launcher, "manage_wechat", manage)
+    monkeypatch.setattr(launcher, "present_wechat", AsyncMock())
     await launcher.run_service(load_settings(), launcher.LauncherSettings(Path("Weixin.exe"), open_browser=False))
     assert entered.is_set()
     assert cancelled.is_set()
@@ -177,3 +178,56 @@ def test_main_preserves_system_error_instead_of_assuming_port_conflict(monkeypat
     assert str(code) in output
     assert detail in output
     assert "请先停止占用" not in output
+
+
+async def test_present_wechat_waits_for_new_window_without_relaunching(monkeypatch):
+    show = Mock(side_effect=["missing", "focused"])
+    monkeypatch.setattr(launcher, "show_wechat_window", show)
+    monkeypatch.setattr(launcher.asyncio, "sleep", AsyncMock())
+    spawn = Mock()
+    monkeypatch.setattr(launcher, "start_wechat", spawn)
+    options = launcher.LauncherSettings(Path("Weixin.exe"))
+    await launcher.present_wechat(options)
+    assert show.call_count == 2
+    spawn.assert_not_called()
+
+
+async def test_native_window_is_presented_after_browser_even_when_hook_is_running(monkeypatch):
+    events = []
+    native_presented = asyncio.Event()
+
+    async def serve():
+        await asyncio.wait_for(native_presented.wait(), timeout=1)
+
+    server = SimpleNamespace(started=True, serve=serve)
+    monkeypatch.setattr(launcher.uvicorn, "Server", lambda config: server)
+    monkeypatch.setattr(launcher.webbrowser, "open", lambda url: events.append("browser"))
+
+    async def present(options):
+        events.append("native")
+        native_presented.set()
+
+    async def manage(*args):
+        # A running Hook need not launch a new client process to show its window.
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(launcher, "present_wechat", present)
+    monkeypatch.setattr(launcher, "manage_wechat", manage)
+    await launcher.run_service(load_settings(), launcher.LauncherSettings(Path("Weixin.exe"), open_browser=True))
+    assert events == ["browser", "native"]
+
+
+def test_reusing_service_also_presents_native_wechat(monkeypatch):
+    options = launcher.LauncherSettings(Path("Weixin.exe"), open_browser=False)
+    monkeypatch.setattr(launcher, "load_launcher_settings", lambda: options)
+    monkeypatch.setattr(launcher, "existing_service", lambda settings: True)
+    start = Mock()
+    present = AsyncMock()
+    serve = Mock()
+    monkeypatch.setattr(launcher, "start_wechat", start)
+    monkeypatch.setattr(launcher, "present_wechat", present)
+    monkeypatch.setattr(launcher, "run_service", serve)
+    launcher.main()
+    start.assert_called_once_with(options)
+    present.assert_awaited_once_with(options)
+    serve.assert_not_called()
