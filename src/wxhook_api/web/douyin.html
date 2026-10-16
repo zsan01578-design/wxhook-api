@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>群聊抖音解析 · wxhook</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/ui/assets/style.css">
+  <script src="/ui/assets/douyin.js" defer></script>
+</head>
+<body>
+  <main class="workspace">
+    <header class="page-header"><div><p class="eyebrow">WXHOOK / 群聊媒体</p><h1>抖音分享解析</h1><p class="subtitle">从指定群聊收集视频与图集，保存到本机。</p></div><a class="docs-link" href="/">返回消息页面 ↗</a></header>
+    <div class="douyin-layout">
+      <section class="panel compose">
+        <div class="section-heading"><span class="section-number">01</span><h2>选择群聊</h2></div>
+        <p class="section-description">只处理下方配置的群，新设置保存后立即生效。</p>
+        <form id="group-form">
+          <label class="check-label"><input id="enabled" type="checkbox">启用群聊抖音解析</label>
+          <label for="groups">群 ID，每行一个</label>
+          <textarea id="groups" rows="6" placeholder="123456789@chatroom" spellcheck="false"></textarea>
+          <p class="field-note">填写群 ID，不是群昵称。可以先在消息页面查看群消息中的 ID。</p>
+          <label class="check-label"><input id="auto-download" type="checkbox" checked>解析成功后自动保存视频和图片</label>
+          <button class="primary" id="save-settings" type="submit">保存群配置</button>
+          <p id="config-status" class="feedback" role="status"></p>
+        </form>
+        <div class="tip"><strong>最近收到消息的群</strong><p>点击群 ID 添加到上方名单，再保存配置。</p><div id="recent-groups" class="recent-groups">暂无群消息。请先让目标群发送一条消息。</div></div>
+        <div class="tip"><strong>文件保存位置</strong><p id="output-dir" class="output-path">正在读取…</p><p id="file-limit"></p><p>支持抖音分享文案、短链接及视频/图文卡片中包含的链接。</p></div>
+      </section>
+      <section class="panel">
+        <div class="inbox-heading"><div class="section-heading"><span class="section-number">02</span><h2>解析结果</h2></div><span id="job-count" class="count">0 条</span></div>
+        <p class="section-description">结果每 2 秒刷新 · 最近 100 条记录 · 保存的文件重启后仍保留</p>
+        <p id="jobs-status" class="inbox-status" role="status"></p>
+        <div id="jobs"><div class="empty-state"><span class="empty-icon" aria-hidden="true">↓</span><h3>等待群内分享</h3><p>保存群配置后，在目标群发送一条抖音视频或图文链接。</p></div></div>
+      </section>
+    </div>
+    <footer class="page-footer">公开分享页需要验证或作品不可用时会显示失败原因；解析结果保存在本机。<span>WXHOOK · DOUYIN MEDIA</span></footer>
+  </main>
+</body>
+</html>

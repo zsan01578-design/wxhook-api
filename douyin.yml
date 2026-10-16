@@ -1,0 +1,9 @@
+# 可在 http://127.0.0.1:8000/douyin 配置；页面设置保存在 douyin.local.yml。
+# 不启用或群名单为空时，不处理任何分享链接。
+enabled: false
+groups: []
+# groups:
+#   - '123456789@chatroom'
+auto-download: true
+output-dir: downloads/douyin
+max-file-mb: 100

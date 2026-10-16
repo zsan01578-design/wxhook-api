@@ -15,17 +15,21 @@ from fastapi.staticfiles import StaticFiles
 from wxhook_api.clients.hook_client import HookClient
 from wxhook_api.core.body_limit import BodyLimitMiddleware
 from wxhook_api.core.config import Settings, load_settings
+from wxhook_api.core.douyin_config import load_douyin_options
 from wxhook_api.core.errors import install_exception_handlers
-from wxhook_api.routes import account, callbacks, contacts, health, history, media, messages, querydb, ui
+from wxhook_api.routes import account, callbacks, contacts, douyin, health, history, media, messages, querydb, ui
+from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.events import EventDispatcher
 from wxhook_api.services.inbox import MessageInbox
 
 
-def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncBaseTransport | None = None, hook_client: HookClient | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncBaseTransport | None = None, hook_client: HookClient | None = None, douyin_service: DouyinService | None = None) -> FastAPI:
     settings = settings or load_settings()
     dispatcher = EventDispatcher(settings.callback_queue_size)
     inbox = MessageInbox()
     dispatcher.register(inbox.receive)
+    douyin_worker = douyin_service or DouyinService(load_douyin_options())
+    dispatcher.register(douyin_worker.receive)
     owned_client: HookClient | None = None
 
     @asynccontextmanager
@@ -34,16 +38,20 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
         if hook_client is None:
             owned_client = HookClient(settings.hook_base_url, connect_timeout=settings.connect_timeout, read_timeout=settings.read_timeout, transport=hook_transport)
             app.state.hook_client = owned_client
-        await dispatcher.start()
         try:
+            await douyin_worker.start()
+            await dispatcher.start()
             yield
         finally:
             try:
                 await dispatcher.stop(settings.shutdown_timeout)
             finally:
-                if owned_client is not None:
-                    await owned_client.aclose()
-                    owned_client = None
+                try:
+                    await douyin_worker.stop()
+                finally:
+                    if owned_client is not None:
+                        await owned_client.aclose()
+                        owned_client = None
 
     app = FastAPI(title="wxhook-api", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
@@ -51,9 +59,10 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.event_dispatcher = dispatcher
     app.state.message_inbox = inbox
     app.state.launcher_status = None
+    app.state.douyin = douyin_worker
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
     install_exception_handlers(app)
-    for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router):
+    for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router, douyin.router):
         app.include_router(router)
     app.mount("/ui/assets", StaticFiles(directory=ui.WEB_ROOT), name="message-assets")
     return app
