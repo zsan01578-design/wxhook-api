@@ -46,8 +46,8 @@ def install_exception_handlers(app: FastAPI) -> None:
                 return JSONResponse(status_code=422, content={"error": {"code": "validation_error", "message": "Hook callback fields are incompatible", "fields": result["fields"]}})
         if invalid_json:
             return invalid_json_response()
-        if request.url.path == "/api/manage/chat-model":
-            return error_response(422, "validation_error", "请检查 Base URL、模型名称及 API Key 格式；地址须为 HTTP(S)，不能包含账号或查询参数。")
+        if request.url.path == "/api/manage/chat-model" or request.url.path.startswith("/api/manage/chat-models"):
+            return error_response(422, "validation_error", "请检查配置名称（最多 80 字）、Base URL、模型名称及 API Key 格式；地址须为 HTTP(S)，不能包含账号或查询参数。")
         if request.url.path == "/api/manage/chatbot/mentions":
             return error_response(422, "validation_error", "机器人显示名最多 20 个，每个 1–80 字，请每行填写一个。")
         if request.url.path == "/api/douyin/config":

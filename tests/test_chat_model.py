@@ -6,7 +6,7 @@ import pytest
 from tests.test_chatbot import context, event
 from wxhook_api.core.chatbot_config import ChatbotOptions
 from wxhook_api.services.chatbot import MentionChatService
-from wxhook_api.services.chat_model import ChatModelConfiguration, ChatCompletionsProvider, ModelError, ModelSettings
+from wxhook_api.services.chat_model import ChatModelConfiguration, ChatCompletionsProvider, ModelDefinition, ModelError, ModelSettings
 
 
 CONFIG = {"base_url": "https://model.test/v1/", "model": "example/chat", "api_key": "test-private-key"}
@@ -44,7 +44,7 @@ async def test_web_save_tests_once_activates_group_answer_and_survives_restart(t
             assert result.headers["cache-control"] == "no-store"
         assert "test-private-key" not in response.text
         disk = json.loads(config.path.read_text(encoding="utf-8"))
-        assert disk["api_key"] == "test-private-key"
+        assert disk["models"][0]["api_key"] == "test-private-key"
         restarted_bot = MentionChatService(ChatbotOptions())
         restarted = ChatModelConfiguration(restarted_bot)
         assert restarted.snapshot()["has_api_key"]
@@ -214,3 +214,106 @@ async def test_unsupported_thinking_option_failure_preserves_working_configurati
         response = await state.client.post("/api/manage/chat-model", json={**CONFIG, "enable_thinking": False})
         assert not response.json()["saved"] and config.path.read_bytes() == previous
         assert config.settings.enable_thinking is None
+
+
+async def test_multiple_models_edit_switch_restart_and_delete(tmp_path):
+    calls = []
+
+    def respond(request):
+        calls.append((json.loads(request.content)["model"], request.headers.get("authorization")))
+        return completion()
+
+    async with context(tmp_path) as state:
+        config = state.app.state.chat_model
+        config.transport = httpx.MockTransport(respond)
+        first = (await state.client.post("/api/manage/chat-models", json={**CONFIG, "name": "首选"})).json()["profile"]
+        second = (await state.client.post("/api/manage/chat-models", json={**CONFIG, "model": "second", "api_key": "second-key", "enable_thinking": False})).json()["profile"]
+        assert first["active"] and not second["active"]
+        first_id, second_id = first["id"], second["id"]
+        active_provider = state.bot.provider
+        edited = await state.client.put(f"/api/manage/chat-models/{second_id}", json={**CONFIG, "model": "edited", "name": "备用", "api_key": None, "enable_thinking": False})
+        assert edited.json()["saved"] and state.bot.provider is active_provider
+        assert calls[-1] == ("edited", "Bearer second-key")
+        await state.submit(event())
+        assert calls[-1] == ("example/chat", "Bearer test-private-key")
+        result = await state.client.post(f"/api/manage/chat-models/{second_id}/activate", json={})
+        assert result.json()["saved"]
+        snapshot = (await state.client.get("/api/manage/chat-model")).json()
+        assert snapshot["active_id"] == second_id and sum(p["active"] for p in snapshot["models"]) == 1
+        assert "second-key" not in str(snapshot) and "test-private-key" not in str(snapshot)
+        await state.submit(event(msgid="new-model-message"))
+        assert calls[-1] == ("edited", "Bearer second-key")
+        restarted = ChatModelConfiguration(MentionChatService(ChatbotOptions()))
+        assert restarted.settings.id == second_id and restarted.settings.enable_thinking is False
+        assert len(restarted.models) == 2 and restarted.models[first_id].name == "首选"
+        rejected = await state.client.delete(f"/api/manage/chat-models/{second_id}")
+        assert not rejected.json()["saved"] and len(config.models) == 2
+        removed = await state.client.delete(f"/api/manage/chat-models/{first_id}")
+        assert removed.json()["saved"] and list(config.models) == [second_id]
+        assert ChatModelConfiguration(MentionChatService(ChatbotOptions())).active_id == second_id
+
+
+async def test_failed_switch_and_edit_leave_all_models_and_active_provider_unchanged(tmp_path, monkeypatch):
+    async with context(tmp_path) as state:
+        config = state.app.state.chat_model
+        config.transport = httpx.MockTransport(lambda request: completion())
+        first = (await state.client.post("/api/manage/chat-models", json=CONFIG)).json()["profile"]
+        second = (await state.client.post("/api/manage/chat-models", json={**CONFIG, "model": "second"})).json()["profile"]
+        previous, provider = config.path.read_bytes(), state.bot.provider
+        config.transport = httpx.MockTransport(lambda request: httpx.Response(401))
+        for method, path, body in [
+            ("POST", f"/api/manage/chat-models/{second['id']}/activate", {}),
+            ("PUT", f"/api/manage/chat-models/{first['id']}", CONFIG),
+            ("POST", "/api/manage/chat-models", CONFIG),
+        ]:
+            response = await state.client.request(method, path, json=body)
+            assert not response.json()["saved"]
+            assert config.path.read_bytes() == previous and state.bot.provider is provider
+        config.transport = httpx.MockTransport(lambda request: completion())
+
+        def fail(collection):
+            raise PermissionError("second-key")
+
+        monkeypatch.setattr(config, "_save", fail)
+        response = await state.client.post(f"/api/manage/chat-models/{second['id']}/activate", json={})
+        assert response.status_code == 500 and "second-key" not in response.text
+        assert config.active_id == first["id"] and state.bot.provider is provider
+
+
+async def test_new_profile_never_inherits_another_profiles_key_and_missing_ids_do_not_create(tmp_path):
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return completion()
+
+    async with context(tmp_path) as state:
+        config = state.app.state.chat_model
+        config.transport = httpx.MockTransport(respond)
+        await state.client.post("/api/manage/chat-models", json=CONFIG)
+        second = await state.client.post("/api/manage/chat-models", json={**CONFIG, "api_key": None})
+        assert second.json()["saved"] and "authorization" not in calls[-1].headers
+        for method, path, body in [("PUT", "/api/manage/chat-models/missing", CONFIG),
+                                   ("POST", "/api/manage/chat-models/missing/activate", {}),
+                                   ("DELETE", "/api/manage/chat-models/missing", None)]:
+            response = await state.client.request(method, path, json=body)
+            assert not response.json()["saved"]
+        assert len(config.models) == 2 and len(calls) == 2
+        invalid = await state.client.put(f"/api/manage/chat-models/{second.json()['profile']['id']}", json={**CONFIG, "api_key": "bad\nkey"})
+        assert invalid.status_code == 422 and "bad" not in invalid.text
+
+
+async def test_legacy_config_migrates_without_losing_key_or_thinking_setting(tmp_path):
+    path = tmp_path / "chat-model.local.json"
+    path.write_text(json.dumps({**CONFIG, "enable_thinking": False}), encoding="utf-8")
+    bot = MentionChatService(ChatbotOptions())
+    config = ChatModelConfiguration(bot)
+    assert not config.load_error and config.active_id == "legacy"
+    assert config.settings.api_key.get_secret_value() == CONFIG["api_key"]
+    assert config.settings.enable_thinking is False and len(config.models) == 1
+    config.transport = httpx.MockTransport(lambda request: completion())
+    await config.save_profile(ModelDefinition(base_url="http://localhost:1234/v1", model="local"))
+    disk = json.loads(path.read_text(encoding="utf-8"))
+    assert disk["active_id"] == "legacy" and len(disk["models"]) == 2
+    restored = ChatModelConfiguration(MentionChatService(ChatbotOptions()))
+    assert restored.settings.api_key.get_secret_value() == CONFIG["api_key"]

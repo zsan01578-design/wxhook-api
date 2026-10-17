@@ -53,7 +53,7 @@ async function api(path, body, method = "POST", timeout = 15000) {
   const data = await response.json();
   if (!response.ok) {
     let message = data.error?.message || data.detail || `请求失败（${response.status}）`;
-    if (Array.isArray(message) || (data.error?.code === "validation_error" && !["/api/manage/chat-model", "/api/manage/chatbot/mentions"].includes(path))) message = "请检查填写内容：群 ID 须以 @chatroom 结尾，成员须填写真实 wxid，名称最多 80 字。";
+    if (Array.isArray(message) || (data.error?.code === "validation_error" && !path.startsWith("/api/manage/chat-model") && path !== "/api/manage/chatbot/mentions")) message = "请检查填写内容：群 ID 须以 @chatroom 结尾，成员须填写真实 wxid，名称最多 80 字。";
     throw new Error(message);
   }
   return data;
@@ -438,8 +438,56 @@ async function modelSettingsDialog() {
   catch (error) { if (body.isConnected) body.replaceChildren(el("p", "form-error", error.message)); return; }
   if (!$("modal").open || $("modal-title").textContent !== "AI 对话模型") return;
   body.replaceChildren();
+  body.append(el("p", "modal-copy", "可保存多个模型配置，同时只启用一个。新增和修改时自动测试；启用其他模型后，后续群内问答使用新模型。"));
+  const toolbar = el("div", "model-list-toolbar");
+  toolbar.append(el("span", "form-note", `已保存 ${settings.models.length} 个模型`), button("添加模型", "button primary", () => modelEditorDialog()));
+  body.append(toolbar);
+  if (settings.load_error) body.append(el("p", "form-error", settings.load_error));
+  if (!settings.models.length) body.append(el("p", "modal-copy", "尚未配置模型。添加第一个模型并测试通过后会自动启用。"));
+  const result = el("div", "model-test-result"); result.hidden = true; result.setAttribute("role", "status");
+  for (const profile of settings.models) {
+    const card = el("section", "model-card"), heading = el("div", "model-card-heading"), copy = el("div", "model-card-copy");
+    copy.append(el("h3", "", profile.name || profile.model), el("p", "", profile.model), el("p", "", profile.base_url));
+    heading.append(copy, el("span", profile.active ? "badge" : "badge gray", profile.active ? "已启用" : "未启用"));
+    const thinking = profile.enable_thinking === false ? "关闭" : profile.enable_thinking === true ? "开启" : "跟随默认";
+    card.append(heading, el("p", "form-note", `深度思考：${thinking} · ${profile.has_api_key ? "已保存 API Key" : "未配置 API Key"}`));
+    const actions = el("div", "model-card-actions");
+    actions.append(button("查看 / 修改", "button small", () => modelEditorDialog(profile)));
+    const activate = button(profile.active ? "当前使用" : "启用", "button small primary", () => modelAction(`/api/manage/chat-models/${profile.id}/activate`, "POST", "正在测试并切换模型…", "模型已启用"));
+    activate.disabled = profile.active; actions.append(activate);
+    const remove = button("删除", "button small danger", () => {
+      const form = el("form");
+      body.replaceChildren(el("p", "modal-copy", `确认删除「${profile.name || profile.model}」？此操作只删除本机保存的模型配置。`), form);
+      const footer = formFooter(form, "删除模型"); footer.submit.className = "button danger";
+      form.querySelector("button").onclick = () => modelSettingsDialog();
+      form.addEventListener("submit", event => { event.preventDefault(); modelAction(`/api/manage/chat-models/${profile.id}`, "DELETE", "正在删除…", "模型已删除"); });
+      form.append(result);
+    });
+    remove.disabled = profile.active; remove.title = profile.active ? "请先启用其他模型再删除" : "删除模型配置";
+    actions.append(remove); card.append(actions); body.append(card);
+  }
+  body.append(result);
+  async function modelAction(path, method, pending, success) {
+    if (modelSaving || mutating) return;
+    modelSaving = true; mutating = true;
+    const controls = [...body.querySelectorAll("button"), $("close-modal")], disabled = controls.map(node => node.disabled);
+    controls.forEach(node => node.disabled = true);
+    result.hidden = false; result.className = "model-test-result"; result.textContent = pending;
+    try {
+      const data = await api(path, {}, method, 60000);
+      if (!data.saved) throw new Error(data.test?.message || "操作未完成，请重试。");
+      await modelSettingsDialog(); toast(success); await refreshState(true);
+    } catch (error) { result.classList.add("failed"); result.textContent = error.message; }
+    finally { modelSaving = false; mutating = false; controls.forEach((node, index) => node.disabled = disabled[index]); }
+  }
+}
+
+function modelEditorDialog(settings = {}) {
+  const body = showDialog(settings.id ? "修改 AI 模型" : "添加 AI 模型", "机器人 · 全部群共用");
+  body.append(button("返回模型列表", "text-link", modelSettingsDialog));
   const form = el("form");
-  form.append(el("p", "modal-copy", "填写服务商提供的模型名称和接口地址。保存时自动发送一条测试消息，测试通过后立即用于群内 @问答。"));
+  form.append(el("p", "modal-copy", "保存时自动发送一条测试消息。第一个模型会自动启用；其他新增模型测试通过后，可在列表中点击启用。"));
+  const name = formField(form, "配置名称", "例如：硅基流动 DeepSeek", settings.name || "", false, 80);
   const base = formField(form, "Base URL", "例如 https://api.siliconflow.cn/v1", settings.base_url, false, 2048);
   base.required = true; base.type = "url";
   form.append(el("p", "form-note", "使用兼容 OpenAI 的 Chat Completions 服务，地址通常以 /v1 结尾。"));
@@ -456,7 +504,6 @@ async function modelSettingsDialog() {
   key.type = "password"; key.spellcheck = false;
   form.append(el("p", "form-note", "密钥仅保存在运行服务的电脑上，页面不会回显。测试消息只发给模型服务，结果显示在此处。"));
   const result = el("div", "model-test-result"); result.setAttribute("role", "status"); result.setAttribute("aria-live", "polite"); result.hidden = true;
-  if (settings.load_error) { result.hidden = false; result.textContent = settings.load_error; }
   form.append(result);
   const footer = formFooter(form, "保存并测试");
   footer.error.setAttribute("role", "alert");
@@ -464,19 +511,22 @@ async function modelSettingsDialog() {
   form.addEventListener("submit", async event => {
     event.preventDefault(); if (modelSaving || mutating) return;
     modelSaving = true; mutating = true;
-    const fields = [base, model, thinking, key, ...form.querySelectorAll("button"), $("close-modal")];
+    const fields = [name, base, model, thinking, key, ...body.querySelectorAll("button"), $("close-modal")];
     fields.forEach(node => node.disabled = true);
     footer.submit.textContent = "正在测试…"; footer.error.textContent = "";
     result.hidden = false; result.className = "model-test-result";
     result.textContent = "正在向模型发送测试消息，请稍候…";
     try {
-      const data = await api("/api/manage/chat-model", {base_url: base.value.trim(), model: model.value.trim(), api_key: key.value.trim() || null, enable_thinking: thinking.value === "default" ? null : thinking.value === "on"}, "POST", 60000);
+      const path = settings.id ? `/api/manage/chat-models/${settings.id}` : "/api/manage/chat-models";
+      const data = await api(path, {name: name.value.trim(), base_url: base.value.trim(), model: model.value.trim(), api_key: key.value.trim() || null, enable_thinking: thinking.value === "default" ? null : thinking.value === "on"}, settings.id ? "PUT" : "POST", 60000);
       if (!data.saved || !data.test?.ok) {
         result.classList.add("failed"); result.textContent = `测试未通过：${data.test?.message || "请检查模型配置。"}\n原有配置保持生效，请修改后重试。`;
         return;
       }
-      key.value = ""; key.placeholder = data.settings.has_api_key ? "已保存密钥；留空沿用，更换地址时请重新填写" : "本地免密服务可留空";
-      base.value = data.settings.base_url;
+      settings = data.profile;
+      $("modal-title").textContent = "修改 AI 模型";
+      key.value = ""; key.placeholder = settings.has_api_key ? "已保存密钥；留空沿用，更换地址时请重新填写" : "本地免密服务可留空";
+      base.value = settings.base_url; name.value = settings.name;
       result.classList.add("passed"); result.textContent = `${data.test.message}\n模型回复：${data.test.reply}`;
       await refreshState(true);
     } catch (error) {

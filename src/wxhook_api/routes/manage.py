@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 from wxhook_api.schemas.requests import ContactSearchRequest
 from wxhook_api.core.chatbot_config import MentionSettings
 from wxhook_api.services.groups import GROUP_PATTERN
-from wxhook_api.services.chat_model import ModelError, ModelSettings
+from wxhook_api.services.chat_model import ModelDefinition, ModelError, ModelSettings
 from wxhook_api.services.wechat_sync import SyncError, records
 
 
@@ -88,13 +88,37 @@ async def configure_mentions(body: MentionSettings, request: Request):
 
 @router.post("/chat-model")
 async def configure_chat_model(body: ModelSettings, request: Request):
+    return await model_mutation(request.app.state.chat_model.configure(body))
+
+
+async def model_mutation(operation):
     try:
-        result = await request.app.state.chat_model.configure(body)
+        result = await operation
     except ModelError as exc:
         result = {"saved": False, "test": {"ok": False, "message": str(exc)}}
     except OSError:
-        raise HTTPException(500, "模型测试通过，但配置保存失败，请检查 data 目录写入权限和磁盘空间。") from None
+        raise HTTPException(500, "模型配置保存失败，请检查 data 目录写入权限和磁盘空间。") from None
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/chat-models")
+async def add_chat_model(body: ModelDefinition, request: Request):
+    return await model_mutation(request.app.state.chat_model.save_profile(body))
+
+
+@router.put("/chat-models/{model_id}")
+async def update_chat_model(model_id: str, body: ModelDefinition, request: Request):
+    return await model_mutation(request.app.state.chat_model.save_profile(body, model_id))
+
+
+@router.post("/chat-models/{model_id}/activate")
+async def activate_chat_model(model_id: str, request: Request):
+    return await model_mutation(request.app.state.chat_model.activate(model_id))
+
+
+@router.delete("/chat-models/{model_id}")
+async def delete_chat_model(model_id: str, request: Request):
+    return await model_mutation(request.app.state.chat_model.delete(model_id))
 
 
 @router.get("/groups/{group}/messages")
