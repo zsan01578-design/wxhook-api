@@ -125,7 +125,7 @@ def test_app_import_and_creation_do_not_require_jieba():
     assert result.returncode == 0, result.stderr
 
 
-async def test_missing_jieba_shows_install_hint_and_keeps_management_and_messages_available(tmp_path, monkeypatch):
+async def test_missing_jieba_uses_offline_fallback_and_keeps_management_available(tmp_path, monkeypatch):
     def no_network(request):
         raise AssertionError("No network needed for management or word cloud")
 
@@ -135,10 +135,9 @@ async def test_missing_jieba_shows_install_hint_and_keeps_management_and_message
         async with LifespanManager(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             await app.state.groups.receive(CallbackEvent.model_validate(event("苹果 苹果", msgid=1)))
             cloud = await client.get(f"/api/manage/groups/{GROUP}/word-cloud")
-            assert cloud.status_code == 503 and cloud.headers["cache-control"] == "no-store"
-            assert "python -m pip install jieba" in cloud.json()["error"]["message"]
+            assert cloud.status_code == 200 and cloud.headers["cache-control"] == "no-store"
+            assert cloud.json()["words"] == [{"text": "苹果", "count": 2}]
             for url in ("/", "/api/manage/state", "/api/manage/chat-model", f"/api/manage/groups/{GROUP}/messages"):
                 assert (await client.get(url)).status_code == 200
-    # A failed computation must not be cached as a successful empty word cloud.
     result = await app.state.groups.word_cloud(GROUP)
     assert result["words"] == [{"text": "苹果", "count": 2}]

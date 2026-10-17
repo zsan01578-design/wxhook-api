@@ -15,17 +15,13 @@ LINK_OR_ID = re.compile(r"https?://\S+|www\.\S+|\bwxid_[\w-]+\b|\b[\w-]+@chatroo
 MENTION = re.compile(r"@[^\s@\u2005]+")
 
 
-class WordCloudUnavailable(RuntimeError):
-    """An optional runtime dependency is missing; other features can keep running."""
-
-
 def frequent_words(messages: list[str], limit: int = 40) -> list[dict]:
     try:
         import jieba
     except ModuleNotFoundError as exc:
         if exc.name != "jieba":
             raise
-        raise WordCloudUnavailable("词云缺少 jieba 分词库。请在运行项目的 Python 环境执行 python -m pip install jieba，安装后重启。") from None
+        jieba = None
     counts = Counter()
     for text in messages:
         text = re.sub(r"^[A-Za-z0-9_.-]{1,256}:\r?\n", "", text)
@@ -35,7 +31,15 @@ def frequent_words(messages: list[str], limit: int = 40) -> list[dict]:
         text = MENTION.sub(" ", LINK_OR_ID.sub(" ", text))
         text = re.sub(r"\[[^\]\n]{1,30}\]", " ", text)
         for chunk in TOKEN.findall(text):
-            words = jieba.cut(chunk, HMM=False) if re.search(r"[\u3400-\u9fff]", chunk) else [chunk]
+            if jieba and re.search(r"[\u3400-\u9fff]", chunk):
+                words = jieba.cut(chunk, HMM=False)
+            elif re.search(r"[\u3400-\u9fff]", chunk):
+                # Keep the feature usable offline. Most WeChat Chinese words are
+                # two characters; this deterministic fallback avoids a network
+                # dependency while retaining useful frequencies.
+                words = (chunk[index:index + 2] for index in range(0, len(chunk), 2))
+            else:
+                words = [chunk]
             for word in words:
                 word = word.strip(".-").lower()
                 if 2 <= len(word) <= 20 and word not in STOP_WORDS and not word.isdigit():
