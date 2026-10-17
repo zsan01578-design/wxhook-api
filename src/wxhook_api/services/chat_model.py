@@ -9,7 +9,7 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel, ConfigDict, SecretStr, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, SecretStr, StrictBool, StringConstraints, field_validator
 
 from wxhook_api.core.config import PROJECT_ROOT
 from wxhook_api.services.chatbot import MentionChatService
@@ -20,6 +20,7 @@ class ModelSettings(BaseModel):
     base_url: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)]
     model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
     api_key: SecretStr | None = None
+    enable_thinking: StrictBool | None = None
 
     @field_validator("base_url")
     @classmethod
@@ -61,11 +62,14 @@ class ChatCompletionsProvider:
         headers = {}
         if self.settings.api_key:
             headers["Authorization"] = "Bearer " + self.settings.api_key.get_secret_value()
+        payload = {"model": self.settings.model, "messages": [{"role": "user", "content": question}], "stream": False}
+        if self.settings.enable_thinking is not None:
+            payload["enable_thinking"] = self.settings.enable_thinking
         try:
             async with asyncio.timeout(45), httpx.AsyncClient(timeout=httpx.Timeout(40, connect=10),
                     transport=self.transport, follow_redirects=False) as client:
                 response = await client.post(self.settings.base_url + "/chat/completions", headers=headers,
-                    json={"model": self.settings.model, "messages": [{"role": "user", "content": question}], "stream": False})
+                    json=payload)
         except (httpx.TimeoutException, TimeoutError):
             raise ModelError("模型响应超时，请检查网络或稍后重试。") from None
         except httpx.RequestError:
@@ -102,6 +106,7 @@ class ChatModelConfiguration:
     def snapshot(self) -> dict:
         return {"base_url": self.settings.base_url if self.settings else "",
                 "model": self.settings.model if self.settings else "",
+                "enable_thinking": self.settings.enable_thinking if self.settings else None,
                 "has_api_key": bool(self.settings and self.settings.api_key),
                 "configured": self.settings is not None, "load_error": self.load_error}
 

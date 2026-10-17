@@ -445,6 +445,13 @@ async function modelSettingsDialog() {
   form.append(el("p", "form-note", "使用兼容 OpenAI 的 Chat Completions 服务，地址通常以 /v1 结尾。"));
   const model = formField(form, "模型名称", "填写服务商的完整模型 ID", settings.model, false, 256);
   model.required = true;
+  const thinkingLabel = el("label", "form-label", "深度思考"), thinking = el("select", "form-input");
+  thinking.id = "model-thinking"; thinkingLabel.htmlFor = thinking.id;
+  [["default", "跟随模型默认"], ["off", "关闭（优先快速回复）"], ["on", "开启"]].forEach(([value, text]) => {
+    const option = el("option", "", text); option.value = value; thinking.append(option);
+  });
+  thinking.value = settings.enable_thinking === false ? "off" : settings.enable_thinking === true ? "on" : "default";
+  form.append(thinkingLabel, thinking, el("p", "form-note", "硅基流动支持切换思考模式的模型可选择关闭；其他服务或不支持切换的模型请选择“跟随模型默认”。"));
   const key = formField(form, "API Key", settings.has_api_key ? "已保存密钥；留空沿用，更换地址时请重新填写" : "填写 API Key；本地免密服务可留空", "", false, 4096);
   key.type = "password"; key.spellcheck = false;
   form.append(el("p", "form-note", "密钥仅保存在运行服务的电脑上，页面不会回显。测试消息只发给模型服务，结果显示在此处。"));
@@ -457,13 +464,13 @@ async function modelSettingsDialog() {
   form.addEventListener("submit", async event => {
     event.preventDefault(); if (modelSaving || mutating) return;
     modelSaving = true; mutating = true;
-    const fields = [base, model, key, ...form.querySelectorAll("button"), $("close-modal")];
+    const fields = [base, model, thinking, key, ...form.querySelectorAll("button"), $("close-modal")];
     fields.forEach(node => node.disabled = true);
     footer.submit.textContent = "正在测试…"; footer.error.textContent = "";
     result.hidden = false; result.className = "model-test-result";
     result.textContent = "正在向模型发送测试消息，请稍候…";
     try {
-      const data = await api("/api/manage/chat-model", {base_url: base.value.trim(), model: model.value.trim(), api_key: key.value.trim() || null}, "POST", 60000);
+      const data = await api("/api/manage/chat-model", {base_url: base.value.trim(), model: model.value.trim(), api_key: key.value.trim() || null, enable_thinking: thinking.value === "default" ? null : thinking.value === "on"}, "POST", 60000);
       if (!data.saved || !data.test?.ok) {
         result.classList.add("failed"); result.textContent = `测试未通过：${data.test?.message || "请检查模型配置。"}\n原有配置保持生效，请修改后重试。`;
         return;

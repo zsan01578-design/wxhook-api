@@ -176,3 +176,41 @@ def test_corrupt_persisted_config_does_not_break_startup(tmp_path, monkeypatch):
     config = ChatModelConfiguration(bot)
     assert bot.provider is None and config.snapshot()["load_error"]
     assert "secret" not in str(config.snapshot())
+
+
+@pytest.mark.parametrize("thinking", [None, False, True])
+async def test_thinking_setting_controls_test_and_actual_answers_and_persists(tmp_path, thinking):
+    calls = []
+
+    def respond(request):
+        calls.append(json.loads(request.content))
+        return completion()
+
+    async with context(tmp_path) as state:
+        config = state.app.state.chat_model
+        config.transport = httpx.MockTransport(respond)
+        response = await state.client.post("/api/manage/chat-model", json={**CONFIG, "enable_thinking": thinking})
+        assert response.json()["saved"]
+        assert response.json()["settings"]["enable_thinking"] is thinking
+        await state.submit(event())
+        assert len(calls) == 2
+        for payload in calls:
+            if thinking is None:
+                assert "enable_thinking" not in payload
+            else:
+                assert payload["enable_thinking"] is thinking
+        restarted = ChatModelConfiguration(MentionChatService(ChatbotOptions()))
+        assert restarted.settings.enable_thinking is thinking
+        assert restarted.snapshot()["enable_thinking"] is thinking
+
+
+async def test_unsupported_thinking_option_failure_preserves_working_configuration(tmp_path):
+    async with context(tmp_path) as state:
+        config = state.app.state.chat_model
+        config.transport = httpx.MockTransport(lambda request: completion())
+        await state.client.post("/api/manage/chat-model", json=CONFIG)
+        previous = config.path.read_bytes()
+        config.transport = httpx.MockTransport(lambda request: httpx.Response(400, json={"error": "unsupported parameter"}))
+        response = await state.client.post("/api/manage/chat-model", json={**CONFIG, "enable_thinking": False})
+        assert not response.json()["saved"] and config.path.read_bytes() == previous
+        assert config.settings.enable_thinking is None
