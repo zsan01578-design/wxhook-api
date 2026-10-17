@@ -5,6 +5,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from wxhook_api.core.callback_diagnostics import rejected_callback
+
 
 class HookTransportError(RuntimeError):
     """The Hook returned an unusable transport response."""
@@ -37,7 +39,12 @@ def install_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError):
-        if request.method == "POST" and any(error.get("type") == "json_invalid" for error in exc.errors()):
+        invalid_json = request.method == "POST" and any(error.get("type") == "json_invalid" for error in exc.errors())
+        if request.url.path.rstrip("/") == "/receiveChatBotMsg":
+            result = rejected_callback(request.app, exc, 400 if invalid_json else 422)
+            if not invalid_json:
+                return JSONResponse(status_code=422, content={"error": {"code": "validation_error", "message": "Hook callback fields are incompatible", "fields": result["fields"]}})
+        if invalid_json:
             return invalid_json_response()
         if request.url.path == "/api/douyin/config":
             # Explain configuration errors without returning rejected values,

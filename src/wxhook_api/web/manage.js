@@ -417,15 +417,27 @@ async function checkConnection() {
 }
 function connectionDialog() {
   const body = showDialog("连接与消息接收", "本机服务"), status = el("p", "modal-copy", $("connection-label").textContent), startup = el("p", "form-note", state.startup?.message || "启动 main.py 后，在原版微信中完成登录。群消息通过 Hook 回调自动接收。"), result = el("p", "form-note"), actions = el("div", "form-actions");
-  actions.append(button("检查连接", "button", async event => { const source = event.currentTarget; source.disabled = true; await checkConnection(); status.textContent = $("connection-label").textContent; source.disabled = false; }), button("启用消息接收", "button primary", async event => {
+  actions.append(button("检查连接", "button", async event => { const source = event.currentTarget; source.disabled = true; await checkConnection(); status.textContent = $("connection-label").textContent; try { callbackInfo(received, await api("/api/callback/status")); } catch (error) { received.textContent = `读取回调诊断失败：${error.message}`; } source.disabled = false; }), button("启用消息接收", "button primary", async event => {
     const source = event.currentTarget; source.disabled = true; result.textContent = "正在设置回调…";
-    try { const data = await api("/set_callback", { url: `http://127.0.0.1:${location.port || (location.protocol === "https:" ? "443" : "80")}/receiveChatBotMsg` }); if (String(data.ret) !== "0") throw new Error(data.retmsg || "Hook 未确认启用成功"); result.textContent = "消息接收已启用，请让目标群发送一条消息以验证回调。"; }
+    try { const data = await api("/set_callback", { url: `http://127.0.0.1:${location.port || (location.protocol === "https:" ? "443" : "80")}/receiveChatBotMsg` }); if (String(data.ret) !== "0") throw new Error(data.retmsg || "Hook 未确认启用成功"); result.textContent = "Hook 已确认设置回调地址。请让目标群发送新消息，再点“检查连接”查看接收与拒收情况。"; }
     catch (error) { result.textContent = `启用失败：${error.message}`; }
     finally { source.disabled = false; }
   }));
   const callbacks = state.callbacks;
-  const received = el("p", "form-note", callbacks ? `本次启动已收到 ${callbacks.total} 条实时回调${callbacks.last_received_at ? `，最近一次：${dateText(callbacks.last_received_at)}` : "。如果群消息只有“微信历史”，请启用消息接收后重新发送链接"}。` : "请更新并重启服务后查看实时回调接收状态。");
+  const received = el("p", "form-note");
+  callbackInfo(received, callbacks);
   body.append(status, startup, received, result, actions);
+}
+
+function callbackInfo(node, data) {
+  if (!data) { node.textContent = "请更新并重启服务后查看实时回调接收状态。"; return; }
+  let text = `本次启动：接收成功 ${data.accepted ?? data.total ?? 0} 条，校验拒收 ${data.rejected ?? 0} 条。`;
+  if (data.last_accepted_at || data.last_received_at) text += ` 最近接收：${dateText(data.last_accepted_at || data.last_received_at)}。`;
+  if (data.last_rejection) {
+    const detail = data.last_rejection.fields.map(item => `${item.field}：${item.error === "missing" ? "缺少字段" : `类型或格式不符（${item.input_type} / ${item.error}）`}`).join("；");
+    text += ` 最近拒收 HTTP ${data.last_rejection.http_status}：${detail}。`;
+  } else if (!(data.accepted ?? data.total)) text += " 尚未验证到实时消息，请在群里发新消息后检查。";
+  node.textContent = text;
 }
 
 async function refreshState(force = false) {

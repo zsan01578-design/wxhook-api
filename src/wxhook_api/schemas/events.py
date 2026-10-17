@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class CallbackEvent(BaseModel):
@@ -14,8 +14,15 @@ class CallbackEvent(BaseModel):
     timestamp: int
     wxid: str
     sender: str
-    roomid: str
+    # Some Hook builds identify group callbacks through wxid alone. The routing
+    # layer already supports this; missing roomid must not reject the message.
+    roomid: str = Field(default="")
     content: str
+
+    @field_validator("roomid", mode="before")
+    @classmethod
+    def empty_roomid(cls, value):
+        return "" if value is None else value
 
     @property
     def extra(self) -> dict[str, Any]:

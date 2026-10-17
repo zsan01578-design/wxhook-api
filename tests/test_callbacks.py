@@ -97,3 +97,53 @@ async def test_callback_url_is_restricted_before_forwarding():
 
     assert response.status_code == 422
     assert calls == []
+
+
+@pytest.mark.parametrize("roomid", ["missing", None])
+async def test_group_callback_without_roomid_can_use_conversation_wxid(roomid):
+    observed = []
+    app = create_app(hook_transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
+    payload = {**EVENT, "wxid": "123456789@chatroom"}
+    if roomid == "missing":
+        payload.pop("roomid")
+    else:
+        payload["roomid"] = roomid
+
+    async def capture(event):
+        observed.append(event)
+
+    app.state.event_dispatcher.register(capture)
+    async with LifespanManager(app), AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/receiveChatBotMsg", json=payload)
+        await asyncio.wait_for(app.state.event_dispatcher._queue.join(), 1)
+        status = (await client.get("/api/callback/status")).json()
+    assert response.status_code == 200 and observed[0].roomid == ""
+    assert observed[0].wxid == "123456789@chatroom"
+    assert status["accepted"] == 1 and status["rejected"] == 0
+
+
+async def test_rejected_callback_reports_field_and_type_without_body_or_values(caplog):
+    app = create_app()
+    payload = {**EVENT, "timestamp": "private-invalid-value", "content": "private-message-text", "wxid": "private-account"}
+    async with LifespanManager(app), AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/receiveChatBotMsg", json=payload)
+        status_response = await client.get("/api/callback/status")
+        status = status_response.json()
+        inbox = (await client.get("/ui/messages")).json()
+    assert response.status_code == 422 and inbox["total"] == 0
+    assert response.json()["error"]["fields"] == [{"field": "timestamp", "error": "int_parsing", "input_type": "string"}]
+    assert status["accepted"] == 0 and status["rejected"] == 1
+    assert status["last_rejection"]["shape"]["content"] == "string"
+    assert status_response.headers["cache-control"] == "no-store"
+    for text in [response.text, status_response.text, caplog.text]:
+        assert all(value not in text for value in ["private-invalid-value", "private-message-text", "private-account"])
+    assert "timestamp:int_parsing" in caplog.text
+
+
+async def test_rejected_callback_invalid_json_keeps_400_and_diagnostic():
+    app = create_app()
+    async with LifespanManager(app), AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/receiveChatBotMsg", content=b'{"content":', headers={"content-type": "application/json"})
+        status = (await client.get("/api/callback/status")).json()
+    assert response.status_code == 400 and response.json() == {"ret": -1, "msg": "invalid json"}
+    assert status["rejected"] == 1 and status["last_rejection"]["http_status"] == 400

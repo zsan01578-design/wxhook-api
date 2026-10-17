@@ -286,7 +286,8 @@ async def test_old_provider_no_longer_silently_drops_non_douyin_links_in_managed
         assert "解析失败" in context.hook_calls[-1][1]["msg"]
 
 
-async def test_management_enabled_bili_card_parses_without_legacy_group_list(tmp_path, monkeypatch):
+@pytest.mark.parametrize("missing_roomid", [False, True])
+async def test_management_enabled_bili_card_parses_without_legacy_group_list(tmp_path, monkeypatch, missing_roomid):
     async with scenario(tmp_path, monkeypatch, settings={"enabled": False, "groups": [], "parser_provider": "parse_video"}) as context:
         await context.client.post("/api/manage/groups", json={"id": GROUP})
         await context.client.patch(f"/api/manage/groups/{GROUP}", json={"douyin_enabled": True, "auto_download": True})
@@ -294,7 +295,17 @@ async def test_management_enabled_bili_card_parses_without_legacy_group_list(tmp
         original = context.service._client
         context.service._client = httpx.AsyncClient(transport=context.service._transport)
         try:
-            job = await context.submit(f"<msg><appmsg><url><![CDATA[{BILI}]]></url></appmsg></msg>")
+            content = f"<msg><appmsg><url><![CDATA[{BILI}]]></url></appmsg></msg>"
+            if missing_roomid:
+                payload = {**EVENT, "wxid": GROUP, "content": content}
+                payload.pop("roomid")
+                response = await context.client.post("/receiveChatBotMsg", json=payload)
+                assert response.status_code == 200
+                await asyncio.wait_for(context.app.state.event_dispatcher._queue.join(), 2)
+                await asyncio.wait_for(context.service._queue.join(), 3)
+                job = context.service.snapshot()["jobs"][0]
+            else:
+                job = await context.submit(content)
             assert job["status"] == "completed", job["error"]
             assert job["delivery_status"] == "sent" and job["platform"] == "bilibili"
             assert [path for path, _ in context.hook_calls] == ["/SendTextMsg", "/send_file_msg", "/SendTextMsg"]

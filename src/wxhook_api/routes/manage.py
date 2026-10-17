@@ -56,7 +56,7 @@ async def state(request: Request):
     settings = service.options.settings
     groups = await manager.groups(settings)
     inbox = request.app.state.message_inbox.snapshot()
-    callbacks = {"total": inbox["total"], "last_received_at": inbox["messages"][0]["received_at"] if inbox["messages"] else ""}
+    callbacks = {**request.app.state.callback_status, "total": inbox["total"], "last_received_at": inbox["messages"][0]["received_at"] if inbox["messages"] else ""}
     media = {"parser_provider": settings.parser_provider, "notify_group": settings.notify_group,
              "send_results": settings.send_results, "feedback_available": service.messenger is not None}
     return JSONResponse({"groups": groups, "blocked_members": await manager.members(blocked_only=True), "startup": request.app.state.launcher_status, "sync": request.app.state.wechat_sync.status, "media": media, "callbacks": callbacks}, headers={"Cache-Control": "no-store"})

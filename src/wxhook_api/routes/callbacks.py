@@ -1,10 +1,11 @@
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from wxhook_api.clients.hook_client import HookClient
 from wxhook_api.core.config import Settings
+from wxhook_api.core.callback_diagnostics import utc_now
 from wxhook_api.routes.dependencies import get_dispatcher, get_hook_client, get_settings, hook_response
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.schemas.requests import CallbackRequest
@@ -29,7 +30,14 @@ async def set_callback(body: CallbackRequest, settings: Settings = Depends(get_s
 
 
 @router.post("/receiveChatBotMsg", responses={200: {"model": RetResponse}})
-async def receive_callback(event: CallbackEvent, dispatcher: EventDispatcher = Depends(get_dispatcher)):
+async def receive_callback(event: CallbackEvent, request: Request, dispatcher: EventDispatcher = Depends(get_dispatcher)):
     if not await dispatcher.enqueue(event):
         return JSONResponse(status_code=503, content={"error": {"code": "callback_queue_full", "message": "callback queue is full"}})
+    request.app.state.callback_status["accepted"] += 1
+    request.app.state.callback_status["last_accepted_at"] = utc_now()
     return {"ret": 0, "retmsg": "accepted"}
+
+
+@router.get("/api/callback/status", tags=["消息回调"])
+async def callback_status(request: Request):
+    return JSONResponse(request.app.state.callback_status, headers={"Cache-Control": "no-store"})

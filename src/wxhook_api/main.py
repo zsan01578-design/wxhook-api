@@ -74,6 +74,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.hook_client = hook_client
     app.state.event_dispatcher = dispatcher
     app.state.message_inbox = inbox
+    app.state.callback_status = {"accepted": 0, "rejected": 0, "last_accepted_at": "", "last_rejection": None}
     app.state.launcher_status = None
     app.state.douyin = douyin_worker
     app.state.groups = groups
