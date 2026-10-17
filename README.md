@@ -74,6 +74,10 @@ git pull origin main
 .\.venv\Scripts\python.exe -m pip install -e .
 ```
 
+如果旧版安装日志显示 `github.com/.../archive/...zip` 返回 HTTP 403，先拉取最新代码再重试。
+当前使用同一提交的 GitHub 官方 `codeload.github.com` 下载地址并校验 SHA-256，仍固定同一解析库源码。
+安装完成可用 `.\.venv\Scripts\python.exe -c "import parse_video_py; print('parse-video-py OK')"` 检查，再重新运行 `main.py`。
+
 资源页面 `/douyin` 选择“parse-video-py（抖音 / 小红书 / B站）”。旧版配置会自动切换到该解析器，保留群名单、
 群/成员黑名单、功能开关和下载目录；在新版页面明确选择并保存其他来源后，会尊重该选择。
 数据库字段和接口路径保留原名 `douyin`，兼容已有配置和文件。
