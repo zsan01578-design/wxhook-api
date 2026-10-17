@@ -8,7 +8,8 @@ let refreshJob, pollTimer, toastTimer, detailToken = 0, mutating = false, connec
 let messagePage = 1, messageQuery = "", messageMeta = {total: 0, has_more: false};
 let ownWxid = "", resetChatScroll = true;
 let modelSaving = false;
-let wordCloud = null, chatSummary = null;
+let wordCloud = null, chatSummary = null, chatRadar = null;
+let groupTools = null, radarDays = 14;
 const chatSignatures = new WeakMap();
 
 function el(tag, className = "", text) {
@@ -54,7 +55,8 @@ async function api(path, body, method = "POST", timeout = 15000) {
   const data = await response.json();
   if (!response.ok) {
     let message = data.error?.message || data.detail || `请求失败（${response.status}）`;
-    if (Array.isArray(message) || (data.error?.code === "validation_error" && !path.startsWith("/api/manage/chat-model") && path !== "/api/manage/chatbot/mentions")) message = "请检查填写内容：群 ID 须以 @chatroom 结尾，成员须填写真实 wxid，名称最多 80 字。";
+    if (path.includes("/tools") && (Array.isArray(message) || data.error?.code === "validation_error")) message = "请检查必填内容、日期与冷却时间，固定回复规则需要填写回复内容。";
+    else if (Array.isArray(message) || (data.error?.code === "validation_error" && !path.startsWith("/api/manage/chat-model") && path !== "/api/manage/chatbot/mentions")) message = "请检查填写内容：群 ID 须以 @chatroom 结尾，成员须填写真实 wxid，名称最多 80 字。";
     throw new Error(message);
   }
   return data;
@@ -63,7 +65,7 @@ const groupPath = id => `/api/manage/groups/${encodeURIComponent(id)}`;
 const memberPath = (group, member) => `${groupPath(group)}/members/${encodeURIComponent(member)}`;
 const current = () => state.groups.find(group => group.id === selectedId);
 const nameOf = group => group.name || group.id;
-const robotEnabled = group => Boolean(group.active && (group.douyin_enabled || group.chat_enabled));
+const robotEnabled = group => Boolean(group.active && (group.douyin_enabled || group.chat_enabled || group.tools_enabled));
 const robotStatus = group => group.blocked ? "已拉黑" : robotEnabled(group) ? "机器人已启用" : "机器人未启用";
 function dateText(value, short = false) {
   if (!value) return "暂无消息";
@@ -276,10 +278,113 @@ function renderInspector(group) {
   } else {
     summarySection.append(el("div", "chat-summary-text", chatSummary.summary), el("p", "inspector-hint", `${chatSummary.message_count} 条成员消息 · 更新于 ${dateText(chatSummary.updated_at, true)}`));
   }
+  const radarSection = renderRadar(chatRadar, group);
   const tip = el("div", "inspector-tip"); tip.append(icon("shield"), el("strong", "", "让群聊保持有序"), el("p", "", "黑名单只停止本系统的自动处理，不会退群、踢人或屏蔽微信消息。成员黑名单仅在所在群生效。"));
   const shortcuts = el("div", "inspector-actions");
   shortcuts.append(button("功能配置", "button small", () => setTab("features"), "settings"), button("群黑名单", "button small", () => blockGroupDialog(group), "shield"));
-  node.replaceChildren(heading, shortcuts, ...rows, noteLabel, el("p", "group-note", group.note || "还没有备注，记录这个群的用途吧。"), cloudSection, summarySection, tip);
+  node.replaceChildren(heading, shortcuts, ...rows, noteLabel, el("p", "group-note", group.note || "还没有备注，记录这个群的用途吧。"), cloudSection, radarSection, summarySection, tip);
+}
+function renderRadar(radar, group) {
+  const section = el("section", "inspector-radar"), heading = el("div", "inspector-heading");
+  heading.append(el("h3", "", "群聊雷达")); section.append(heading);
+  if (!radar || radar.group_id !== group.id || radar.error) {
+    section.append(el("p", "inspector-hint", radar?.error || "正在统计群聊活动…"));
+    return section;
+  }
+  const peak = radar.peak_hour?.count ? `${String(radar.peak_hour.hour).padStart(2, "0")}:00` : "暂无";
+  const day = radar.peak_day?.count ? `${radar.peak_day.date.slice(5)} · ${radar.peak_day.count} 条` : "暂无";
+  const stats = el("div", "radar-stats");
+  [[radar.messages, "消息"], [radar.active_members, "活跃成员"], [peak, "高峰时段"], [day, "最活跃日"]].forEach(([value, label]) => { const item = el("div", "radar-stat"); item.append(el("strong", "", String(value)), el("span", "", label)); stats.append(item); });
+  const chart = el("div", "radar-chart");
+  const max = Math.max(1, ...radar.daily.map(item => item.count));
+  radar.daily.forEach(item => { const bar = el("div", "radar-bar-wrap"), barValue = el("span", "radar-value", item.count ? String(item.count) : ""); bar.title = `${item.date} · ${item.count} 条消息 · ${item.active_members} 位成员`; bar.setAttribute("aria-label", bar.title); bar.style.setProperty("--bar-ratio", item.count / max); const barFill = el("div", "radar-bar"); bar.append(barValue, barFill, el("small", "", item.date.slice(5))); chart.append(bar); });
+  const people = el("div", "radar-people");
+  radar.top_members.slice(0, 5).forEach((person, index) => { const row = el("div", "radar-person"); row.append(memberAvatar(person, index), el("span", "", person.name || person.id), el("strong", "", `${person.count} 条`)); people.append(row); });
+  if (!radar.top_members.length) people.append(el("p", "inspector-hint", "暂无成员发言"));
+  const words = radar.words.length ? radar.words.map(word => `${word.text} ${word.count}`).join(" · ") : "暂无热门词";
+  section.append(stats, el("p", "radar-label", "每日消息量"), chart, el("p", "radar-label", "活跃成员 TOP 5"), people, el("p", "inspector-hint", `热门词：${words} · 统计 ${radar.from} 至 ${radar.to}`));
+  return section;
+}
+function renderRadarPage(group) {
+  const root = $("tab-content"), heading = el("div", "section-heading"), copy = el("div"), periods = el("div", "tool-actions");
+  copy.append(el("h3", "", "群聊雷达"), el("p", "", "按北京时间统计本机已归档记录，排除机器人消息；热门词取最近 1000 条成员文本。"));
+  [7, 14, 30].forEach(days => { const control = button(`${days} 天`, `button small${days === radarDays ? " primary" : ""}`, () => { radarDays = days; detailVersion = ""; loadDetail().catch(error => toast(error.message, true)); }); control.setAttribute("aria-pressed", String(days === radarDays)); periods.append(control); });
+  heading.append(copy, periods);
+  const chart = renderRadar(chatRadar, group); chart.classList.add("radar-expanded");
+  const hourly = el("section", "tool-card"), cells = el("div", "radar-hours");
+  hourly.append(el("h3", "", "24 小时活跃分布"), el("p", "tool-description", "颜色越深，累计消息越多。"));
+  const max = Math.max(1, ...(chatRadar?.hourly || []).map(item => item.count));
+  (chatRadar?.hourly || []).forEach(item => { const cell = el("div", "radar-hour"); cell.style.backgroundColor = `rgba(7, 173, 103, ${.06 + .6 * item.count / max})`; cell.title = `${item.hour}:00–${item.hour}:59 · ${item.count} 条`; cell.append(el("span", "", `${String(item.hour).padStart(2, "0")}:00`), el("strong", "", `${item.count} 条`)); cells.append(cell); });
+  hourly.append(cells);
+  root.replaceChildren(heading, chart, hourly);
+}
+const toolsPath = group => `${groupPath(group)}/tools`;
+async function reloadTools(group) {
+  const data = await api(toolsPath(group));
+  if (selectedId === group && tab === "tools") { groupTools = data; detailVersion = ""; renderTools(current()); }
+}
+async function toolsAction(source, group, path, body, method = "POST", message = "已保存") {
+  source.disabled = true;
+  try { await api(`${toolsPath(group)}${path}`, body, method, 65000); await reloadTools(group); toast(message); }
+  catch (error) { toast(error.message, true); }
+  finally { if (source.isConnected) source.disabled = false; }
+}
+function toolCard(title, description) {
+  const card = el("section", "tool-card"); card.append(el("h3", "", title), el("p", "tool-description", description)); return card;
+}
+function renderTools(group) {
+  const root = $("tab-content"), data = groupTools;
+  if (!data || data.group_id !== group.id || data.error) { root.replaceChildren(empty("群工具暂时无法加载", data?.error || "请刷新后重试。")); return; }
+  const reports = toolCard("周报 / 月报", "总结上一完整自然周（周一至周日）或自然月；开启自动生成后会在本机保存，群里可 @机器人发送“周报”或“月报”。");
+  const reportActions = el("div", "tool-actions");
+  [["week", "生成上周周报"], ["month", "生成上月月报"]].forEach(([kind, label]) => reportActions.append(button(label, "button small", event => toolsAction(event.currentTarget, group.id, `/reports/${kind}`, {}, "POST", "报表已生成"))));
+  const auto = el("label", "tool-check"), checkbox = el("input"); checkbox.type = "checkbox"; checkbox.checked = data.auto_reports;
+  checkbox.addEventListener("change", event => toolsAction(event.currentTarget, group.id, "/preferences", {auto_reports: checkbox.checked,task_reminders:data.task_reminders}, "PATCH")); auto.append(checkbox, document.createTextNode("自动生成周报 / 月报")); reportActions.append(auto); reports.append(reportActions);
+  data.reports.slice(0, 6).forEach(report => { const details = el("details", "tool-report"), summary = el("summary", "", `${report.kind === "week" ? "周报" : "月报"} · ${report.start_date} 至 ${report.end_date}`); details.append(summary, el("p", "tool-report-content", report.content), el("p", "tool-description", `${report.message_count} 条成员文本 · 选取 ${report.sampled_count} 条生成 · ${dateText(report.updated_at, true)}`)); reports.append(details); });
+  if (!data.reports.length) reports.append(el("p", "tool-description", "还没有报表，可点击生成。"));
+  const rules = toolCard("关键词规则", "实时文字消息按关键词匹配，可记录命中或回复固定内容。每条消息最多触发一条规则，支持冷却时间，并遵循群总开关和黑名单。");
+  rules.append(button("添加规则", "button small", () => ruleDialog(group.id)));
+  data.rules.forEach(rule => { const row = el("div", "tool-row"), copy = el("div", "tool-row-copy"), actions = el("div", "tool-actions"); copy.append(el("strong", "", rule.name), el("p", "", `${rule.enabled ? "已启用" : "已关闭"} · ${rule.match_mode === "exact" ? "完全匹配" : "包含"}“${rule.keyword}” · ${rule.action === "reply" ? "固定回复" : "记录命中"} · 冷却 ${rule.cooldown} 秒`)); actions.append(button("编辑", "button small", () => ruleDialog(group.id, rule)), button("删除", "button small", () => confirmDialog("删除关键词规则？", rule.name, () => api(`${toolsPath(group.id)}/rules/${rule.id}`, {}, "DELETE").then(() => reloadTools(group.id)), "删除", true))); row.append(copy, actions); rules.append(row); });
+  const tasks = toolCard("群待办", "手动添加，或从最近 7 天最多 200 条成员文本中提取候选待办，核对后保存。群里可查询“本群待办”与“到期待办”。");
+  const taskActions = el("div", "tool-actions"); taskActions.append(button("添加待办", "button small", () => taskDialog(group.id)), button("AI 提取待办", "button small primary", event => extractTaskDialog(event.currentTarget, group.id))); tasks.append(taskActions);
+  const remindLabel = el("label", "tool-check"), remind = el("input"); remind.type = "checkbox"; remind.checked = data.task_reminders; remind.addEventListener("change", event => toolsAction(event.currentTarget, group.id, "/preferences", {auto_reports:data.auto_reports,task_reminders:remind.checked}, "PATCH")); remindLabel.append(remind, document.createTextNode("每日 09:00 后在群内提醒到期待办（每天最多一条）")); tasks.append(remindLabel);
+  data.tasks.slice(0, 100).forEach(task => { const overdue = task.status === "open" && task.due_date && task.due_date <= data.today, row = el("div", `tool-row${overdue ? " task-due" : ""}`), copy = el("div", "tool-row-copy"), actions = el("div", "tool-actions"); copy.append(el("strong", "", task.title), el("p", "", `${task.owner || "未分配"} · ${task.due_date || "无截止日期"}${overdue ? " · 已到期" : ""} · ${{open: "待完成", done: "已完成", cancelled: "已取消"}[task.status]}`)); actions.append(button(task.status === "open" ? "完成" : "重新打开", "button small", event => toolsAction(event.currentTarget, group.id, `/tasks/${task.id}`, {status: task.status === "open" ? "done" : "open"}, "PATCH"))); if (task.status === "open") actions.append(button("取消", "button small", event => toolsAction(event.currentTarget, group.id, `/tasks/${task.id}`, {status: "cancelled"}, "PATCH"))); row.append(copy, actions); tasks.append(row); });
+  if (!data.tasks.length) tasks.append(el("p", "tool-description", "暂无待办。"));
+  else if (data.tasks.length > 100) tasks.append(el("p", "tool-description", `共有 ${data.tasks.length} 条待办，当前展示前 100 条，优先展示未完成任务。`));
+  const hits = toolCard("最近关键词命中", "显示最近 30 条触发记录，重复回调不会重复回复。");
+  data.hits.forEach(hit => { const row = el("div", "tool-hit"); row.append(el("strong", "", `${hit.rule_name} · ${{recorded:"已记录",sending:"发送中 / 未确认",sent:"已发送",unknown:"发送未确认",skipped:"已停止"}[hit.status] || hit.status}`), el("p", "", hit.content), el("small", "", `${hit.sender} · ${dateText(hit.created_at, true)}`)); hits.append(row); });
+  if (!data.hits.length) hits.append(el("p", "tool-description", "暂无命中记录。"));
+  root.replaceChildren(reports, tasks, rules, hits);
+}
+function selectField(form, label, values, value) {
+  const caption = el("label", "form-label", label), select = el("select", "form-input");
+  select.id = `select-${Math.random().toString(36).slice(2)}`; caption.htmlFor = select.id;
+  values.forEach(([id, text]) => { const option = el("option", "", text); option.value = id; select.append(option); }); select.value = value; form.append(caption, select); return select;
+}
+function ruleDialog(group, rule = {}) {
+  const body = showDialog(rule.id ? "编辑关键词规则" : "添加关键词规则"), form = el("form");
+  const name = formField(form, "规则名称", "例如：故障记录", rule.name || ""), keyword = formField(form, "关键词", "填写要匹配的文字", rule.keyword || "", false, 200);
+  const mode = selectField(form, "匹配方式", [["contains", "包含关键词"], ["exact", "完全匹配"]], rule.match_mode || "contains"), action = selectField(form, "触发动作", [["record", "仅记录命中"], ["reply", "发送固定回复"]], rule.action || "record");
+  const reply = formField(form, "固定回复内容", "动作选择固定回复时必填", rule.reply || "", true, 2000), cooldown = formField(form, "冷却时间（秒）", "10～86400", String(rule.cooldown || 60)); cooldown.type = "number"; cooldown.min = "10"; cooldown.max = "86400";
+  const enabled = selectField(form, "规则状态", [["false", "关闭"], ["true", "启用"]], String(Boolean(rule.enabled)));
+  name.required = keyword.required = true; const footer = formFooter(form); body.append(form);
+  bindForm(form, footer, async () => { if (action.value === "reply" && !reply.value.trim()) throw new Error("请填写固定回复内容"); await api(`${toolsPath(group)}/rules${rule.id ? `/${rule.id}` : ""}`, {name:name.value,keyword:keyword.value,match_mode:mode.value,action:action.value,reply:reply.value,cooldown:Number(cooldown.value),enabled:enabled.value === "true"}, rule.id ? "PUT" : "POST"); await reloadTools(group); });
+}
+function taskDialog(group, candidate = {}) {
+  const body = showDialog("添加群待办"), form = el("form"), title = formField(form, "待办事项", "需要完成什么", candidate.title || "", false, 200), owner = formField(form, "负责人", "可留空", candidate.owner || ""), due = formField(form, "截止日期", "", candidate.due_date || ""); due.type = "date"; title.required = true;
+  if (candidate.source_content) form.append(el("p", "tool-source", `来源消息：${candidate.source_content}`));
+  const footer = formFooter(form, "保存待办"); body.append(form);
+  bindForm(form, footer, async () => { await api(`${toolsPath(group)}/tasks`, {title:title.value,owner:owner.value,due_date:due.value,source_id:candidate.source_id || null}); await reloadTools(group); });
+}
+async function extractTaskDialog(source, group) {
+  source.disabled = true; source.textContent = "提取中…";
+  try {
+    const result = await api(`${toolsPath(group)}/tasks/extract`, {}, "POST", 65000);
+    const body = showDialog("待办候选项"); body.append(el("p", "modal-copy", "核对原始消息后，点击保存并补充负责人或日期。"));
+    result.candidates.forEach(candidate => { const row = el("div", "tool-row"), copy = el("div", "tool-row-copy"); copy.append(el("strong", "", candidate.title), el("p", "", `${candidate.owner || "未分配"} · ${candidate.due_date || "无截止日"}`), el("p", "tool-source", candidate.source_content)); row.append(copy, button("核对并保存", "button small", () => taskDialog(group, candidate))); body.append(row); });
+    if (!result.candidates.length) body.append(el("p", "modal-copy", "没有发现明确的待办。"));
+  } catch (error) { toast(error.message, true); }
+  finally { if (source.isConnected) { source.disabled = false; source.textContent = "AI 提取待办"; } }
 }
 function renderWordCloud(words) {
   const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
@@ -411,27 +516,33 @@ async function loadDetail() {
   const group = current();
   if (!group || view !== "groups") return;
   const token = ++detailToken, requestedTab = tab, requestedPage = messagePage, requestedQuery = messageQuery;
-  const [people, inbox, history, cloud, summaryResponse] = await Promise.all([
+  const [people, inbox, history, cloud, summaryResponse, radarResponse, toolsResponse] = await Promise.all([
     api(`${groupPath(group.id)}/members`),
     requestedTab === "messages" ? api(`${groupPath(group.id)}/messages?page=${requestedPage}&q=${encodeURIComponent(requestedQuery)}`) : Promise.resolve(null),
     requestedTab === "audit" ? api(`/api/manage/audit?group=${encodeURIComponent(group.id)}`) : Promise.resolve(null),
     api(`${groupPath(group.id)}/word-cloud`).catch(error => ({group_id: group.id, error: error.message || "词云暂时无法加载，稍后自动重试。"})),
-    api(`${groupPath(group.id)}/summary`).catch(() => ({summary: null}))
+    api(`${groupPath(group.id)}/summary`).catch(() => ({summary: null})),
+    api(`${groupPath(group.id)}/radar?days=${radarDays}`).catch(error => ({group_id: group.id, error: error.message})),
+    requestedTab === "tools" ? api(toolsPath(group.id)).catch(error => ({group_id: group.id, error: error.message})) : Promise.resolve(null)
   ]);
   if (token !== detailToken || group.id !== selectedId || requestedTab !== tab || view !== "groups") return;
   members = people.members;
   wordCloud = cloud;
   chatSummary = summaryResponse.summary;
+  chatRadar = radarResponse;
+  groupTools = toolsResponse;
   messages = inbox?.messages || [];
   if (inbox) messageMeta = inbox;
   audit = history?.events || [];
-  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, cloud, chatSummary, tab, state.media, ownWxid, state.chatbot]);
+  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, cloud, chatSummary, chatRadar, groupTools, tab, state.media, ownWxid, state.chatbot]);
   if (version === detailVersion) return;
   detailVersion = version;
   renderHeader(current()); renderInspector(current());
   if (tab === "features") renderFeatures(current());
   else if (tab === "members") renderMembers(current());
   else if (tab === "messages") renderMessages();
+  else if (tab === "radar") renderRadarPage(current());
+  else if (tab === "tools") renderTools(current());
   else renderAudit();
 }
 

@@ -21,7 +21,7 @@ from wxhook_api.core.chatbot_config import load_chatbot_options
 from wxhook_api.core.douyin_config import load_douyin_options
 from wxhook_api.core.errors import install_exception_handlers
 from wxhook_api.core.runtime import source_revision
-from wxhook_api.routes import account, callbacks, contacts, douyin, health, history, manage, media, messages, querydb, ui
+from wxhook_api.routes import account, callbacks, contacts, douyin, group_tools, health, history, manage, media, messages, querydb, ui
 from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.chatbot import MentionChatService
 from wxhook_api.services.chat_model import ChatModelConfiguration
@@ -29,6 +29,7 @@ from wxhook_api.services.chat_summary import ChatSummaryService
 from wxhook_api.services.douyin_delivery import DouyinMessenger
 from wxhook_api.services.events import EventDispatcher
 from wxhook_api.services.groups import GroupManager
+from wxhook_api.services.group_tools import GroupToolsService
 from wxhook_api.services.inbox import MessageInbox
 from wxhook_api.services.wechat_sync import SyncOptions, WeChatSync
 
@@ -49,9 +50,13 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     model_configuration = ChatModelConfiguration(chatbot)
     summary_service = ChatSummaryService(groups, model_configuration, chatbot.identity)
     chatbot.summary_service = summary_service
+    tools_service = GroupToolsService(groups, model_configuration, chatbot)
+    chatbot.tools_service = tools_service
 
     async def automatic_message(event):
         if await chatbot.receive(event):
+            return
+        if await tools_service.receive(event):
             return
         await douyin_worker.receive(event)
 
@@ -70,6 +75,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             await groups.start(douyin_worker.options.settings.groups)
             await douyin_worker.start()
             await chatbot.start(app.state.hook_client)
+            await tools_service.start()
             summary_service.bot_wxid = chatbot.identity
             await summary_service.start()
             await dispatcher.start()
@@ -81,6 +87,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
                 await dispatcher.stop(settings.shutdown_timeout)
             finally:
                 try:
+                    await tools_service.stop()
                     await summary_service.stop()
                     try:
                         await chatbot.stop()
@@ -105,11 +112,12 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.chatbot = chatbot
     app.state.chat_model = model_configuration
     app.state.chat_summary = summary_service
+    app.state.group_tools = tools_service
     app.state.runtime_revision = source_revision()
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
     install_exception_handlers(app)
     app.add_exception_handler(sqlite3.Error, manage.storage_error)
-    for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router, douyin.router, manage.router):
+    for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router, douyin.router, manage.router, group_tools.router):
         app.include_router(router)
     app.mount("/ui/assets", StaticFiles(directory=ui.WEB_ROOT), name="message-assets")
     return app

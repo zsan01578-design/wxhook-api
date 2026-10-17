@@ -59,6 +59,9 @@ async def state(request: Request):
     service = request.app.state.douyin
     settings = service.options.settings
     groups = await manager.groups(settings)
+    tool_groups = await request.app.state.group_tools.enabled_groups()
+    for group in groups:
+        group["tools_enabled"] = group["id"] in tool_groups
     inbox = request.app.state.message_inbox.snapshot()
     callbacks = {**request.app.state.callback_status, "total": inbox["total"], "last_received_at": inbox["messages"][0]["received_at"] if inbox["messages"] else ""}
     media = {"parser_provider": settings.parser_provider, "notify_group": settings.notify_group,
@@ -130,6 +133,11 @@ async def messages(group: GroupId, request: Request, page: int = Query(1, ge=1),
 @router.get("/groups/{group}/word-cloud")
 async def word_cloud(group: GroupId, request: Request):
     return JSONResponse(await request.app.state.groups.word_cloud(group, bot_wxid=request.app.state.chatbot.identity), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/groups/{group}/radar")
+async def radar(group: GroupId, request: Request, days: int = Query(14, ge=1, le=30)):
+    return JSONResponse(await request.app.state.groups.radar(group, bot_wxid=request.app.state.chatbot.identity, days=days), headers={"Cache-Control": "no-store"})
 
 
 @router.get("/groups/{group}/summary")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -419,6 +419,85 @@ class GroupManager:
         while len(self._word_cloud_cache) > 32:
             self._word_cloud_cache.popitem(last=False)
         return result
+
+    async def radar(self, group: str, *, bot_wxid: str = "", days: int = 14) -> dict:
+        """Return local activity statistics for a group without calling Hook or a model."""
+        days = max(1, min(int(days), 30))
+        china = timezone(timedelta(hours=8))
+        today = datetime.now(china).date()
+        start_local = datetime.combine(today - timedelta(days=days - 1), datetime.min.time(), tzinfo=china)
+        start_timestamp = int(start_local.timestamp())
+        end_timestamp = int((datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=china)).timestamp())
+
+        def read():
+            with self._connect() as db:
+                account_row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
+                identity = account_row[0] if account_row else bot_wxid
+                rows = db.execute("""SELECT sender,type,timestamp,content,
+                    json_extract(raw_json,'$.is_self') AS is_self
+                    FROM chat_messages WHERE group_id=? AND type<10000 AND timestamp>=? AND timestamp<?
+                    ORDER BY timestamp ASC,id ASC""", (group, start_timestamp, end_timestamp))
+                member_names = {row["id"]: (row["name"] or row["wechat_name"] or row["id"])
+                                for row in db.execute("SELECT id,name,wechat_name FROM members WHERE group_id=?", (group,))}
+                daily = {str(today - timedelta(days=offset)): {"date": str(today - timedelta(days=offset)), "count": 0, "text_count": 0, "active_members": set()}
+                         for offset in range(days - 1, -1, -1)}
+                hourly = [0] * 24
+                members = {}
+                texts = deque(maxlen=1000)
+                total = text_total = 0
+                for row in rows:
+                    sender = row["sender"] or ""
+                    if row["is_self"] in (True, 1, "1", "true") or (identity and sender == identity):
+                        continue
+                    if identity and sender in ("", group) and str(row["content"] or "").startswith((identity + ":\n", identity + ":\r\n")):
+                        continue
+                    timestamp = int(row["timestamp"] or 0)
+                    local = datetime.fromtimestamp(timestamp, china)
+                    day = str(local.date())
+                    if day not in daily:
+                        continue
+                    total += 1
+                    daily[day]["count"] += 1
+                    hourly[local.hour] += 1
+                    if sender and sender != group:
+                        entry = members.setdefault(sender, {"id": sender, "name": member_names.get(sender, sender), "count": 0, "last_seen": ""})
+                        entry["count"] += 1
+                        entry["last_seen"] = max(entry["last_seen"], datetime.fromtimestamp(timestamp, timezone.utc).isoformat())
+                        daily[day]["active_members"].add(sender)
+                    if int(row["type"] or 0) == 1:
+                        text_total += 1
+                        texts.append(str(row["content"] or "")[:2000])
+                        daily[day]["text_count"] += 1
+                return {
+                    "daily": [{**item, "active_members": len(item["active_members"])} for item in daily.values()],
+                    "hourly": [{"hour": hour, "count": count} for hour, count in enumerate(hourly)],
+                    "members": sorted(members.values(), key=lambda item: (-item["count"], item["name"]))[:10],
+                    "active_member_count": len(members),
+                    "texts": list(texts),
+                    "total": total,
+                    "text_total": text_total,
+                }
+
+        async with self._lock:
+            raw = await asyncio.to_thread(read)
+        words = await asyncio.to_thread(frequent_words, raw.pop("texts"))
+        peak_hour = max(raw["hourly"], key=lambda item: item["count"]) if raw["hourly"] else {"hour": 0, "count": 0}
+        peak_day = max(raw["daily"], key=lambda item: item["count"]) if raw["daily"] else {"date": "", "count": 0}
+        return {
+            "group_id": group,
+            "days": days,
+            "from": str(start_local.date()),
+            "to": str(today),
+            "messages": raw["total"],
+            "text_messages": raw["text_total"],
+            "active_members": raw["active_member_count"],
+            "daily": raw["daily"],
+            "hourly": raw["hourly"],
+            "top_members": raw["members"],
+            "words": words[:8],
+            "peak_hour": peak_hour,
+            "peak_day": peak_day,
+        }
 
     async def summary_messages(self, group: str, summary_date: str, *, bot_wxid: str = "") -> list[dict]:
         """Return today's text messages in Asia/Shanghai, excluding the bot."""

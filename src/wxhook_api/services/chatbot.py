@@ -87,6 +87,7 @@ class MentionChatService:
         self._names_lock = asyncio.Lock()
         self._profile_names: tuple[str, ...] = ()
         self.summary_service = None
+        self.tools_service = None
 
     @property
     def identity(self) -> str:
@@ -242,6 +243,13 @@ class MentionChatService:
         if len(question) > 8000:
             return "问题太长了，请缩短后重新 @ 我。"
         compact_question = re.sub(r"\s+", "", question or "")
+        if self.tools_service:
+            try:
+                result = await self.tools_service.chat_command(question, group)
+                if result is not None:
+                    return result
+            except Exception:
+                return "暂时无法读取群工具结果，请在管理页检查模型配置和群工具。"
         if re.fullmatch(r"(?:今天|今日)?(?:聊天)?总结[。！!？?]?", compact_question) and self.summary_service:
             try:
                 result = await self.summary_service.get(group)
