@@ -22,6 +22,17 @@ def report_period(kind: str, today: date | None = None) -> tuple[date, date]:
     return (end - timedelta(days=1)).replace(day=1), end
 
 
+def task_deadline(body):
+    if body.get("due_at"):
+        due = datetime.fromisoformat(body["due_at"])
+        due = due.replace(tzinfo=CHINA) if due.tzinfo is None else due.astimezone(CHINA)
+        return due.date().isoformat(), due.timestamp()
+    if body.get("due_date"):
+        due = datetime.combine(date.fromisoformat(body["due_date"]), datetime.max.time().replace(microsecond=0), CHINA)
+        return due.date().isoformat(), due.timestamp()
+    return "", None
+
+
 class GroupToolsService:
     def __init__(self, groups, models, chatbot):
         self.groups, self.models, self.chatbot = groups, models, chatbot
@@ -72,6 +83,22 @@ class GroupToolsService:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(group_tool_preferences)")}
             if "task_reminders" not in columns:
                 db.execute("ALTER TABLE group_tool_preferences ADD COLUMN task_reminders INTEGER NOT NULL DEFAULT 0")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(group_tasks)")}
+            fields = {"due_at": "REAL", "creator_id": "TEXT NOT NULL DEFAULT ''",
+                      "creator_name": "TEXT NOT NULL DEFAULT '未知（历史记录）'",
+                      "source_kind": "TEXT NOT NULL DEFAULT 'manual'", "reminder_id": "TEXT",
+                      "completed_at": "TEXT NOT NULL DEFAULT ''", "completion_reason": "TEXT NOT NULL DEFAULT ''",
+                      "digest_attempted_at": "TEXT NOT NULL DEFAULT ''"}
+            for field, definition in fields.items():
+                if field not in columns:
+                    db.execute(f"ALTER TABLE group_tasks ADD COLUMN {field} {definition}")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS group_tasks_reminder ON group_tasks(reminder_id) WHERE reminder_id IS NOT NULL")
+            db.execute("CREATE INDEX IF NOT EXISTS group_tasks_due ON group_tasks(status,due_at)")
+            for row in db.execute("SELECT id,due_date FROM group_tasks WHERE due_at IS NULL AND due_date<>''").fetchall():
+                _, deadline = task_deadline(dict(due_date=row["due_date"]))
+                db.execute("UPDATE group_tasks SET due_at=? WHERE id=?", (deadline, row["id"]))
+            db.execute("UPDATE group_tasks SET completed_at=updated_at WHERE status='done' AND completed_at=''")
+            db.execute("UPDATE group_tasks SET source_kind='ai' WHERE source_id IS NOT NULL AND reminder_id IS NULL")
         await self.db(initialize)
         await self.reminders.start()
         self._worker = asyncio.create_task(self._run_rules())
@@ -94,7 +121,12 @@ class GroupToolsService:
                 "reports": [dict(row) for row in db.execute("SELECT * FROM group_reports WHERE group_id=? ORDER BY start_date DESC,kind LIMIT 12", (group,))],
                 "rules": [{**dict(row), "enabled": bool(row["enabled"])} for row in db.execute("SELECT * FROM keyword_rules WHERE group_id=? ORDER BY name,id", (group,))],
                 "hits": [dict(row) for row in db.execute("SELECT * FROM keyword_hits WHERE group_id=? ORDER BY id DESC LIMIT 30", (group,))],
-                "tasks": [dict(row) for row in db.execute("SELECT * FROM group_tasks WHERE group_id=? ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'done' THEN 1 ELSE 2 END,CASE WHEN due_date='' THEN 1 ELSE 0 END,due_date,created_at DESC", (group,))],
+                "tasks": [dict(row) for row in db.execute("""SELECT t.*,COALESCE(NULLIF(m.wechat_name,''),NULLIF(m.name,''),t.creator_name) AS creator_display_name,
+                    r.status AS reminder_status FROM group_tasks t
+                    LEFT JOIN members m ON m.group_id=t.group_id AND m.id=t.creator_id
+                    LEFT JOIN member_reminders r ON r.id=t.reminder_id
+                    WHERE t.group_id=? ORDER BY CASE t.status WHEN 'open' THEN 0 WHEN 'done' THEN 1 ELSE 2 END,
+                    t.due_at IS NULL,t.due_at,t.created_at DESC""", (group,))],
                 "today": datetime.now(CHINA).date().isoformat(),
             }
         return await self.db(read)
@@ -171,6 +203,7 @@ class GroupToolsService:
                         self.last_error = "自动报表生成失败，将稍后重试。"
 
     async def due_reminders(self):
+        await self.complete_due_tasks()
         today = datetime.now(CHINA).date().isoformat()
         groups = await self.db(lambda db: [row[0] for row in db.execute("SELECT group_id FROM group_tool_preferences WHERE task_reminders=1")])
         for group in groups:
@@ -182,10 +215,14 @@ class GroupToolsService:
                 pref = db.execute("SELECT task_reminders FROM group_tool_preferences WHERE group_id=?", (group,)).fetchone()
                 if not pref or not pref[0]:
                     return []
-                tasks = [dict(row) for row in db.execute("SELECT title,owner,due_date FROM group_tasks WHERE group_id=? AND status='open' AND due_date<>'' AND due_date<=? ORDER BY due_date LIMIT 20", (group, today))]
+                tasks = [dict(row) for row in db.execute("""SELECT id,title,owner,due_date FROM group_tasks WHERE group_id=?
+                    AND (status='open' OR (status='done' AND completion_reason='deadline'))
+                    AND reminder_id IS NULL AND digest_attempted_at='' AND due_at<=? ORDER BY due_at LIMIT 20""", (group, datetime.now(CHINA).timestamp()))]
                 if not tasks:
                     return []
                 result = db.execute("INSERT INTO group_tool_reminders VALUES (?,?,'sending') ON CONFLICT(group_id) DO UPDATE SET reminder_date=excluded.reminder_date,status='sending' WHERE reminder_date<>excluded.reminder_date", (group, today)).rowcount
+                if result:
+                    db.executemany("UPDATE group_tasks SET digest_attempted_at=? WHERE id=?", [(now(), task["id"]) for task in tasks])
                 return tasks if result else []
             tasks = await self.db(claim)
             if not tasks:
@@ -193,7 +230,7 @@ class GroupToolsService:
             status = "skipped"
             enabled = await self.db(lambda db: db.execute("SELECT task_reminders FROM group_tool_preferences WHERE group_id=?", (group,)).fetchone())
             if self.groups.allowed(group) and enabled and enabled[0]:
-                text = "待办到期提醒：\n" + "\n".join(f"{item['title']}（{item['owner'] or '未分配'} / {item['due_date']}）" for item in tasks)
+                text = "待办到期提醒（已自动完成）：\n" + "\n".join(f"{item['title']}（{item['owner'] or '未分配'} / {item['due_date']}）" for item in tasks)
                 try:
                     await self.chatbot._messenger.text(group, text[:3500])
                     status = "sent"
@@ -301,9 +338,53 @@ class GroupToolsService:
             finally:
                 self._queue.task_done()
 
-    async def save_task(self, group, body):
-        task_id = uuid4().hex
+    def record_reminder_task(self, db, reminder):
+        member = db.execute("SELECT wechat_name,name FROM members WHERE group_id=? AND id=?", (reminder["group_id"], reminder["sender"])).fetchone()
+        name = (member[0] or member[1]) if member else ""
+        due_date = datetime.fromtimestamp(reminder["due_at"], CHINA).date().isoformat()
+        db.execute("""INSERT OR IGNORE INTO group_tasks
+            (id,group_id,title,owner,due_date,status,created_at,updated_at,due_at,creator_id,creator_name,source_kind,reminder_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,'reminder',?)""",
+            (reminder["id"], reminder["group_id"], reminder["title"], name or reminder["sender"], due_date,
+             "cancelled" if reminder["status"] == "cancelled" else "open", reminder["created_at"], reminder["updated_at"],
+             reminder["due_at"], reminder["sender"], name or reminder["sender"], reminder["id"]))
+
+    def check_reminder_capacity(self, db, group, sender):
+        count = db.execute("SELECT count(*),sum(sender=?) FROM member_reminders WHERE group_id=? AND status='pending'", (sender, group)).fetchone()
+        if count[0] >= 200 or (count[1] or 0) >= 50:
+            raise ValueError("本群待提醒事项已达上限（每人50条、每群200条），请先取消部分提醒。")
+
+    async def save_task(self, group, body, task_id=None):
+        due_date, due_at = task_deadline(body)
         def save(db):
+            if task_id is not None:
+                task = db.execute("SELECT * FROM group_tasks WHERE group_id=? AND id=?", (group, task_id)).fetchone()
+                if not task:
+                    return None
+                if task["reminder_id"] and due_at is None:
+                    raise ValueError("群提醒待办必须保留截止时间。")
+                reopen = task["status"] == "done" and task["completion_reason"] == "deadline" and due_at is not None and due_at > datetime.now(CHINA).timestamp()
+                if task["reminder_id"]:
+                    reminder = db.execute("SELECT * FROM member_reminders WHERE id=?", (task["reminder_id"],)).fetchone()
+                    status = reminder["status"]
+                    if status == "sending":
+                        raise ValueError("提醒正在发送，请稍后修改。")
+                    if due_at != task["due_at"] and (task["status"] == "open" or reopen):
+                        if due_at <= datetime.now(CHINA).timestamp():
+                            raise ValueError("请将群提醒修改为未来的截止时间。")
+                        if status != "pending":
+                            self.check_reminder_capacity(db, group, reminder["sender"])
+                        status = "pending"
+                    db.execute("UPDATE member_reminders SET title=?,due_at=?,status=?,updated_at=? WHERE id=?",
+                               (body["title"], due_at, status, now(), task["reminder_id"]))
+                db.execute("UPDATE group_tasks SET title=?,owner=?,due_date=?,due_at=?,updated_at=? WHERE id=? AND group_id=?",
+                           (body["title"], body["owner"], due_date, due_at, now(), task_id, group))
+                if due_at != task["due_at"]:
+                    db.execute("UPDATE group_tasks SET digest_attempted_at='' WHERE id=?", (task_id,))
+                if reopen:
+                    db.execute("UPDATE group_tasks SET status='open',completed_at='',completion_reason='' WHERE id=?", (task_id,))
+                self.groups._audit(db, group, body["title"], "修改群待办")
+                return task_id
             source = body.get("source_id")
             if source is not None and not db.execute("SELECT 1 FROM chat_messages WHERE group_id=? AND id=?", (group, source)).fetchone():
                 raise ValueError("待办来源消息不属于当前群。")
@@ -313,14 +394,39 @@ class GroupToolsService:
                     return existing[0]
             if db.execute("SELECT count(*) FROM group_tasks WHERE group_id=?", (group,)).fetchone()[0] >= 1000:
                 raise ValueError("每群最多保存 1000 条待办。")
-            db.execute("INSERT INTO group_tasks VALUES (?,?,?,?,?,'open',?,?,?)", (task_id, group, body["title"], body["owner"], body["due_date"], source, now(), now()))
+            new_id, created = uuid4().hex, now()
+            db.execute("""INSERT INTO group_tasks
+                (id,group_id,title,owner,due_date,status,source_id,created_at,updated_at,due_at,creator_id,creator_name,source_kind)
+                VALUES (?,?,?,?,?,'open',?,?,?,?, 'local-admin','本地管理员',?)""",
+                (new_id, group, body["title"], body["owner"], due_date, source, created, created, due_at, "ai" if source is not None else "manual"))
             self.groups._audit(db, group, body["title"], "添加群待办")
-            return task_id
+            return new_id
         return await self.db(save)
+
+    async def complete_due_tasks(self, current=None):
+        current = current or datetime.now(CHINA)
+        return await self.db(lambda db: db.execute("""UPDATE group_tasks
+            SET status='done',completed_at=?,completion_reason='deadline',updated_at=?
+            WHERE status='open' AND due_at IS NOT NULL AND due_at<=?""",
+            (current.isoformat(), current.isoformat(), current.timestamp())).rowcount)
 
     async def task_status(self, group, task_id, status):
         def save(db):
-            result = db.execute("UPDATE group_tasks SET status=?,updated_at=? WHERE group_id=? AND id=?", (status, now(), group, task_id)).rowcount
+            task = db.execute("SELECT * FROM group_tasks WHERE group_id=? AND id=?", (group, task_id)).fetchone()
+            if not task:
+                return False
+            if task["status"] == status and not (status == "done" and task["completion_reason"] == "deadline"):
+                return True
+            timestamp = now()
+            if task["reminder_id"]:
+                reminder = db.execute("SELECT * FROM member_reminders WHERE id=?", (task["reminder_id"],)).fetchone()
+                if status != "open":
+                    db.execute("UPDATE member_reminders SET status='cancelled',updated_at=? WHERE id=? AND status='pending'", (timestamp, task["reminder_id"]))
+                elif reminder["status"] == "cancelled" and reminder["due_at"] > datetime.now(CHINA).timestamp():
+                    self.check_reminder_capacity(db, group, reminder["sender"])
+                    db.execute("UPDATE member_reminders SET status='pending',updated_at=? WHERE id=?", (timestamp, task["reminder_id"]))
+            result = db.execute("UPDATE group_tasks SET status=?,updated_at=?,completed_at=?,completion_reason=? WHERE group_id=? AND id=?",
+                                (status, timestamp, timestamp if status == "done" else "", "manual" if status == "done" else "", group, task_id)).rowcount
             if result:
                 self.groups._audit(db, group, task_id, "更新待办状态 · " + status)
             return bool(result)
@@ -367,6 +473,6 @@ class GroupToolsService:
             return f"{command}（{report['start_date']} 至 {report['end_date']}）\n{report['content']}"
         if command in ("待办", "本群待办", "到期待办"):
             data = await self.snapshot(group)
-            tasks = [task for task in data["tasks"] if task["status"] == "open" and (command != "到期待办" or (task["due_date"] and task["due_date"] <= data["today"]))]
-            return "本群待办：\n" + "\n".join(f"{i+1}. {task['title']}（{task['owner'] or '未分配'} / {task['due_date'] or '无截止日'}）" for i, task in enumerate(tasks[:20])) if tasks else "本群暂无符合条件的待办。"
+            tasks = [task for task in data["tasks"] if task["status"] == "open" and (command != "到期待办" or (task["due_at"] is not None and task["due_at"] <= datetime.now(CHINA).timestamp()))]
+            return "本群待办：\n" + "\n".join(f"{i+1}. {task['title']}（{task['owner'] or '未分配'} / {datetime.fromtimestamp(task['due_at'], CHINA).strftime('%m-%d %H:%M:%S') if task['due_at'] is not None else '无截止日'}）" for i, task in enumerate(tasks[:20])) if tasks else "本群暂无符合条件的待办。"
         return None

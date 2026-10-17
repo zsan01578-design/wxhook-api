@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -41,6 +41,7 @@ class Task(ToolBody):
     title: Text
     owner: Annotated[str, StringConstraints(strip_whitespace=True, max_length=80)] = ""
     due_date: str = Field("", max_length=10)
+    due_at: str = Field("", max_length=40)
     source_id: int | None = Field(None, ge=1)
 
     @field_validator("due_date")
@@ -49,6 +50,15 @@ class Task(ToolBody):
         if value:
             if date.fromisoformat(value).isoformat() != value:
                 raise ValueError("日期格式必须为 YYYY-MM-DD")
+        return value
+
+    @field_validator("due_at")
+    @classmethod
+    def valid_datetime(cls, value):
+        if value:
+            if "T" not in value and " " not in value:
+                raise ValueError("截止时间必须包含日期和时间")
+            datetime.fromisoformat(value)
         return value
 
 
@@ -123,6 +133,19 @@ async def add_task(group: GroupId, body: Task, request: Request):
 
 @router.patch("/tasks/{task_id}")
 async def task_status(group: GroupId, task_id: str, body: TaskStatus, request: Request):
-    if not await (await service(request, group)).task_status(group, task_id, body.status):
-        raise HTTPException(404, "待办不存在")
+    try:
+        if not await (await service(request, group)).task_status(group, task_id, body.status):
+            raise HTTPException(404, "待办不存在")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return {"saved": True}
+
+
+@router.put("/tasks/{task_id}")
+async def update_task(group: GroupId, task_id: str, body: Task, request: Request):
+    try:
+        if not await (await service(request, group)).save_task(group, body.model_dump(), task_id):
+            raise HTTPException(404, "待办不存在")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
     return {"saved": True}

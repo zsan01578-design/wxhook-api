@@ -87,6 +87,8 @@ class ReminderService:
                 CREATE INDEX IF NOT EXISTS member_reminders_due ON member_reminders(status,due_at);
             """)
             db.execute("UPDATE member_reminders SET status='unknown',updated_at=? WHERE status='sending'", (now(),))
+            for row in db.execute("SELECT * FROM member_reminders").fetchall():
+                self.tools.record_reminder_task(db, row)
         await self.tools.db(initialize)
         self._worker = asyncio.create_task(self._run())
 
@@ -107,9 +109,14 @@ class ReminderService:
             ) if rows else "你在本群暂无待提醒事项。"
         cancel = re.fullmatch(r"取消提醒\s+([a-f0-9]{12})", command)
         if cancel:
-            changed = await self.tools.db(lambda db: db.execute(
-                "UPDATE member_reminders SET status='cancelled',updated_at=? WHERE id=? AND group_id=? AND sender=? AND status='pending'",
-                (now(), cancel[1], group, sender)).rowcount)
+            def cancel_reminder(db):
+                changed = db.execute(
+                    "UPDATE member_reminders SET status='cancelled',updated_at=? WHERE id=? AND group_id=? AND sender=? AND status='pending'",
+                    (now(), cancel[1], group, sender)).rowcount
+                if changed:
+                    db.execute("UPDATE group_tasks SET status='cancelled',completed_at='',completion_reason='',updated_at=? WHERE group_id=? AND reminder_id=?", (now(), group, cancel[1]))
+                return changed
+            changed = await self.tools.db(cancel_reminder)
             return "已取消这条提醒。" if changed else "未找到你在本群的待提醒事项，请发送“我的提醒”查看编号。"
         if command == "取消提醒":
             return "请发送“我的提醒”查看编号，再发送“取消提醒 编号”。"
@@ -122,15 +129,16 @@ class ReminderService:
                 existing = db.execute("SELECT * FROM member_reminders WHERE group_id=? AND message_key=?", (group, key)).fetchone()
                 if existing:
                     return dict(existing)
-                count = db.execute("SELECT count(*),sum(sender=?) FROM member_reminders WHERE group_id=? AND status='pending'", (sender, group)).fetchone()
-                if count[0] >= 200 or (count[1] or 0) >= 50:
-                    raise ValueError("本群待提醒事项已达上限（每人50条、每群200条），请先取消部分提醒。")
+                self.tools.check_reminder_capacity(db, group, sender)
+                if db.execute("SELECT count(*) FROM group_tasks WHERE group_id=?", (group,)).fetchone()[0] >= 1000:
+                    raise ValueError("每群最多保存 1000 条待办。")
                 # Queue and database waits must not consume the requested countdown.
                 created_at = now()
                 due, title = parse_reminder(command, datetime.fromisoformat(created_at).astimezone(CHINA))
                 item = dict(id=uuid4().hex[:12], group_id=group, sender=sender, message_key=key,
                             title=title, due_at=due.timestamp(), status="pending", created_at=created_at, updated_at=created_at)
                 db.execute("INSERT INTO member_reminders VALUES (:id,:group_id,:sender,:message_key,:title,:due_at,:status,:created_at,:updated_at)", item)
+                self.tools.record_reminder_task(db, item)
                 return item
             item = await self.tools.db(save)
             due = datetime.fromtimestamp(item['due_at'], CHINA)
@@ -139,11 +147,14 @@ class ReminderService:
             return str(exc)
 
     async def due_reminders(self, current: datetime | None = None):
+        await self.tools.complete_due_tasks(current)
         if not self.chatbot._accepting:
             return
         timestamp = (current or datetime.now(CHINA)).timestamp()
         rows = await self.tools.db(lambda db: db.execute(
-            "SELECT * FROM member_reminders WHERE status='pending' AND due_at<=? ORDER BY due_at LIMIT 100", (timestamp,)).fetchall())
+            """SELECT r.* FROM member_reminders r JOIN group_tasks t ON t.reminder_id=r.id
+                WHERE r.status='pending' AND (t.status='open' OR (t.status='done' AND t.completion_reason='deadline'))
+                AND r.due_at<=? ORDER BY r.due_at LIMIT 100""", (timestamp,)).fetchall())
         if not rows or not await self.chatbot._identify():
             return
         for row in rows:
@@ -151,13 +162,22 @@ class ReminderService:
             members = await self.tools.groups.members(group)
             member = next((item for item in members if item['id'] == sender), {})
             name = (member.get('wechat_name') or member.get('name') or sender).replace("\n", " ").replace("\r", " ")
-            claimed = await self.tools.db(lambda db: db.execute(
-                "UPDATE member_reminders SET status='sending',updated_at=? WHERE id=? AND status='pending'", (now(), row['id'])).rowcount)
-            if not claimed:
+            def claim(db):
+                changed = db.execute("""UPDATE member_reminders SET status='sending',updated_at=?
+                    WHERE id=? AND status='pending' AND due_at<=?
+                    AND EXISTS (SELECT 1 FROM group_tasks WHERE reminder_id=member_reminders.id
+                        AND (status='open' OR (status='done' AND completion_reason='deadline')))""",
+                    (now(), row['id'], timestamp)).rowcount
+                return db.execute("SELECT * FROM member_reminders WHERE id=?", (row['id'],)).fetchone() if changed else None
+            claimed = await self.tools.db(claim)
+            if claimed is None:
                 continue
+            row = claimed
             status = "skipped"
             try:
-                if self.chatbot._accepting and self.chatbot.allowed(group, sender):
+                task_active = await self.tools.db(lambda db: db.execute("""SELECT 1 FROM group_tasks WHERE reminder_id=?
+                    AND (status='open' OR (status='done' AND completion_reason='deadline'))""", (row['id'],)).fetchone())
+                if task_active and self.chatbot._accepting and self.chatbot.allowed(group, sender):
                     await self.chatbot._messenger.text(group, f"@{name}\u2005提醒时间到了：{row['title']}", atlist=[sender])
                     status = "sent"
             except asyncio.CancelledError:

@@ -10,6 +10,7 @@ let ownWxid = "", resetChatScroll = true;
 let modelSaving = false;
 let wordCloud = null, chatSummary = null, chatRadar = null;
 let groupTools = null, radarDays = 14;
+let taskView = "open", taskPage = 1;
 const chatSignatures = new WeakMap();
 
 function el(tag, className = "", text) {
@@ -150,6 +151,7 @@ function renderList() {
   $("group-list").replaceChildren(...(nodes.length ? nodes : [el("div", "list-empty", state.groups.length ? "没有符合条件的群聊" : "还没有群聊\n点击 + 添加，或等待群消息自动发现")]));
 }
 function selectGroup(id) {
+  taskView = "open"; taskPage = 1;
   selectedId = id; tab = "messages"; memberQuery = ""; messagePage = 1; messageQuery = ""; view = "groups"; detailVersion = ""; resetChatScroll = true;
   document.body.classList.add("mobile-detail");
   updateView(); renderList();
@@ -332,6 +334,68 @@ async function toolsAction(source, group, path, body, method = "POST", message =
 function toolCard(title, description) {
   const card = el("section", "tool-card"); card.append(el("h3", "", title), el("p", "tool-description", description)); return card;
 }
+function taskDateText(timestamp) {
+  if (!timestamp) return "未设置截止时间";
+  return new Date(timestamp).toLocaleString("zh-CN", {timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false});
+}
+function updateTaskCountdowns() {
+  if (document.hidden) return;
+  const currentTime = Date.now();
+  document.querySelectorAll("[data-task-countdown]").forEach(node => {
+    const due = Number(node.dataset.taskCountdown);
+    node.classList.toggle("overdue", Boolean(due && due <= currentTime));
+    if (!due) { node.textContent = "未设置截止时间"; return; }
+    const seconds = Math.ceil(Math.abs(due - currentTime) / 1000), days = Math.floor(seconds / 86400);
+    const clock = [Math.floor(seconds % 86400 / 3600), Math.floor(seconds % 3600 / 60), seconds % 60].map(value => String(value).padStart(2, "0")).join(":");
+    node.textContent = `${due > currentTime ? "剩余" : "已超时"} ${days ? `${days}天 ` : ""}${clock}`;
+  });
+}
+function taskSection(group, data) {
+  const section = el("section", "task-section"), heading = el("div", "task-heading"), actions = el("div", "tool-actions");
+  heading.append(el("h3", "", "群待办"));
+  actions.append(button("新增", "button small", () => taskDialog(group.id), "plus"), button("AI 提取待办", "button small primary", event => extractTaskDialog(event.currentTarget, group.id), "search"));
+  heading.append(actions); section.append(heading);
+  const remindLabel = el("label", "tool-check"), remind = el("input"); remind.type = "checkbox"; remind.checked = data.task_reminders;
+  remind.addEventListener("change", event => toolsAction(event.currentTarget, group.id, "/preferences", {task_reminders: remind.checked}, "PATCH"));
+  remindLabel.append(remind, document.createTextNode("每日汇总到期的手动 / AI 待办")); section.append(remindLabel);
+  const tabs = el("div", "task-tabs"); tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "待办状态");
+  [["open", "未完成"], ["done", "已完成"], ["cancelled", "已取消"]].forEach(([status, label]) => {
+    const control = button("", `task-tab${taskView === status ? " active" : ""}`, () => { taskView = status; taskPage = 1; renderTools(group); });
+    control.append(document.createTextNode(label), el("span", "task-count", String(data.tasks.filter(task => task.status === status).length)));
+    control.setAttribute("role", "tab"); control.setAttribute("aria-selected", String(taskView === status)); tabs.append(control);
+  });
+  section.append(tabs);
+  const filtered = data.tasks.filter(task => task.status === taskView), pageCount = Math.max(1, Math.ceil(filtered.length / 25));
+  taskPage = Math.min(taskPage, pageCount);
+  const list = el("div", "task-list"); list.setAttribute("role", "tabpanel"); list.setAttribute("aria-label", {open: "未完成待办", done: "已完成待办", cancelled: "已取消待办"}[taskView]);
+  filtered.slice((taskPage - 1) * 25, taskPage * 25).forEach(task => {
+    const row = el("div", "task-row"), copy = el("div", "task-copy"), title = el("div", "task-title"), controls = el("div", "task-controls");
+    title.append(el("strong", "", task.title), badge({reminder: "群提醒", ai: "AI 提取", manual: "手动新增"}[task.source_kind] || "历史待办")); copy.append(title);
+    const creator = task.creator_display_name || task.creator_name || "未知（历史记录）", meta = el("div", "task-meta");
+    const creatorLabel = el("span", "", `创建者 ${creator}`); creatorLabel.title = task.creator_id || creator;
+    meta.append(creatorLabel, el("span", "", `创建于 ${taskDateText(task.created_at)}`));
+    if (task.owner) meta.append(el("span", "", `负责人 ${task.owner}`));
+    copy.append(meta, el("p", "task-deadline", task.due_at == null ? "截止时间未设置" : `截止 ${taskDateText(task.due_at * 1000)}（北京时间）`));
+    if (task.status === "done" && task.completed_at) copy.append(el("p", "task-deadline", `${task.completion_reason === "deadline" ? "到期自动完成于" : "完成于"} ${taskDateText(task.completed_at)}`));
+    if (task.reminder_id) copy.append(el("p", "task-delivery", `提醒状态：${{pending: "待提醒", sending: "发送中", sent: "已提醒", cancelled: "已停止", unknown: "发送未确认", failed: "发送失败", skipped: "已跳过"}[task.reminder_status] || "待确认"}`));
+    if (task.status === "open") {
+      const countdown = el("span", "task-countdown"); countdown.dataset.taskCountdown = task.due_at == null ? "" : String(task.due_at * 1000); countdown.setAttribute("role", "timer");
+      controls.append(countdown);
+    }
+    const commands = el("div", "task-commands");
+    commands.append(iconButton("edit", "编辑待办", () => taskDialog(group.id, task)), iconButton(task.status === "open" ? "check" : "refresh", task.status === "open" ? "标记完成" : "重新打开", event => toolsAction(event.currentTarget, group.id, `/tasks/${task.id}`, {status: task.status === "open" ? "done" : "open"}, "PATCH")));
+    if (task.status === "open") commands.append(iconButton("close", "取消待办", () => confirmDialog("取消这条待办？", task.title, () => api(`${toolsPath(group.id)}/tasks/${task.id}`, {status: "cancelled"}, "PATCH").then(() => reloadTools(group.id)), "取消待办", true)));
+    controls.append(commands); row.append(copy, controls); list.append(row);
+  });
+  if (!filtered.length) list.append(el("p", "task-empty", {open: "暂无未完成待办", done: "暂无已完成待办", cancelled: "暂无已取消待办"}[taskView]));
+  section.append(list);
+  if (pageCount > 1) {
+    const pages = el("div", "task-pagination"), previous = iconButton("back", "上一页待办", () => { taskPage--; renderTools(group); }), next = iconButton("arrow", "下一页待办", () => { taskPage++; renderTools(group); });
+    previous.disabled = taskPage <= 1; next.disabled = taskPage >= pageCount;
+    pages.append(el("span", "", `共 ${filtered.length} 条 · ${taskPage} / ${pageCount} 页`), previous, next); section.append(pages);
+  }
+  return section;
+}
 function renderTools(group) {
   const root = $("tab-content"), data = groupTools;
   if (!data || data.group_id !== group.id || data.error) { root.replaceChildren(empty("群工具暂时无法加载", data?.error || "请刷新后重试。")); return; }
@@ -345,16 +409,12 @@ function renderTools(group) {
   const rules = toolCard("关键词规则", "实时文字消息按关键词匹配，可记录命中或回复固定内容。每条消息最多触发一条规则，支持冷却时间，并遵循群总开关和黑名单。");
   rules.append(button("添加规则", "button small", () => ruleDialog(group.id)));
   data.rules.forEach(rule => { const row = el("div", "tool-row"), copy = el("div", "tool-row-copy"), actions = el("div", "tool-actions"); copy.append(el("strong", "", rule.name), el("p", "", `${rule.enabled ? "已启用" : "已关闭"} · ${rule.match_mode === "exact" ? "完全匹配" : "包含"}“${rule.keyword}” · ${rule.action === "reply" ? "固定回复" : "记录命中"} · 冷却 ${rule.cooldown} 秒`)); actions.append(button("编辑", "button small", () => ruleDialog(group.id, rule)), button("删除", "button small", () => confirmDialog("删除关键词规则？", rule.name, () => api(`${toolsPath(group.id)}/rules/${rule.id}`, {}, "DELETE").then(() => reloadTools(group.id)), "删除", true))); row.append(copy, actions); rules.append(row); });
-  const tasks = toolCard("群待办", "手动添加，或从最近 7 天最多 200 条成员文本中提取候选待办，核对后保存。群里可查询“本群待办”与“到期待办”。");
-  const taskActions = el("div", "tool-actions"); taskActions.append(button("添加待办", "button small", () => taskDialog(group.id)), button("AI 提取待办", "button small primary", event => extractTaskDialog(event.currentTarget, group.id))); tasks.append(taskActions);
-  const remindLabel = el("label", "tool-check"), remind = el("input"); remind.type = "checkbox"; remind.checked = data.task_reminders; remind.addEventListener("change", event => toolsAction(event.currentTarget, group.id, "/preferences", {auto_reports:data.auto_reports,task_reminders:remind.checked}, "PATCH")); remindLabel.append(remind, document.createTextNode("每日 09:00 后在群内提醒到期待办（每天最多一条）")); tasks.append(remindLabel);
-  data.tasks.slice(0, 100).forEach(task => { const overdue = task.status === "open" && task.due_date && task.due_date <= data.today, row = el("div", `tool-row${overdue ? " task-due" : ""}`), copy = el("div", "tool-row-copy"), actions = el("div", "tool-actions"); copy.append(el("strong", "", task.title), el("p", "", `${task.owner || "未分配"} · ${task.due_date || "无截止日期"}${overdue ? " · 已到期" : ""} · ${{open: "待完成", done: "已完成", cancelled: "已取消"}[task.status]}`)); actions.append(button(task.status === "open" ? "完成" : "重新打开", "button small", event => toolsAction(event.currentTarget, group.id, `/tasks/${task.id}`, {status: task.status === "open" ? "done" : "open"}, "PATCH"))); if (task.status === "open") actions.append(button("取消", "button small", event => toolsAction(event.currentTarget, group.id, `/tasks/${task.id}`, {status: "cancelled"}, "PATCH"))); row.append(copy, actions); tasks.append(row); });
-  if (!data.tasks.length) tasks.append(el("p", "tool-description", "暂无待办。"));
-  else if (data.tasks.length > 100) tasks.append(el("p", "tool-description", `共有 ${data.tasks.length} 条待办，当前展示前 100 条，优先展示未完成任务。`));
+  const tasks = taskSection(group, data);
   const hits = toolCard("最近关键词命中", "显示最近 30 条触发记录，重复回调不会重复回复。");
   data.hits.forEach(hit => { const row = el("div", "tool-hit"); row.append(el("strong", "", `${hit.rule_name} · ${{recorded:"已记录",sending:"发送中 / 未确认",sent:"已发送",unknown:"发送未确认",skipped:"已停止"}[hit.status] || hit.status}`), el("p", "", hit.content), el("small", "", `${hit.sender} · ${dateText(hit.created_at, true)}`)); hits.append(row); });
   if (!data.hits.length) hits.append(el("p", "tool-description", "暂无命中记录。"));
-  root.replaceChildren(reports, tasks, rules, hits);
+  root.replaceChildren(tasks, reports, rules, hits);
+  updateTaskCountdowns();
 }
 function selectField(form, label, values, value) {
   const caption = el("label", "form-label", label), select = el("select", "form-input");
@@ -371,10 +431,11 @@ function ruleDialog(group, rule = {}) {
   bindForm(form, footer, async () => { if (action.value === "reply" && !reply.value.trim()) throw new Error("请填写固定回复内容"); await api(`${toolsPath(group)}/rules${rule.id ? `/${rule.id}` : ""}`, {name:name.value,keyword:keyword.value,match_mode:mode.value,action:action.value,reply:reply.value,cooldown:Number(cooldown.value),enabled:enabled.value === "true"}, rule.id ? "PUT" : "POST"); await reloadTools(group); });
 }
 function taskDialog(group, candidate = {}) {
-  const body = showDialog("添加群待办"), form = el("form"), title = formField(form, "待办事项", "需要完成什么", candidate.title || "", false, 200), owner = formField(form, "负责人", "可留空", candidate.owner || ""), due = formField(form, "截止日期", "", candidate.due_date || ""); due.type = "date"; title.required = true;
+  const deadline = candidate.due_at == null ? (candidate.due_date ? `${candidate.due_date}T23:59:59` : "") : new Date(candidate.due_at * 1000 + 8 * 3600000).toISOString().slice(0, 19);
+  const body = showDialog(candidate.id ? "编辑群待办" : "新增群待办"), form = el("form"), title = formField(form, "待办事项", "需要完成什么", candidate.title || "", false, 200), owner = formField(form, "负责人", "可留空", candidate.owner || "", false, 80), due = formField(form, "截止时间（北京时间）", "", deadline); due.type = "datetime-local"; due.step = "1"; due.required = Boolean(candidate.reminder_id); title.required = true;
   if (candidate.source_content) form.append(el("p", "tool-source", `来源消息：${candidate.source_content}`));
   const footer = formFooter(form, "保存待办"); body.append(form);
-  bindForm(form, footer, async () => { await api(`${toolsPath(group)}/tasks`, {title:title.value,owner:owner.value,due_date:due.value,source_id:candidate.source_id || null}); await reloadTools(group); });
+  bindForm(form, footer, async () => { await api(`${toolsPath(group)}/tasks${candidate.id ? `/${candidate.id}` : ""}`, {title:title.value,owner:owner.value,due_at:due.value ? `${due.value}+08:00` : "",source_id:candidate.source_id || null}, candidate.id ? "PUT" : "POST"); await reloadTools(group); });
 }
 async function extractTaskDialog(source, group) {
   source.disabled = true; source.textContent = "提取中…";
@@ -846,4 +907,5 @@ $("close-modal").addEventListener("click", () => { if (!modelSaving) $("modal").
 $("modal").addEventListener("cancel", event => { if (modelSaving) event.preventDefault(); });
 $("modal").addEventListener("click", event => { if (!modelSaving && event.target === $("modal")) { const rect = $("modal").getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $("modal").close(); } });
 document.addEventListener("visibilitychange", () => { clearTimeout(pollTimer); if (!document.hidden) { poll(); checkConnection(); } });
+setInterval(updateTaskCountdowns, 1000);
 renderOverview(); checkConnection(); poll();
