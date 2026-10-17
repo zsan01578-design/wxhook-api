@@ -63,9 +63,9 @@ class DouyinMessenger:
     def __init__(self, client: HookClient):
         self.client = client
 
-    async def text(self, group: str, message: str) -> None:
+    async def text(self, group: str, message: str, *, atlist: list[str] | None = None) -> None:
         try:
-            response = await self.client.send_text(TextMessageRequest(wxidorgid=group, msg=message))
+            response = await self.client.send_text(TextMessageRequest(wxidorgid=group, msg=message, atlist=atlist))
         except HookTransportError as exc:
             raise DeliveryError("群提示发送结果未确认，请检查微信 Hook", uncertain=True) from exc
         _confirmed(response)

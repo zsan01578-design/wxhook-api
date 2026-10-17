@@ -10,6 +10,7 @@ from uuid import uuid4
 from wxhook_api.services.chat_model import ModelError
 from wxhook_api.services.chat_summary import CHINA
 from wxhook_api.services.groups import event_group, now
+from wxhook_api.services.reminders import ReminderService
 
 
 def report_period(kind: str, today: date | None = None) -> tuple[date, date]:
@@ -28,6 +29,7 @@ class GroupToolsService:
         self._queue = asyncio.Queue(maxsize=100)
         self._worker = self._scheduler = None
         self.last_error = ""
+        self.reminders = ReminderService(self)
 
     async def db(self, action):
         def execute():
@@ -71,10 +73,12 @@ class GroupToolsService:
             if "task_reminders" not in columns:
                 db.execute("ALTER TABLE group_tool_preferences ADD COLUMN task_reminders INTEGER NOT NULL DEFAULT 0")
         await self.db(initialize)
+        await self.reminders.start()
         self._worker = asyncio.create_task(self._run_rules())
         self._scheduler = asyncio.create_task(self._run_schedule())
 
     async def stop(self):
+        await self.reminders.stop()
         tasks = [task for task in (self._worker, self._scheduler) if task]
         for task in tasks:
             task.cancel()
