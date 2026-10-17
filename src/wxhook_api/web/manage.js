@@ -61,7 +61,7 @@ const groupPath = id => `/api/manage/groups/${encodeURIComponent(id)}`;
 const memberPath = (group, member) => `${groupPath(group)}/members/${encodeURIComponent(member)}`;
 const current = () => state.groups.find(group => group.id === selectedId);
 const nameOf = group => group.name || group.id;
-const robotEnabled = group => Boolean(group.active && group.douyin_enabled);
+const robotEnabled = group => Boolean(group.active && (group.douyin_enabled || group.chat_enabled));
 const robotStatus = group => group.blocked ? "已拉黑" : robotEnabled(group) ? "机器人已启用" : "机器人未启用";
 function dateText(value, short = false) {
   if (!value) return "暂无消息";
@@ -208,6 +208,7 @@ function renderFeatures(group) {
   master.append(masterCopy, toggleSwitch("群功能总开关", group.enabled, group.blocked, source => mutation(source, groupPath(group.id), { enabled: !group.enabled }, group.enabled ? "已暂停此群自动功能" : "已恢复此群自动功能")));
   const list = el("div", "feature-list");
   const features = [
+    ["chat", "@机器人问答", "只有被 @ 才回复；每条提问最多一条消息，不连续发言。", "chat_enabled", !group.active],
     ["video", "分享解析", "自动识别群内抖音、小红书、B站分享，解析视频与图集。", "douyin_enabled", !group.active],
     ["download", "自动保存视频与图片", "解析成功后保存到本机，并用于自动回传到来源群。", "auto_download", !group.active || !group.douyin_enabled]
   ];
@@ -217,6 +218,10 @@ function renderFeatures(group) {
     row.append(art, text, toggleSwitch(title, group[key], disabled, source => mutation(source, groupPath(group.id), { [key]: !group[key] }, `${title}已${group[key] ? "关闭" : "开启"}`))); list.append(row);
   });
   const note = el("div", "feature-footnote"); note.append(icon("info"), el("span", "", "回传媒体需要启用自动保存。群内处理提示和回传开关在“资源”页统一配置；关闭自动保存后只保留解析链接。"));
+  const chatNote = el("div", "feature-footnote");
+  const chat = state.chatbot;
+  const chatStatus = chat?.enabled === false ? "@问答总开关已关闭。" : chat?.answer_configured ? "问答接口已接入。" : "问答接口待接入，被 @ 时只回复一条“问答接口尚未配置”提示。";
+  chatNote.append(icon("info"), el("span", "", `${chatStatus}可在 chatbot.local.yml 配置机器人群内显示名。${chat?.last_error ? ` ${chat.last_error}` : ""}`));
   const runtime = el("div", "feature-footnote"), media = state.media;
   if (media) {
     const provider = {parse_video: "parse-video-py（抖音 / 小红书 / B站）", api: "指定接口（仅抖音）", builtin: "公开分享页（仅抖音）"}[media.parser_provider] || media.parser_provider;
@@ -231,7 +236,7 @@ function renderFeatures(group) {
   safetyTitle.append(icon("shield"), document.createTextNode("群聊黑名单"));
   safetyCopy.append(safetyTitle, el("p", "", "拉黑后不再处理此群的自动功能，消息仍可记录。"));
   safety.append(safetyCopy, button(group.blocked ? "移出黑名单" : "加入黑名单", `button ${group.blocked ? "" : "danger"} small`, () => blockGroupDialog(group), group.blocked ? "check" : "block"));
-  content.replaceChildren(heading, master, list, note, ...(media ? [runtime] : []), safety);
+  content.replaceChildren(heading, master, list, chatNote, note, ...(media ? [runtime] : []), safety);
 }
 function renderInspector(group) {
   const node = $("inspector"), heading = el("div", "inspector-heading");
@@ -355,7 +360,7 @@ async function loadDetail() {
   messages = inbox?.messages || [];
   if (inbox) messageMeta = inbox;
   audit = history?.events || [];
-  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, tab, state.media, ownWxid]);
+  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, tab, state.media, ownWxid, state.chatbot?.enabled, state.chatbot?.answer_configured, state.chatbot?.last_error]);
   if (version === detailVersion) return;
   detailVersion = version;
   renderHeader(current()); renderInspector(current());

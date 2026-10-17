@@ -11,3 +11,5 @@ def isolated_management_database(tmp_path, monkeypatch):
     monkeypatch.setenv("WXHOOK_DOUYIN_FEEDBACK_ENABLED", "false")
     # Legacy tests must never clean the user's real download directory.
     monkeypatch.setenv("WXHOOK_MEDIA_CLEANUP_ENABLED", "false")
+    # Mention reply tests explicitly inject a service with a mocked Hook.
+    monkeypatch.setenv("WXHOOK_CHATBOT_ENABLED", "false")

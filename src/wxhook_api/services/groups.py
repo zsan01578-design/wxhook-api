@@ -77,9 +77,14 @@ class GroupManager:
                     );
                     CREATE INDEX IF NOT EXISTS chat_messages_timeline ON chat_messages(group_id, timestamp DESC, id DESC);
                     CREATE TABLE IF NOT EXISTS sync_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    CREATE TABLE IF NOT EXISTS chat_reply_claims (
+                        group_id TEXT NOT NULL, message_key TEXT NOT NULL, status TEXT NOT NULL,
+                        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                        PRIMARY KEY (group_id, message_key)
+                    );
                 """)
                 migrations = {
-                    "groups": {"wechat_name": "TEXT NOT NULL DEFAULT ''", "members_sync": "TEXT NOT NULL DEFAULT 'pending'",
+                    "groups": {"chat_enabled": "INTEGER", "wechat_name": "TEXT NOT NULL DEFAULT ''", "members_sync": "TEXT NOT NULL DEFAULT 'pending'",
                                "members_synced_at": "TEXT NOT NULL DEFAULT ''", "history_complete": "INTEGER NOT NULL DEFAULT 0",
                                "history_next_page": "INTEGER NOT NULL DEFAULT 1", "history_error": "TEXT NOT NULL DEFAULT ''",
                                "history_synced_at": "TEXT NOT NULL DEFAULT ''"},
@@ -146,6 +151,7 @@ class GroupManager:
             for key in ("pinned", "enabled", "blocked"):
                 row[key] = bool(row[key])
             row["douyin_enabled"] = self.feature(row["id"], "douyin_enabled", legacy.enabled and row["id"] in legacy.groups)
+            row["chat_enabled"] = self.feature(row["id"], "chat_enabled", row["douyin_enabled"])
             row["auto_download"] = self.feature(row["id"], "auto_download", legacy.auto_download)
             row["active"] = row["enabled"] and not row["blocked"]
         return rows
@@ -162,8 +168,22 @@ class GroupManager:
             await asyncio.to_thread(self._reload)
             return added
 
+    async def claim_chat_reply(self, group: str, key: str) -> bool:
+        def claim():
+            with self._connect() as db:
+                return bool(db.execute("INSERT OR IGNORE INTO chat_reply_claims (group_id,message_key,status,created_at,updated_at) VALUES (?,?,'claimed',?,?)", (group, key, now(), now())).rowcount)
+        async with self._lock:
+            return await asyncio.to_thread(claim)
+
+    async def finish_chat_reply(self, group: str, key: str, status: str) -> None:
+        def finish():
+            with self._connect() as db:
+                db.execute("UPDATE chat_reply_claims SET status=?,updated_at=? WHERE group_id=? AND message_key=?", (status, now(), group, key))
+        async with self._lock:
+            await asyncio.to_thread(finish)
+
     async def update_group(self, group: str, changes: dict) -> bool:
-        labels = {"name": "修改群名称", "note": "修改群备注", "pinned": "置顶群聊", "enabled": "群功能总开关", "blocked": "群聊黑名单", "douyin_enabled": "抖音解析", "auto_download": "自动保存媒体"}
+        labels = {"name": "修改群名称", "note": "修改群备注", "pinned": "置顶群聊", "enabled": "群功能总开关", "blocked": "群聊黑名单", "douyin_enabled": "抖音解析", "auto_download": "自动保存媒体", "chat_enabled": "@机器人问答"}
         assert changes.keys() <= labels.keys()
 
         def write():
