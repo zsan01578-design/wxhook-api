@@ -222,7 +222,7 @@ function renderFeatures(group) {
     const provider = {parse_video: "parse-video-py（抖音 / 小红书 / B站）", api: "指定接口（仅抖音）", builtin: "公开分享页（仅抖音）"}[media.parser_provider] || media.parser_provider;
     const warnings = [];
     if (!media.feedback_available) warnings.push("群内发送总开关已关闭，无法发送提示或媒体");
-    if (!media.notify_group) warnings.push("开始、失败和完成提示已关闭");
+    if (!media.notify_group) warnings.push("开始和失败提示已关闭");
     if (!media.send_results) warnings.push("媒体自动回传已关闭");
     runtime.append(icon("info"), el("span", "", `当前解析来源：${provider}。${warnings.length ? warnings.join("；") + "。" : "群内提示和媒体回传已开启。"}`));
     const resourceLink = el("a", "text-link", "查看资源与解析记录"); resourceLink.href = "/douyin"; runtime.append(resourceLink);

@@ -203,7 +203,9 @@ async def test_api_success_reuses_group_notices_and_media_return(tmp_path, monke
         try:
             job = await context.submit()
             assert job["delivery_status"] == "sent"
-            assert [path for path, _ in context.hook_calls] == (["/SendTextMsg", "/SendImgMsg", "/SendImgMsg", "/SendTextMsg"] if album else ["/SendTextMsg", "/send_file_msg", "/SendTextMsg"])
+            assert [path for path, _ in context.hook_calls] == (["/SendTextMsg", "/SendImgMsg", "/SendImgMsg"] if album else ["/SendTextMsg", "/send_file_msg"])
+            assert context.hook_calls[0][1]["msg"] == "开始解析"
+            assert "complete" not in job["notifications"]
         finally:
             await context.service._client.aclose()
             context.service._client = old

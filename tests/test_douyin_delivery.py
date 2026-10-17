@@ -67,7 +67,9 @@ async def test_start_notice_precedes_parsing_and_images_are_returned_in_order(tm
         job = await context.submit()
         assert context.order[0] == "/SendTextMsg"
         assert context.order.index("/SendTextMsg") < context.order.index("parse")
-        assert [path for path, _ in context.hook_calls] == ["/SendTextMsg", "/SendImgMsg", "/SendImgMsg", "/SendImgMsg", "/SendTextMsg"]
+        assert [path for path, _ in context.hook_calls] == ["/SendTextMsg", "/SendImgMsg", "/SendImgMsg", "/SendImgMsg"]
+        assert context.hook_calls[0][1]["msg"] == "开始解析"
+        assert "complete" not in job["notifications"]
         images = [payload for path, payload in context.hook_calls if path == "/SendImgMsg"]
         assert all(payload["wxidorgid"] == GROUP and Path(payload["path"]).is_absolute() for payload in images)
         assert [Path(payload["path"]).name for payload in images] == ["001.png", "002.png", "003.png"]
@@ -89,6 +91,7 @@ async def test_video_is_sent_as_mp4_file_using_documented_api(tmp_path, monkeypa
         assert files[0]["wxid"] == GROUP and files[0]["stage"] == "send"
         assert Path(files[0]["filepath"]).suffix == ".mp4"
         assert job["delivery_status"] == "sent"
+        assert [payload["msg"] for path, payload in context.hook_calls if path == "/SendTextMsg"] == ["开始解析"]
         assert not any(path == "/SendImgMsg" for path, _ in context.hook_calls)
 
 
@@ -97,7 +100,7 @@ async def test_parse_failure_posts_failure_notice_without_sending_media(tmp_path
         job = await context.submit()
         assert job["status"] == "failed"
         assert [path for path, _ in context.hook_calls] == ["/SendTextMsg", "/SendTextMsg"]
-        assert "开始解析" in context.hook_calls[0][1]["msg"]
+        assert context.hook_calls[0][1]["msg"] == "开始解析"
         assert "解析失败" in context.hook_calls[1][1]["msg"]
         assert job["notifications"]["failure"]["status"] == "sent"
 
@@ -156,12 +159,21 @@ async def test_closed_feedback_settings_send_nothing(tmp_path, monkeypatch):
         assert context.hook_calls == []
 
 
-async def test_missing_download_posts_explanation_instead_of_fake_success(tmp_path, monkeypatch):
+async def test_missing_download_records_explanation_without_completion_notice(tmp_path, monkeypatch):
     async with scenario(tmp_path, monkeypatch, settings={"auto_download": False}) as context:
         job = await context.submit()
         assert job["status"] == "parsed" and job["delivery_status"] == "skipped"
-        assert all(path == "/SendTextMsg" for path, _ in context.hook_calls)
-        assert "未回传" in context.hook_calls[-1][1]["msg"]
+        assert [(path, payload["msg"]) for path, payload in context.hook_calls] == [("/SendTextMsg", "开始解析")]
+        assert "自动保存已关闭" in job["delivery_error"]
+        assert "complete" not in job["notifications"]
+
+
+async def test_disabled_media_return_sends_only_exact_start_notice(tmp_path, monkeypatch):
+    async with scenario(tmp_path, monkeypatch, settings={"send_results": False}) as context:
+        job = await context.submit()
+        assert job["status"] == "completed" and job["delivery_status"] == "disabled"
+        assert [(path, payload["msg"]) for path, payload in context.hook_calls] == [("/SendTextMsg", "开始解析")]
+        assert "complete" not in job["notifications"]
 
 
 def test_webp_conversion_keeps_original_and_creates_valid_png(tmp_path):

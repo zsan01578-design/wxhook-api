@@ -172,7 +172,8 @@ class DouyinService:
         try:
             # Do not quote the original link/title: our own callbacks must not
             # create a new parsing task from an automatic notification.
-            await self.messenger.text(job["group_id"], f"[分享解析 {job['id'][:8]}] {message}")
+            text = message if stage == "start" else f"[分享解析 {job['id'][:8]}] {message}"
+            await self.messenger.text(job["group_id"], text)
         except DeliveryError as exc:
             notifications[stage] = {"status": "unknown" if exc.uncertain else "failed", "error": str(exc)}
         except Exception:
@@ -196,14 +197,12 @@ class DouyinService:
     async def _return_media(self, job: dict) -> None:
         if not self.options.settings.send_results:
             job["delivery_status"] = "disabled"
-            await self._notice(job, "complete", "解析完成，已保存在本机，自动回传已关闭。")
             return
         if not self.messenger:
             job["delivery_status"] = "unavailable"
             return
         if not job["files"]:
             job.update(delivery_status="skipped", delivery_error="此群自动保存已关闭，没有本地媒体可回传")
-            await self._notice(job, "complete", "解析完成，但此群未启用自动保存，媒体未回传；请在群管理中启用自动保存。")
             return
         job.update(status="sending", delivery_status="sending")
         self._changed()
@@ -249,10 +248,9 @@ class DouyinService:
             sent = sum(file.get("send_status") == "sent" for file in job["files"])
             error = str(exc) if isinstance(exc, (DeliveryError, DouyinError)) else "回传中断，请先检查群消息与本地文件"
             job.update(delivery_status="unknown" if uncertain else "partial" if sent else "failed", delivery_error=error)
-            await self._notice(job, "delivery_failure", f"解析完成，但回传未全部确认（已确认 {sent}/{len(job['files'])} 个）。{error}。已停止后续发送，文件仍保存在本机。")
+            await self._notice(job, "delivery_failure", f"媒体回传未全部确认（已确认 {sent}/{len(job['files'])} 个）。{error}。已停止后续发送，文件仍保存在本机。")
         else:
             job["delivery_status"] = "sent"
-            await self._notice(job, "complete", f"解析完成，已回传 {len(job['files'])} 个媒体文件。")
         finally:
             job["status"] = "completed" if job["files"] else "parsed"
             self._changed()
@@ -266,7 +264,7 @@ class DouyinService:
                 job["status"] = "parsing"
                 self._changed()
                 await asyncio.to_thread(self._save, job)
-                await self._notice(job, "start", "开始解析分享链接，请稍候…")
+                await self._notice(job, "start", "开始解析")
                 async with asyncio.timeout(240):
                     config = self.options.settings
                     job.update(parser_provider=config.parser_provider, platform=source_platform(job["source_url"]))

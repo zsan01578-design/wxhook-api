@@ -228,9 +228,9 @@ async def test_real_sdk_download_and_group_return_pipeline(tmp_path, monkeypatch
             assert job["parser_provider"] == "parse_video"
             assert len(job["files"]) == (2 if album else 1)
             paths = [path for path, _ in context.hook_calls]
-            assert paths == ["/SendTextMsg", *(["/SendImgMsg"] * 2 if album else ["/send_file_msg"]), "/SendTextMsg"]
-            assert "开始解析" in context.hook_calls[0][1]["msg"]
-            assert "解析完成" in context.hook_calls[-1][1]["msg"]
+            assert paths == ["/SendTextMsg", *(["/SendImgMsg"] * 2 if album else ["/send_file_msg"])]
+            assert context.hook_calls[0][1]["msg"] == "开始解析"
+            assert "complete" not in job["notifications"]
             assert downloads[-1].headers["referer"] == REFERERS[job["platform"]]
             assert Path(context.service.options.output_dir, job["id"], "result.json").is_file()
         finally:
@@ -308,7 +308,9 @@ async def test_management_enabled_bili_card_parses_without_legacy_group_list(tmp
                 job = await context.submit(content)
             assert job["status"] == "completed", job["error"]
             assert job["delivery_status"] == "sent" and job["platform"] == "bilibili"
-            assert [path for path, _ in context.hook_calls] == ["/SendTextMsg", "/send_file_msg", "/SendTextMsg"]
+            assert [path for path, _ in context.hook_calls] == ["/SendTextMsg", "/send_file_msg"]
+            assert context.hook_calls[0][1]["msg"] == "开始解析"
+            assert "complete" not in job["notifications"]
             state = (await context.client.get("/api/manage/state")).json()
             assert state["callbacks"]["total"] == 1 and state["callbacks"]["last_received_at"]
             assert state["media"] == {"parser_provider": "parse_video", "notify_group": True, "send_results": True, "feedback_available": True}
