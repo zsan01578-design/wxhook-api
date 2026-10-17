@@ -8,5 +8,9 @@ auto-download: true
 # 在来源群提示开始和失败；下载成功后回传图片或 MP4 文件。
 notify-group: true
 send-results: true
+# API 地址含账号标识，请在“资源”页面填写，保存到本机 douyin.local.yml。
+# 支持 api（指定接口）和 builtin（原公开分享页解析）；API 失败不会自动切换来源。
+parser-provider: api
+parser-api-url: ''
 output-dir: downloads/douyin
 max-file-mb: 100

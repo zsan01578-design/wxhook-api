@@ -12,7 +12,7 @@ import httpx
 
 
 SHARE_HOSTS = {"douyin.com", "www.douyin.com", "v.douyin.com", "m.douyin.com", "iesdouyin.com", "www.iesdouyin.com", "jingxuan.douyin.com"}
-MEDIA_DOMAINS = ("douyinvod.com", "douyinpic.com", "byteimg.com", "ibytedtos.com", "snssdk.com", "amemv.com", "pstatp.com", "bytecdn.cn", "zjcdn.com")
+MEDIA_DOMAINS = ("douyinvod.com", "douyinpic.com", "byteimg.com", "ibytedtos.com", "snssdk.com", "amemv.com", "pstatp.com", "bytecdn.cn", "zjcdn.com", "ixigua.com")
 USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1"
 LINK_PATTERN = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&()*+,;=%]+", re.IGNORECASE)
 
@@ -30,6 +30,7 @@ def checked_url(url: str, *, media: bool = False) -> str:
         allowed = host in SHARE_HOSTS
         if media:
             allowed = allowed or any(host == domain or host.endswith("." + domain) for domain in MEDIA_DOMAINS)
+            allowed = allowed or host == "jk.y-l.cc"
         if not allowed or parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.port not in {None, 80, 443}:
             raise ValueError
     except ValueError as exc:

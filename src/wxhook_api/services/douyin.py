@@ -16,6 +16,7 @@ from wxhook_api.core.douyin_config import DouyinOptions, GroupSettings, save_gro
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links
 from wxhook_api.services.douyin_delivery import DeliveryError, DouyinMessenger
+from wxhook_api.services.douyin_api import DouyinAPIParser
 from wxhook_api.services.groups import GroupManager, event_group
 
 
@@ -264,7 +265,10 @@ class DouyinService:
                 await asyncio.to_thread(self._save, job)
                 await self._notice(job, "start", "开始解析分享链接，请稍候…")
                 async with asyncio.timeout(240):
-                    parsed = await DouyinParser(self._client).parse(job["source_url"])
+                    config = self.options.settings
+                    parser = DouyinAPIParser(self._client, config.parser_api_url) if config.parser_provider == "api" else DouyinParser(self._client)
+                    job["parser_provider"] = config.parser_provider
+                    parsed = await parser.parse(job["source_url"])
                     job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind, assets=parsed.assets)
                     if not self.allowed(job["group_id"], job["sender"]):
                         raise DouyinError("群聊或成员已被限制，或解析功能已停用")

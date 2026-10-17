@@ -36,6 +36,8 @@ function node(tag, className, text) {
 async function loadConfig() {
   try {
     const data = await request("/api/douyin/config");
+    element("parser-provider").value = data.settings.parser_provider || "api";
+    element("parser-api-url").value = data.settings.parser_api_url || "";
     element("enabled").checked = data.settings.enabled;
     element("groups").value = data.settings.groups.join("\n");
     element("auto-download").checked = data.settings.auto_download;
@@ -44,6 +46,7 @@ async function loadConfig() {
     element("output-dir").textContent = data.output_dir;
     element("file-limit").textContent = `单文件上限 ${data.max_file_mb} MB；图集按原顺序保存。`;
     message("config-status", data.settings.enabled && data.settings.groups.length ? `默认名单已启用 ${data.settings.groups.length} 个群，独立配置以群管理为准。` : "默认群名单未启用，独立配置以群管理为准。");
+    if (element("parser-provider").value === "api" && !element("parser-api-url").value) message("config-status", "请填写完整解析接口地址并保存。", true);
     if (data.feedback_available === false) message("config-status", "群内发送总开关已关闭；如需提示和回传，请检查 WXHOOK_DOUYIN_FEEDBACK_ENABLED 后重启。", true);
   } catch (error) {
     message("config-status", `读取配置失败：${error.message}`, true);
@@ -58,9 +61,12 @@ element("group-form").addEventListener("submit", async (event) => {
   try {
     const groups = [...new Set(element("groups").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))];
     const enabled = element("enabled").checked;
-    await request("/api/douyin/config", { enabled, groups, auto_download: element("auto-download").checked, notify_group: element("notify-group").checked, send_results: element("send-results").checked });
+    const provider = element("parser-provider").value;
+    const apiUrl = element("parser-api-url").value.trim();
+    await request("/api/douyin/config", { enabled, groups, auto_download: element("auto-download").checked, notify_group: element("notify-group").checked, send_results: element("send-results").checked, parser_provider: provider, parser_api_url: apiUrl });
     element("groups").value = groups.join("\n");
     message("config-status", enabled && groups.length ? `默认名单已保存，共 ${groups.length} 个群；独立配置以群管理为准。` : "已保存，默认群名单未启用；独立配置以群管理为准。");
+    if (provider === "api" && !apiUrl) message("config-status", "配置已保存，但接口地址为空，收到链接时将提示解析失败。", true);
   } catch (error) {
     message("config-status", `保存失败：${error.message}`, true);
   } finally {
@@ -122,6 +128,7 @@ function renderJobs(data) {
     header.append(node("strong", "message-peer", job.title || "抖音分享"), node("span", hasError ? "count error" : "count", label));
     card.append(header, node("p", "message-meta", `${job.group_id} · ${job.sender}`));
     if (job.author) card.append(node("p", "message-meta", `作者：${job.author} · ${job.kind === "images" ? "图集" : "视频"}`));
+    if (job.parser_provider) card.append(node("p", "message-meta", `解析来源：${job.parser_provider === "api" ? "指定接口" : "公开分享页"}`));
     if (job.error) card.append(node("p", "feedback error", job.error));
     if (job.delivery_error) card.append(node("p", "feedback error", `回传：${job.delivery_error}`));
     if (job.storage_error) card.append(node("p", "feedback error", job.storage_error));

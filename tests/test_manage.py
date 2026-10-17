@@ -16,7 +16,7 @@ OTHER = "other@chatroom"
 
 
 def make_service(tmp_path, transport=None, **values):
-    settings = GroupSettings(**{"enabled": True, "groups": [GROUP, OTHER], **values})
+    settings = GroupSettings(**{"enabled": True, "groups": [GROUP, OTHER], "parser_provider": "builtin", **values})
     return DouyinService(DouyinOptions(settings, tmp_path / "douyin.yml", tmp_path / "downloads"), transport=transport)
 
 

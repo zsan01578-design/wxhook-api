@@ -4,6 +4,8 @@ from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import re
+from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 import yaml
@@ -19,6 +21,24 @@ class GroupSettings(BaseModel):
     auto_download: bool = True
     notify_group: bool = True
     send_results: bool = True
+    parser_provider: Literal["api", "builtin"] = "api"
+    parser_api_url: str = Field(default="", max_length=4096)
+
+    @field_validator("parser_api_url")
+    @classmethod
+    def validate_parser_api_url(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return ""
+        try:
+            parsed = urlsplit(value)
+            valid = parsed.scheme == "https" and parsed.hostname == "jk.y-l.cc" and parsed.port in {None, 443}
+            valid = valid and parsed.path.startswith("/api/dsp/") and not parsed.username and not parsed.password and not parsed.fragment and not parsed.query
+            if not valid or any(ord(char) < 33 for char in value):
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("请填写完整的 https://jk.y-l.cc/api/dsp/.../.../ 接口地址，不要附加 ?url= 参数") from exc
+        return value
 
     @field_validator("groups")
     @classmethod
@@ -48,6 +68,8 @@ def load_douyin_options() -> DouyinOptions:
         auto_download=values.get("auto-download", True),
         notify_group=values.get("notify-group", True),
         send_results=values.get("send-results", True),
+        parser_provider=values.get("parser-provider", "api"),
+        parser_api_url=os.getenv("WXHOOK_DOUYIN_API_URL", values.get("parser-api-url", "")),
     )
     output = Path(values.get("output-dir", "downloads/douyin")).expanduser()
     if not output.is_absolute():
@@ -65,6 +87,8 @@ def save_group_settings(options: DouyinOptions, settings: GroupSettings) -> Douy
         "auto-download": settings.auto_download,
         "notify-group": settings.notify_group,
         "send-results": settings.send_results,
+        "parser-provider": settings.parser_provider,
+        "parser-api-url": settings.parser_api_url,
         "output-dir": str(options.output_dir),
         "max-file-mb": options.max_file_bytes // (1024 * 1024),
     }

@@ -23,7 +23,7 @@ PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4
 
 
 def options(tmp_path, **settings):
-    return DouyinOptions(GroupSettings(enabled=True, groups=[GROUP], **settings), tmp_path / "douyin.local.yml", tmp_path / "downloads")
+    return DouyinOptions(GroupSettings(**{"enabled": True, "groups": [GROUP], "parser_provider": "builtin", **settings}), tmp_path / "douyin.local.yml", tmp_path / "downloads")
 
 
 def page(item):

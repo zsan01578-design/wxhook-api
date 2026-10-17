@@ -16,6 +16,11 @@
         <div class="section-heading"><span class="section-number">01</span><h2>选择群聊</h2></div>
         <p class="section-description">此处修改默认群名单。管理系统中单独设置的群功能优先，实际状态可在群聊管理中查看。</p>
         <form id="group-form">
+          <label for="parser-provider">解析来源</label>
+          <select id="parser-provider"><option value="api">指定解析接口（jk.y-l.cc）</option><option value="builtin">原公开分享页解析</option></select>
+          <label for="parser-api-url" class="api-url-label">完整接口地址</label>
+          <input id="parser-api-url" type="url" placeholder="https://jk.y-l.cc/api/dsp/接口标识/用户ID/" autocomplete="off" spellcheck="false">
+          <p class="field-note">填写接口方提供的完整地址，不要附加 ?url= 参数。地址含账号标识，只保存到本机配置；接口失败时会提示原因。</p>
           <label class="check-label"><input id="enabled" type="checkbox">启用群聊抖音解析</label>
           <label for="groups">群 ID，每行一个</label>
           <textarea id="groups" rows="6" placeholder="123456789@chatroom" spellcheck="false"></textarea>
