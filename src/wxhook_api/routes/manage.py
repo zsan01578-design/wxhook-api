@@ -128,7 +128,7 @@ async def messages(group: GroupId, request: Request, page: int = Query(1, ge=1),
 
 @router.get("/groups/{group}/word-cloud")
 async def word_cloud(group: GroupId, request: Request):
-    return JSONResponse(await request.app.state.groups.word_cloud(group), headers={"Cache-Control": "no-store"})
+    return JSONResponse(await request.app.state.groups.word_cloud(group, bot_wxid=request.app.state.chatbot.identity), headers={"Cache-Control": "no-store"})
 
 
 @router.post("/groups")

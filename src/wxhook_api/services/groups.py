@@ -376,11 +376,25 @@ class GroupManager:
         async with self._lock:
             return await asyncio.to_thread(write)
 
-    async def word_cloud(self, group: str) -> dict:
+    async def word_cloud(self, group: str, *, bot_wxid: str = "") -> dict:
         def read():
             with self._connect() as db:
-                return [row[0] for row in db.execute("""SELECT substr(content,1,2000) FROM chat_messages
-                    WHERE group_id=? AND type=1 ORDER BY timestamp DESC,id DESC LIMIT 1000""", (group,))]
+                account = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
+                identity = account[0] if account else bot_wxid
+                texts = []
+                rows = db.execute("""SELECT substr(content,1,2000) AS content,sender,
+                    json_extract(raw_json,'$.is_self') AS is_self FROM chat_messages
+                    WHERE group_id=? AND type=1 AND (?='' OR sender<>?)
+                    ORDER BY timestamp DESC,id DESC""", (group, identity, identity))
+                for row in rows:
+                    if row["is_self"] in (True, 1, "1", "true"):
+                        continue
+                    if identity and row["sender"] in ("", group) and row["content"].startswith((identity + ":\n", identity + ":\r\n")):
+                        continue
+                    texts.append(row["content"])
+                    if len(texts) == 1000:
+                        break
+                return texts
         async with self._lock:
             texts = await asyncio.to_thread(read)
         signature = hashlib.sha256(json.dumps(texts, ensure_ascii=False).encode()).hexdigest()

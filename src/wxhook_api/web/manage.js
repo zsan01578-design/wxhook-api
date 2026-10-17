@@ -258,7 +258,7 @@ function renderInspector(group) {
   } else if (!wordCloud.words.length) {
     cloudSection.append(el("p", "word-cloud-empty", "暂无可展示的词语"), el("p", "inspector-hint", "群内文字消息积累后，会自动生成词云。"));
   } else {
-    cloudSection.append(renderWordCloud(wordCloud.words), el("p", "inspector-hint", `最近 ${wordCloud.sampled_messages} 条文本消息 · 字越大，出现越多。点击词语查看相关消息。`));
+    cloudSection.append(renderWordCloud(wordCloud.words), el("p", "inspector-hint", `最近 ${wordCloud.sampled_messages} 条成员文本消息（不含机器人） · 字越大，出现越多。点击词语查看相关消息。`));
   }
   const tip = el("div", "inspector-tip"); tip.append(icon("shield"), el("strong", "", "让群聊保持有序"), el("p", "", "黑名单只停止本系统的自动处理，不会退群、踢人或屏蔽微信消息。成员黑名单仅在所在群生效。"));
   const shortcuts = el("div", "inspector-actions");

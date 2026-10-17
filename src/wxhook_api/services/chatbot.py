@@ -87,6 +87,10 @@ class MentionChatService:
         self._names_lock = asyncio.Lock()
         self._profile_names: tuple[str, ...] = ()
 
+    @property
+    def identity(self) -> str:
+        return self._identity
+
     def snapshot(self) -> dict:
         return {"enabled": self.options.enabled, "answer_configured": self.provider is not None,
                 "identity_known": bool(self._identity and self._profile_valid), "mention_names": list(self._names),

@@ -59,3 +59,58 @@ async def test_word_cloud_uses_latest_thousand_text_messages_and_limits_words(tm
     assert data["sampled_messages"] == 1000
     assert data["words"] == [{"text": "新词", "count": 1000}]
     assert len(frequent_words([" ".join(f"word{n}" for n in range(100))])) == 40
+
+
+async def test_robot_messages_excluded_from_api_even_when_chatbot_is_disabled(tmp_path):
+    from wxhook_api.core.chatbot_config import ChatbotOptions
+    from wxhook_api.services.chatbot import MentionChatService
+
+    app = create_app(douyin_service=make_service(tmp_path),
+                     chat_service=MentionChatService(ChatbotOptions(False, "wxid_robot")))
+    async with LifespanManager(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        manager = app.state.groups
+        await manager.import_history(GROUP, [
+            {"msgid": 1, "timestamp": 1, "type": 1, "content": "苹果 苹果", "sender": "wxid_member"},
+            {"msgid": 2, "timestamp": 2, "type": 1, "content": "香蕉 香蕉", "sender": "wxid_robot"},
+        ])
+        await manager.receive(CallbackEvent.model_validate(event("西瓜", msgid=3, sender="wxid_robot")))
+        await manager.receive(CallbackEvent.model_validate(event("葡萄", msgid=4, sender="", is_self=True)))
+        result = (await client.get(f"/api/manage/groups/{GROUP}/word-cloud")).json()
+        assert result["sampled_messages"] == 1
+        assert result["words"] == [{"text": "苹果", "count": 2}]
+        assert (await manager.messages(GROUP))["total"] == 4, "Robot messages remain in chat history"
+
+
+async def test_identity_discovery_invalidates_word_cloud_and_persisted_account_survives_restart(tmp_path):
+    path = tmp_path / "cloud.sqlite3"
+    manager = GroupManager(path)
+    await manager.start([])
+    await manager.import_history(GROUP, [
+        {"msgid": 1, "timestamp": 1, "type": 1, "content": "苹果", "sender": "wxid_member"},
+        {"msgid": 2, "timestamp": 2, "type": 1, "content": "香蕉", "sender": "wxid_robot"},
+    ])
+    assert (await manager.word_cloud(GROUP))["sampled_messages"] == 2
+    await manager.claim_account("wxid_robot")
+    result = await manager.word_cloud(GROUP)
+    assert result["sampled_messages"] == 1 and result["words"] == [{"text": "苹果", "count": 1}]
+    restarted = GroupManager(path)
+    await restarted.start([])
+    assert await restarted.word_cloud(GROUP) == result
+
+
+async def test_robot_messages_do_not_consume_the_thousand_member_message_limit(tmp_path):
+    manager = GroupManager(tmp_path / "limit.sqlite3")
+    await manager.start([])
+    await manager.claim_account("wxid_robot")
+    await manager.import_history(GROUP, [
+        {"msgid": i, "timestamp": i, "type": 1, "sender": "wxid_member", "content": "苹果"}
+        for i in range(1, 1001)
+    ] + [
+        {"msgid": i, "timestamp": i, "type": 1, "sender": "wxid_robot", "content": "香蕉"}
+        for i in range(1001, 2101)
+    ])
+    # Older callbacks can identify self messages only through a sender prefix.
+    await manager.receive(CallbackEvent.model_validate(event("wxid_robot:\n西瓜", msgid=2200, sender="")))
+    result = await manager.word_cloud(GROUP)
+    assert result["sampled_messages"] == 1000
+    assert result["words"] == [{"text": "苹果", "count": 1000}]
