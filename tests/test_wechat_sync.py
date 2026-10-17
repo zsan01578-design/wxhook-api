@@ -7,12 +7,12 @@ import httpx
 import pytest
 
 from tests.test_callbacks import EVENT
-from wxhook_api.clients.hook_client import HookClient
+from wxhook_api.clients.hook_client import HookClient, HookResponse
 from wxhook_api.core.douyin_config import GroupSettings
 from wxhook_api.main import create_app
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.groups import GroupManager
-from wxhook_api.services.wechat_sync import SyncError, SyncOptions, WeChatSync
+from wxhook_api.services.wechat_sync import SyncError, SyncOptions, WeChatSync, records
 
 
 ROOM = "1000@chatroom"
@@ -57,7 +57,8 @@ class FakeWeChat:
         if request.url.path == "/GetSelfProfile":
             return httpx.Response(200, json={"wxid": self.account})
         if request.url.path == "/QueryDB/GetAllDBName":
-            return httpx.Response(200, json=[{"dbName": "contact.db"}, {"dbName": "message_0.db"}])
+            # This envelope is the actual response supplied by the user's test machine.
+            return httpx.Response(200, json={"ret": 0, "retmsg": "success", "data": [{"dbName": "contact.db"}, {"dbName": "message_0.db"}]})
         if request.url.path == "/QueryDB/execute":
             assert body["optDbName"] == "contact.db"
             sql = body["SQL"]
@@ -331,3 +332,82 @@ async def test_history_enriches_unknown_callback_sender_without_duplicate_messag
     await manager.import_history(ROOM, [FakeWeChat.message(1)])
     assert (await manager.messages(ROOM))["total"] == 1
     assert (await manager.members(ROOM))[0]["id"] == "wxid_member"
+
+
+@pytest.mark.parametrize("payload,array", [
+    ([{"dbName": "contact.db"}], True),
+    ({"ret": 0, "retmsg": "success", "data": [{"dbName": "contact.db"}]}, True),
+    ({"ret": "0", "data": [{"dbName": "contact.db"}]}, True),
+    ({"status": 0, "desc": "", "data": [{"dbName": "contact.db"}]}, False),
+    ({"ret": 0, "data": {"status": 0, "data": [{"dbName": "contact.db"}]}}, False),
+])
+def test_successful_hook_response_envelopes_are_normalized(payload, array):
+    assert records(HookResponse(payload, 200), array=array) == [{"dbName": "contact.db"}]
+
+
+@pytest.mark.parametrize("payload,status,expected", [
+    ({"ret": -1, "data": []}, 200, "ret=-1"),
+    ({"status": 1, "data": []}, 200, "status=1"),
+    ({"ret": 0, "status": -1, "data": []}, 200, "status=-1"),
+    ({"ret": 0, "data": {"status": -1, "data": []}}, 200, "status=-1"),
+    ({"data": []}, 200, "缺少 ret/status"),
+    ({"ret": 0, "data": {}}, 200, "缺少 ret/status"),
+    ({"ret": 0, "data": None}, 200, "不是记录列表"),
+    ({"ret": 0, "data": ["bad row"]}, 200, "不是记录列表"),
+    ({"ret": 0, "data": []}, 503, "HTTP 503"),
+])
+def test_failed_or_malformed_hook_envelopes_remain_errors(payload, status, expected):
+    with pytest.raises(SyncError, match=expected):
+        records(HookResponse(payload, status), array=True, context="获取微信数据库清单")
+
+
+def test_raw_sql_array_without_result_code_is_not_silently_accepted():
+    with pytest.raises(SyncError, match="缺少 ret/status"):
+        records(HookResponse([], 200), context="查询 contact.db")
+
+
+async def test_shipped_hook_protocol_syncs_groups_and_normalized_history(tmp_path):
+    fake = FakeWeChat(history=5)
+
+    def shipped_protocol(request):
+        response = fake.respond(request)
+        data = response.json()
+        if request.url.path == "/Message/history":
+            data["ret"] = data.pop("status")
+            data["retmsg"] = "success"
+            data["data"] = [{"msgid": row["server_id"], "timestamp": row["create_time"], "type": row["local_type"],
+                "content": row["message_content"], "sender": row["real_sender"], "sender_nickname": "微信返回的昵称"} for row in data["data"]]
+            return httpx.Response(200, json=data)
+        if request.url.path == "/QueryDB/execute":
+            return httpx.Response(200, json={"ret": 0, "retmsg": "success", "data": data})
+        return response
+
+    manager = GroupManager(tmp_path / "management.sqlite3")
+    await manager.start([])
+    await manager.add_group(ROOM, "本地群备注")
+    await manager.save_member(ROOM, "wxid_member", {"name": "本地成员备注", "blocked": True}, create=True)
+    async with HookClient("http://hook", transport=httpx.MockTransport(shipped_protocol)) as client:
+        sync = WeChatSync(manager, SyncOptions(page_size=2, pages_per_group=2))
+        sync.client = client
+        for _ in range(4):
+            await sync.run_once()
+        groups = await manager.groups(GroupSettings())
+        assert len(groups) == 1 and groups[0]["history_complete"]
+        assert groups[0]["name"] == "本地群备注"
+        rows = (await manager.messages(ROOM))["messages"]
+        assert len(rows) == 5
+        assert rows[0]["content"] == "聊天记录 5"
+        assert rows[0]["timestamp"] == 1800000005 and rows[0]["type"] == 1
+        assert rows[0]["sender"] == "wxid_member"
+        member = (await manager.members(ROOM))[0]
+        assert member["name"] == "本地成员备注" and member["wechat_name"] == "微信返回的昵称" and member["blocked"]
+        await sync.receive(CallbackEvent.model_validate({**EVENT, "roomid": ROOM, "msgid": fake.message(5)["server_id"], "sender": "wxid_member"}))
+        assert (await manager.messages(ROOM))["total"] == 5
+
+
+async def test_real_database_list_envelope_is_not_rewritten_by_bridge(tmp_path):
+    payload = {"ret": 0, "retmsg": "success", "data": [{"dbName": "contact.db", "dbHandle": 2848485925504}, {"dbName": "session.db", "dbHandle": 2848485924000}]}
+    app = create_app(hook_transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)), sync_options=SyncOptions(enabled=False))
+    async with LifespanManager(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/QueryDB/GetAllDBName", json={})
+        assert response.json() == payload

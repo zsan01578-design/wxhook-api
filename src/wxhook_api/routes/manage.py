@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 
 from wxhook_api.schemas.requests import ContactSearchRequest
 from wxhook_api.services.groups import GROUP_PATTERN
+from wxhook_api.services.wechat_sync import SyncError, records
 
 
 router = APIRouter(prefix="/api/manage", tags=["群聊管理"])
@@ -107,10 +108,10 @@ async def audit(request: Request, group: GroupId | None = None):
 @router.get("/contacts")
 async def contacts(request: Request, keyword: str = Query(min_length=1, max_length=80)):
     result = await request.app.state.hook_client.search_contacts(ContactSearchRequest(keywords=[keyword]))
-    data = result.data
-    if result.status_code != 200 or not isinstance(data, dict) or str(data.get("status")) != "0":
-        raise HTTPException(502, "无法读取微信联系人，请确认微信已登录且 Hook 已连接")
-    rows = data.get("data", [])
+    try:
+        rows = records(result, context="查找微信群聊")
+    except SyncError as exc:
+        raise HTTPException(502, str(exc)) from exc
     return {"groups": [{"id": row["username"], "name": row.get("remark") or row.get("nick_name") or ""} for row in rows if isinstance(row, dict) and isinstance(row.get("username"), str) and row["username"].endswith("@chatroom")]}
 
 

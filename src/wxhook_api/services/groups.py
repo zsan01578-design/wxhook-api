@@ -262,6 +262,8 @@ class GroupManager:
                     if sender and sender != group and len(sender) <= 256:
                         db.execute("""INSERT INTO members (group_id,id,last_seen) VALUES (?,?,?)
                             ON CONFLICT(group_id,id) DO UPDATE SET last_seen=MAX(last_seen,excluded.last_seen)""", (group, sender, seen_at))
+                        if message.get("sender_name"):
+                            db.execute("UPDATE members SET wechat_name=? WHERE group_id=? AND id=?", (message["sender_name"], group, sender))
                 continue
             added += 1
             db.execute("""UPDATE groups SET message_count=message_count+1,
@@ -271,6 +273,8 @@ class GroupManager:
             if sender and sender != group and len(sender) <= 256:
                 db.execute("""INSERT INTO members (group_id,id,last_seen,message_count) VALUES (?,?,?,1)
                     ON CONFLICT(group_id,id) DO UPDATE SET last_seen=MAX(last_seen,excluded.last_seen), message_count=message_count+1""", (group, sender, seen_at))
+                if message.get("sender_name"):
+                    db.execute("UPDATE members SET wechat_name=? WHERE group_id=? AND id=?", (message["sender_name"], group, sender))
         latest = db.execute("SELECT content,timestamp FROM chat_messages WHERE group_id=? ORDER BY timestamp DESC,id DESC LIMIT 1", (group,)).fetchone()
         if latest:
             db.execute("UPDATE groups SET last_message=?,last_seen=? WHERE id=?", (latest["content"][:300], datetime.fromtimestamp(latest["timestamp"], timezone.utc).isoformat(), group))
@@ -321,23 +325,28 @@ class GroupManager:
     async def import_history(self, group: str, rows: list[dict]) -> tuple[int, int]:
         normalized = []
         for row in rows:
-            server = str(row.get("server_id") or "0")
+            server = str(row.get("server_id") or row.get("msgid") or "0")
+            if server == "0":
+                server = str(row.get("msgid") or "0")
             if server != "0":
                 key = "server:" + server
             elif str(row.get("local_id") or "0") != "0" and row.get("db_name"):
                 key = f'local:{row["db_name"]}:{row.get("table_name", "")}:{row["local_id"]}'
             else:
                 key = "digest:" + hashlib.sha256(json.dumps(row, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-            content = str(row.get("message_content") or row.get("compress_content") or "")
-            sender = str(row.get("real_sender") or "")
+            # Shipped Hook history rows are normalized to msgid/timestamp/type/content/sender.
+            # Keep support for the raw column names documented by earlier Hook builds.
+            content = str(row.get("content") or row.get("message_content") or row.get("compress_content") or "")
+            sender = str(row.get("real_sender") or row.get("sender") or "")
             if sender == "0":
                 sender = ""
             if not sender:
                 prefix = re.match(r"^([A-Za-z0-9_.-]{1,256}):\n", content)
                 if prefix:
                     sender = prefix[1]
-            normalized.append({"key": key, "msgid": server, "sender": sender, "type": int(row.get("local_type") or 0),
-                               "timestamp": int(row.get("create_time") or 0), "content": content, "source": "history", "raw": row})
+            normalized.append({"key": key, "msgid": server, "sender": sender, "sender_name": str(row.get("sender_nickname") or "")[:256],
+                               "type": int(row.get("local_type") or row.get("type") or 0),
+                               "timestamp": int(row.get("create_time") or row.get("timestamp") or 0), "content": content, "source": "history", "raw": row})
         def write():
             with self._connect() as db:
                 return self._save_messages(db, group, normalized)

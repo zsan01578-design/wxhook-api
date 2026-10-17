@@ -498,7 +498,13 @@ send
 }
 ```
 
-`/QueryDB/GetAllDBName` 也可能直接返回数据库数组，`/QueryDB/status` 返回 `IsLogin` 和 `hWeixin` 对象。桥接层不会强行把这些不同响应改成统一结构。
+测试机提供的 Hook 中，`/QueryDB/GetAllDBName` 实际返回 `{"ret":0,"retmsg":"success","data":[{"dbName":"contact.db","dbHandle":123}]}`；其他版本也可能直接返回数据库数组，或使用 `status: 0` 包装。
+自动同步同时兼容这些成功响应，以及 `ret: 0` 外层包装的 SQL `status: 0` 结果；出现任一非零错误码时仍按失败处理。
+`/QueryDB/status` 返回 `IsLogin` 和 `hWeixin` 等字段。桥接原始接口保持响应透传，兼容处理只发生在管理系统内部。
+
+仓库自带 Hook 的历史记录使用 `msgid / timestamp / type / content / sender / sender_nickname` 字段；同步器同时支持早期文档中的
+`server_id / create_time / local_type / message_content / real_sender` 字段，保留消息 ID、原始时间、正文和发送人，并与实时回调去重。
+同步失败时页面会指出失败阶段与 HTTP / Hook 状态码，便于区分数据库清单、SQL 查询和历史记录接口的问题。
 
 ### 响应透传
 

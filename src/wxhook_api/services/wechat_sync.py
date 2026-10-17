@@ -52,18 +52,33 @@ def select_name(columns: dict[str, str], prefix: str = "") -> str:
     return "COALESCE(" + ",".join([*expressions, "''"]) + ")" if expressions else "''"
 
 
-def records(response: HookResponse, *, array: bool = False) -> list[dict]:
+def records(response: HookResponse, *, array: bool = False, context: str = "读取微信数据") -> list[dict]:
     if response.status_code != 200:
-        raise SyncError("微信数据接口请求失败，稍后自动重试")
+        raise SyncError(f"{context}失败（HTTP {response.status_code}），稍后自动重试")
     data = response.data
     if array and isinstance(data, list):
         rows = data
-    elif isinstance(data, dict) and str(data.get("status")) == "0":
-        rows = data.get("data")
     else:
-        raise SyncError("微信数据库暂不可读或接口返回异常，稍后自动重试")
+        if isinstance(data, list):
+            raise SyncError(f"{context}失败：接口缺少 ret/status 状态码，请检查 Hook 返回格式")
+        # The shipped DLL wraps GetAllDBName with ret/retmsg, while raw SQL uses status/desc.
+        # Some bridges also wrap the raw SQL object; inspect every explicit result code.
+        rows = data
+        for _ in range(3):
+            if not isinstance(rows, dict):
+                break
+            codes = {key: rows[key] for key in ("ret", "status", "db_status") if key in rows}
+            if not codes:
+                raise SyncError(f"{context}失败：接口缺少 ret/status 状态码，请检查 Hook 返回格式")
+            failures = {key: value for key, value in codes.items() if str(value) != "0"}
+            if failures:
+                details = ", ".join(f"{key}={str(value)[:20]}" for key, value in failures.items())
+                raise SyncError(f"{context}失败（{details}），稍后自动重试")
+            rows = rows.get("data")
+            if isinstance(rows, list):
+                break
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-        raise SyncError("微信数据格式不受支持，未将该批数据标记为同步完成")
+        raise SyncError(f"{context}失败：data 不是记录列表，未将该批数据标记为同步完成")
     return rows
 
 
@@ -122,7 +137,7 @@ class WeChatSync:
     async def _query(self, database: str, sql: str) -> list[dict]:
         if not sql.lstrip().upper().startswith(("SELECT ", "PRAGMA TABLE_INFO(")):
             raise SyncError("同步仅允许只读查询")
-        return records(await self.client.execute_query(ExecuteQueryRequest(optDbName=database, SQL=sql)))
+        return records(await self.client.execute_query(ExecuteQueryRequest(optDbName=database, SQL=sql)), context=f"查询 {database}")
 
     async def _pages(self, database: str, sql: str) -> list[dict]:
         output, offset = [], 0
@@ -139,7 +154,7 @@ class WeChatSync:
             offset += len(rows)
 
     async def _contacts(self) -> tuple[list[dict], dict[str, list[dict]], list[str]]:
-        databases = records(await self.client.get_all_db_names(), array=True)
+        databases = records(await self.client.get_all_db_names(), array=True, context="获取微信数据库清单")
         candidates = list(dict.fromkeys(row["dbName"] for row in databases if isinstance(row.get("dbName"), str)
                           and re.search(r"(?:^|[/\\])(?:contact|micromsg|session)\.db$", row["dbName"], re.I)))
         if not candidates:
@@ -228,7 +243,7 @@ class WeChatSync:
         previous = None
         for page in pages:
             response = await self.client.get_history(HistoryRequest(wxid=group["id"], size=size, page=page))
-            rows = records(response)
+            rows = records(response, context="读取群聊历史记录")
             if response.data.get("wxid", group["id"]) != group["id"] or int(response.data.get("page", page)) != page or len(rows) > size:
                 raise SyncError("微信历史接口返回的会话或分页信息不一致，未导入该页")
             await self._same_account(account)
