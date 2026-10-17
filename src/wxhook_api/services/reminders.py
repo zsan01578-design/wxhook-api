@@ -96,7 +96,7 @@ class ReminderService:
             await asyncio.gather(self._worker, return_exceptions=True)
             self._worker = None
 
-    async def chat_command(self, question, group, sender, key, received_at=None):
+    async def chat_command(self, question, group, sender, key):
         command = question.strip().rstrip("。！!？?")
         if command in ("我的提醒", "提醒列表"):
             rows = await self.tools.db(lambda db: db.execute(
@@ -113,14 +113,11 @@ class ReminderService:
             return "已取消这条提醒。" if changed else "未找到你在本群的待提醒事项，请发送“我的提醒”查看编号。"
         if command == "取消提醒":
             return "请发送“我的提醒”查看编号，再发送“取消提醒 编号”。"
-        current = datetime.fromisoformat(received_at).astimezone(CHINA) if received_at else datetime.now(CHINA)
         try:
-            parsed = parse_reminder(command, current)
-            if parsed is None:
+            if parse_reminder(command, datetime.now(CHINA)) is None:
                 return None
             if not sender or sender.endswith("@chatroom") or sender == "notify@all":
                 return "未能识别发起人的微信ID，无法创建提醒，请检查消息回调。"
-            due, title = parsed
             def save(db):
                 existing = db.execute("SELECT * FROM member_reminders WHERE group_id=? AND message_key=?", (group, key)).fetchone()
                 if existing:
@@ -128,8 +125,11 @@ class ReminderService:
                 count = db.execute("SELECT count(*),sum(sender=?) FROM member_reminders WHERE group_id=? AND status='pending'", (sender, group)).fetchone()
                 if count[0] >= 200 or (count[1] or 0) >= 50:
                     raise ValueError("本群待提醒事项已达上限（每人50条、每群200条），请先取消部分提醒。")
+                # Queue and database waits must not consume the requested countdown.
+                created_at = now()
+                due, title = parse_reminder(command, datetime.fromisoformat(created_at).astimezone(CHINA))
                 item = dict(id=uuid4().hex[:12], group_id=group, sender=sender, message_key=key,
-                            title=title, due_at=due.timestamp(), status="pending", created_at=now(), updated_at=now())
+                            title=title, due_at=due.timestamp(), status="pending", created_at=created_at, updated_at=created_at)
                 db.execute("INSERT INTO member_reminders VALUES (:id,:group_id,:sender,:message_key,:title,:due_at,:status,:created_at,:updated_at)", item)
                 return item
             item = await self.tools.db(save)

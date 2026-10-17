@@ -231,19 +231,19 @@ class MentionChatService:
             self._seen.popitem(last=False)
         try:
             report.update(status="queued", message="已识别 @机器人，等待调用模型")
-            self._queue.put_nowait({"group": group, "sender": event.sender, "key": key, "question": question, "report": report, "received_at": now()})
+            self._queue.put_nowait({"group": group, "sender": event.sender, "key": key, "question": question, "report": report})
         except asyncio.QueueFull:
             self.last_error = "问答队列已满，未创建本次回复"
             report.update(status="queue_full", message=self.last_error)
         return True
 
-    async def _answer(self, question: str, group: str = "", *, sender: str | None = None, key: str = "", received_at: str | None = None) -> str:
+    async def _answer(self, question: str, group: str = "", *, sender: str | None = None, key: str = "") -> str:
         if not question:
             return "我在，请在 @ 后写下你的问题。"
         if len(question) > 8000:
             return "问题太长了，请缩短后重新 @ 我。"
         if self.tools_service and sender is not None:
-            result = await self.tools_service.reminders.chat_command(question, group, sender, key, received_at)
+            result = await self.tools_service.reminders.chat_command(question, group, sender, key)
             if result is not None:
                 return result
         compact_question = re.sub(r"\s+", "", question or "")
@@ -289,7 +289,7 @@ class MentionChatService:
                     report.update(status="duplicate", message="此消息已处理或已尝试发送，不会重复回复；请发送新的提问")
                     continue
                 report.update(status="answering", message="正在等待模型回复")
-                answer = await self._answer(job["question"], job["group"], sender=job["sender"], key=job["key"], received_at=job["received_at"])
+                answer = await self._answer(job["question"], job["group"], sender=job["sender"], key=job["key"])
                 limit = self.options.max_reply_chars
                 if len(answer) > limit:
                     answer = answer[:limit - 1] + "…"

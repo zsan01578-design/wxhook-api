@@ -68,6 +68,26 @@ async def test_callback_records_and_mentions_original_member_once_without_model(
         assert len(state.sends) == 2 and (await reminders(tools))[0]['status'] == "sent"
 
 
+async def test_countdown_starts_at_creation_after_queue_delay(tmp_path, monkeypatch):
+    received = datetime(2026, 10, 17, 23, 26, 0, tzinfo=CHINA)
+    created = received + timedelta(seconds=45)
+    async with context(tmp_path) as state:
+        tools = state.app.state.group_tools
+        await tools.reminders.stop()
+        monkeypatch.setattr("wxhook_api.services.chatbot.now", lambda: received.isoformat())
+        monkeypatch.setattr("wxhook_api.services.reminders.now", lambda: created.isoformat())
+        await state.submit(event("@机器人\u2005提醒我一分钟后喝水"))
+        row = (await reminders(tools))[0]
+        assert row['due_at'] - datetime.fromisoformat(row['created_at']).timestamp() == 60
+        assert "23:27:45" in state.sends[0]['msg']
+        await tools.reminders.due_reminders(received + timedelta(minutes=1))
+        assert len(state.sends) == 1, "The old receipt-based deadline must not trigger a reminder"
+        await tools.reminders.due_reminders(created + timedelta(seconds=59))
+        assert len(state.sends) == 1
+        await tools.reminders.due_reminders(created + timedelta(seconds=60))
+        assert len(state.sends) == 2 and state.sends[-1]['atlist'] == [MEMBER]
+
+
 async def test_list_cancel_and_scope(tmp_path):
     async with context(tmp_path) as state:
         tools = state.app.state.group_tools
