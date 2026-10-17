@@ -231,3 +231,22 @@ def test_reusing_service_also_presents_native_wechat(monkeypatch):
     start.assert_called_once_with(options)
     present.assert_awaited_once_with(options)
     serve.assert_not_called()
+
+
+@pytest.mark.parametrize("revision", [None, "old-source-revision", "current-source-revision"])
+def test_reuse_requires_matching_backend_revision(monkeypatch, revision):
+    settings = load_settings()
+
+    def respond(request):
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok", "hook_base_url": settings.hook_base_url, "runtime_revision": revision})
+        return httpx.Response(200, json={"instance": "test", "messages": [], "capacity": 100, "total": 0, "startup": {"phase": "ready"}})
+
+    client = httpx.Client(base_url="http://127.0.0.1:8000", transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(launcher.httpx, "Client", lambda **kwargs: client)
+    monkeypatch.setattr(launcher, "source_revision", lambda: "current-source-revision")
+    if revision == "current-source-revision":
+        assert launcher.existing_service(settings)
+    else:
+        with pytest.raises(ValueError, match="旧版消息服务仍在运行"):
+            launcher.existing_service(settings)

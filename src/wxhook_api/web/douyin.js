@@ -25,6 +25,9 @@ async function request(path, body) {
   const response = await fetch(path, options);
   const data = await response.json();
   if (!response.ok) {
+    if (data.error?.code === "validation_error" && data.error.message === "request validation failed") {
+      throw new Error("后台拒绝此配置。请先停止旧服务并重新运行 main.py，再刷新页面；同时确认填写的是群 ID，不能填群昵称。");
+    }
     const detail = Array.isArray(data.detail) ? data.detail[0]?.msg : data.detail;
     throw new Error(detail || data.error?.message || `请求失败（HTTP ${response.status}）`);
   }
@@ -54,6 +57,10 @@ async function loadConfig() {
     message("config-status", data.settings.enabled && data.settings.groups.length ? `默认名单已启用 ${data.settings.groups.length} 个群，独立配置以群管理为准。` : "默认群名单未启用，独立配置以群管理为准。");
     if (element("parser-provider").value === "api" && !element("parser-api-url").value) message("config-status", "请填写完整解析接口地址并保存。", true);
     if (data.feedback_available === false) message("config-status", "群内发送总开关已关闭；如需提示和回传，请检查 WXHOOK_DOUYIN_FEEDBACK_ENABLED 后重启。", true);
+    if (!data.supported_parsers?.includes("parse_video")) {
+      element("save-settings").disabled = true;
+      message("config-status", "检测到页面与后台版本不一致。请停止原 PyCharm 任务或原终端服务，重新运行根目录 main.py 后刷新页面。", true);
+    }
   } catch (error) {
     message("config-status", `读取配置失败：${error.message}`, true);
   }

@@ -14,6 +14,7 @@ import httpx
 import uvicorn
 
 from wxhook_api.core.config import PROJECT_ROOT, Settings, load_settings, load_yaml
+from wxhook_api.core.runtime import source_revision
 from wxhook_api.main import create_app
 from wxhook_api.services.desktop import show_wechat_window, wechat_process_ids
 
@@ -196,15 +197,19 @@ def existing_service(settings: Settings) -> bool:
             health = client.get("/health")
             inbox = client.get("/ui/messages")
             data = inbox.json()
-            return (
+            status = health.json()
+            identified = (
                 health.status_code == inbox.status_code == 200
-                and health.json().get("hook_base_url") == settings.hook_base_url
+                and status.get("hook_base_url") == settings.hook_base_url
                 and isinstance(data, dict)
                 and {"instance", "messages", "capacity", "total"}.issubset(data)
                 and isinstance(data.get("startup"), dict)
             )
     except (httpx.HTTPError, ValueError, AttributeError):
         return False
+    if identified and status.get("runtime_revision") != source_revision():
+        raise ValueError("检测到旧版消息服务仍在运行，更新的代码尚未生效。请停止原 PyCharm 运行/调试任务或在原终端按 Ctrl+C，再运行根目录 main.py。无需退出微信。")
+    return identified
 
 
 def main() -> None:

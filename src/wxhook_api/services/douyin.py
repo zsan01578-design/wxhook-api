@@ -17,7 +17,7 @@ from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links
 from wxhook_api.services.douyin_delivery import DeliveryError, DouyinMessenger
 from wxhook_api.services.douyin_api import DouyinAPIParser
-from wxhook_api.services.parse_video import ParseVideoParser, REFERERS
+from wxhook_api.services.parse_video import ParseVideoParser, REFERERS, source_platform
 from wxhook_api.services.groups import GroupManager, event_group
 
 
@@ -125,7 +125,9 @@ class DouyinService:
         group = event_group(event)
         if not self._accepting or not self.allowed(group, event.sender):
             return
-        for link in extract_links(event.content, multi_platform=self.options.settings.parser_provider == "parse_video"):
+        # Recognize all supported platforms even when an older parser is selected.
+        # A configuration mismatch must produce a visible job and failure notice.
+        for link in extract_links(event.content, multi_platform=True):
             key = (group, str(event.msgid), link)
             deduplicate = str(event.msgid) not in {"", "0"}
             if deduplicate and key in self._seen:
@@ -267,11 +269,13 @@ class DouyinService:
                 await self._notice(job, "start", "开始解析分享链接，请稍候…")
                 async with asyncio.timeout(240):
                     config = self.options.settings
+                    job.update(parser_provider=config.parser_provider, platform=source_platform(job["source_url"]))
+                    if config.parser_provider != "parse_video" and job["platform"] != "douyin":
+                        raise DouyinError("当前解析来源仅支持抖音，请在资源页选择 parse-video-py 并保存后重新发送链接")
                     if config.parser_provider == "parse_video":
                         parser = ParseVideoParser(transport=self._transport)
                     else:
                         parser = DouyinAPIParser(self._client, config.parser_api_url) if config.parser_provider == "api" else DouyinParser(self._client)
-                    job["parser_provider"] = config.parser_provider
                     parsed = await parser.parse(job["source_url"])
                     job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind, assets=parsed.assets, platform=parsed.platform)
                     if not self.allowed(job["group_id"], job["sender"]):

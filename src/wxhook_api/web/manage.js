@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = id => document.getElementById(id);
-const state = { groups: [], blocked_members: [], startup: null, sync: null };
+const state = { groups: [], blocked_members: [], startup: null, sync: null, media: null, callbacks: null };
 let selectedId = "", tab = "features", view = "groups", filter = "all", blacklistTab = "groups";
 let members = [], messages = [], audit = [], memberQuery = "", detailVersion = "", listVersion = "";
 let refreshJob, pollTimer, toastTimer, detailToken = 0, mutating = false, connected = false;
@@ -198,11 +198,21 @@ function renderFeatures(group) {
     row.append(art, text, toggleSwitch(title, group[key], disabled, source => mutation(source, groupPath(group.id), { [key]: !group[key] }, `${title}已${group[key] ? "关闭" : "开启"}`))); list.append(row);
   });
   const note = el("div", "feature-footnote"); note.append(icon("info"), el("span", "", "回传媒体需要启用自动保存。群内处理提示和回传开关在“资源”页统一配置；关闭自动保存后只保留解析链接。"));
+  const runtime = el("div", "feature-footnote"), media = state.media;
+  if (media) {
+    const provider = {parse_video: "parse-video-py（抖音 / 小红书 / B站）", api: "指定接口（仅抖音）", builtin: "公开分享页（仅抖音）"}[media.parser_provider] || media.parser_provider;
+    const warnings = [];
+    if (!media.feedback_available) warnings.push("群内发送总开关已关闭，无法发送提示或媒体");
+    if (!media.notify_group) warnings.push("开始、失败和完成提示已关闭");
+    if (!media.send_results) warnings.push("媒体自动回传已关闭");
+    runtime.append(icon("info"), el("span", "", `当前解析来源：${provider}。${warnings.length ? warnings.join("；") + "。" : "群内提示和媒体回传已开启。"}`));
+    const resourceLink = el("a", "text-link", "查看资源与解析记录"); resourceLink.href = "/douyin"; runtime.append(resourceLink);
+  }
   const safety = el("div", "safety-section"), safetyCopy = el("div"), safetyTitle = el("h3");
   safetyTitle.append(icon("shield"), document.createTextNode("群聊黑名单"));
   safetyCopy.append(safetyTitle, el("p", "", "拉黑后不再处理此群的自动功能，消息仍可记录。"));
   safety.append(safetyCopy, button(group.blocked ? "移出黑名单" : "加入黑名单", `button ${group.blocked ? "" : "danger"} small`, () => blockGroupDialog(group), group.blocked ? "check" : "block"));
-  content.replaceChildren(heading, master, list, note, safety);
+  content.replaceChildren(heading, master, list, note, ...(media ? [runtime] : []), safety);
 }
 function renderInspector(group) {
   const node = $("inspector"), heading = el("div", "inspector-heading");
@@ -257,6 +267,7 @@ function renderMessages() {
   prev.disabled = messagePage <= 1; next.disabled = !messageMeta.has_more;
   pager.append(prev, el("span", "", `第 ${messagePage} 页`), next);
   const progress = el("p", group.history_error ? "form-error" : "form-note", group.history_error || (group.history_complete ? "微信本机可见历史已完成首次导入，后续自动增量更新。" : "正在后台分批导入微信本机历史，可先查看已保存的消息。"));
+  progress.append(document.createTextNode(" 历史同步只归档，不触发解析；新分享需要通过实时消息回调接收。"));
   if (!messages.length) { $("tab-content").replaceChildren(heading, search, progress, empty(messageQuery ? "没有匹配的聊天记录" : "等待同步聊天记录", "登录微信后会自动导入当前电脑可读取的群聊天记录。"), pager); return; }
   const stack = el("div", "message-stack");
   messages.forEach((message, i) => {
@@ -290,7 +301,7 @@ async function loadDetail() {
   messages = inbox?.messages || [];
   if (inbox) messageMeta = inbox;
   audit = history?.events || [];
-  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, tab]);
+  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, tab, state.media]);
   if (version === detailVersion) return;
   detailVersion = version;
   renderHeader(current()); renderInspector(current());
@@ -411,7 +422,10 @@ function connectionDialog() {
     try { const data = await api("/set_callback", { url: `http://127.0.0.1:${location.port || (location.protocol === "https:" ? "443" : "80")}/receiveChatBotMsg` }); if (String(data.ret) !== "0") throw new Error(data.retmsg || "Hook 未确认启用成功"); result.textContent = "消息接收已启用，请让目标群发送一条消息以验证回调。"; }
     catch (error) { result.textContent = `启用失败：${error.message}`; }
     finally { source.disabled = false; }
-  })); body.append(status, startup, result, actions);
+  }));
+  const callbacks = state.callbacks;
+  const received = el("p", "form-note", callbacks ? `本次启动已收到 ${callbacks.total} 条实时回调${callbacks.last_received_at ? `，最近一次：${dateText(callbacks.last_received_at)}` : "。如果群消息只有“微信历史”，请启用消息接收后重新发送链接"}。` : "请更新并重启服务后查看实时回调接收状态。");
+  body.append(status, startup, received, result, actions);
 }
 
 async function refreshState(force = false) {

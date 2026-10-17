@@ -264,3 +264,44 @@ def test_old_provider_migrates_once_while_groups_are_preserved(tmp_path, monkeyp
     assert config.settings.groups == [GROUP] and not config.settings.notify_group
     save_group_settings(config, GroupSettings(**{**config.settings.model_dump(), "parser_provider": "builtin"}))
     assert load_douyin_options().settings.parser_provider == "builtin"
+
+
+@pytest.mark.parametrize("provider", ["api", "builtin"])
+@pytest.mark.parametrize("source", [BILI, XHS])
+async def test_old_provider_no_longer_silently_drops_non_douyin_links_in_managed_group(tmp_path, monkeypatch, provider, source):
+    async with scenario(tmp_path, monkeypatch, settings={"enabled": False, "groups": [], "parser_provider": provider}) as context:
+        await context.client.post("/api/manage/groups", json={"id": GROUP})
+        await context.client.patch(f"/api/manage/groups/{GROUP}", json={"douyin_enabled": True, "auto_download": True})
+
+        def unexpected(request):
+            pytest.fail("An unsupported parser must not request a media platform")
+
+        context.service._transport = httpx.MockTransport(unexpected)
+        job = await context.submit(source)
+        assert job["status"] == "failed"
+        assert "parse-video-py" in job["error"]
+        assert job["parser_provider"] == provider
+        assert [path for path, _ in context.hook_calls] == ["/SendTextMsg", "/SendTextMsg"]
+        assert "开始解析" in context.hook_calls[0][1]["msg"]
+        assert "解析失败" in context.hook_calls[-1][1]["msg"]
+
+
+async def test_management_enabled_bili_card_parses_without_legacy_group_list(tmp_path, monkeypatch):
+    async with scenario(tmp_path, monkeypatch, settings={"enabled": False, "groups": [], "parser_provider": "parse_video"}) as context:
+        await context.client.post("/api/manage/groups", json={"id": GROUP})
+        await context.client.patch(f"/api/manage/groups/{GROUP}", json={"douyin_enabled": True, "auto_download": True})
+        context.service._transport = httpx.MockTransport(sdk_response)
+        original = context.service._client
+        context.service._client = httpx.AsyncClient(transport=context.service._transport)
+        try:
+            job = await context.submit(f"<msg><appmsg><url><![CDATA[{BILI}]]></url></appmsg></msg>")
+            assert job["status"] == "completed", job["error"]
+            assert job["delivery_status"] == "sent" and job["platform"] == "bilibili"
+            assert [path for path, _ in context.hook_calls] == ["/SendTextMsg", "/send_file_msg", "/SendTextMsg"]
+            state = (await context.client.get("/api/manage/state")).json()
+            assert state["callbacks"]["total"] == 1 and state["callbacks"]["last_received_at"]
+            assert state["media"] == {"parser_provider": "parse_video", "notify_group": True, "send_results": True, "feedback_available": True}
+            assert (await context.client.get("/api/douyin/config")).json()["supported_parsers"] == ["parse_video", "api", "builtin"]
+        finally:
+            await context.service._client.aclose()
+            context.service._client = original

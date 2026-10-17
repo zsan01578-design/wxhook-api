@@ -116,6 +116,15 @@ def test_local_endpoint_configuration_rejects_wrong_hosts_or_query_parameters(va
         GroupSettings(parser_api_url=value)
 
 
+async def test_configuration_validation_explains_field_without_echoing_rejected_values(tmp_path, monkeypatch):
+    async with scenario(tmp_path, monkeypatch) as context:
+        for body, expected in [({"groups": ["private-group-name"]}, "群 ID"), ({"parser_provider": "unknown-engine"}, "解析来源"), ({"parser_api_url": "https://secret.invalid/private-account"}, "接口地址")]:
+            response = await context.client.post("/api/douyin/config", json=body)
+            assert response.status_code == 422
+            assert expected in response.json()["error"]["message"]
+            assert "private-group-name" not in response.text and "private-account" not in response.text
+
+
 def test_endpoint_is_saved_only_in_local_settings_and_env_can_override(tmp_path, monkeypatch):
     config = options(tmp_path)
     settings = GroupSettings(enabled=True, groups=[GROUP], parser_provider="api", parser_api_url=ENDPOINT)

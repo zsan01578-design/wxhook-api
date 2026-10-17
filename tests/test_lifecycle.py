@@ -19,7 +19,8 @@ async def test_health_reports_local_service_without_calling_hook():
         response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "hook_base_url": "http://127.0.0.1:30001", "hook_port": 30001}
+    assert response.json() == {"status": "ok", "hook_base_url": "http://127.0.0.1:30001", "hook_port": 30001, "runtime_revision": app.state.runtime_revision}
+    assert len(app.state.runtime_revision) == 64
     assert calls == []
 
 

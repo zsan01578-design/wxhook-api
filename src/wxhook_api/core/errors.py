@@ -39,6 +39,17 @@ def install_exception_handlers(app: FastAPI) -> None:
     async def validation_error_handler(request: Request, exc: RequestValidationError):
         if request.method == "POST" and any(error.get("type") == "json_invalid" for error in exc.errors()):
             return invalid_json_response()
+        if request.url.path == "/api/douyin/config":
+            # Explain configuration errors without returning rejected values,
+            # which may include an account-specific parsing endpoint.
+            hints = {
+                "groups": "请填写真实群 ID（例如 123456789@chatroom），每行一个，不能填写群昵称",
+                "parser_provider": "后台不接受此解析来源，请更新并停止旧服务后重新运行 main.py",
+                "parser_api_url": "接口地址须以 https://jk.y-l.cc/api/dsp/ 开头，不要附加 ?url= 参数",
+            }
+            fields = list(dict.fromkeys(str(error["loc"][1]) for error in exc.errors() if len(error.get("loc", ())) > 1))
+            descriptions = list(dict.fromkeys(hints.get(field, "请检查配置字段 " + field) for field in fields))
+            return error_response(422, "validation_error", "配置校验失败：" + ("；".join(descriptions[:4]) or "请使用页面表单重新保存配置"))
         return error_response(422, "validation_error", "request validation failed")
 
     @app.exception_handler(StarletteHTTPException)

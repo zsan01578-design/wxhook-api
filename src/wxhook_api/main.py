@@ -19,6 +19,7 @@ from wxhook_api.core.body_limit import BodyLimitMiddleware
 from wxhook_api.core.config import Settings, load_settings
 from wxhook_api.core.douyin_config import load_douyin_options
 from wxhook_api.core.errors import install_exception_handlers
+from wxhook_api.core.runtime import source_revision
 from wxhook_api.routes import account, callbacks, contacts, douyin, health, history, manage, media, messages, querydb, ui
 from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.douyin_delivery import DouyinMessenger
@@ -77,6 +78,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.douyin = douyin_worker
     app.state.groups = groups
     app.state.wechat_sync = synchronizer
+    app.state.runtime_revision = source_revision()
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
     install_exception_handlers(app)
     app.add_exception_handler(sqlite3.Error, manage.storage_error)

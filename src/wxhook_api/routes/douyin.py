@@ -22,7 +22,7 @@ async def douyin_page():
 @router.get("/api/douyin/config", tags=["群聊抖音解析"])
 async def get_config(request: Request):
     options = request.app.state.douyin.options
-    return {"settings": options.settings.model_dump(), "output_dir": str(options.output_dir), "max_file_mb": options.max_file_bytes // (1024 * 1024), "feedback_available": request.app.state.douyin.messenger is not None}
+    return {"settings": options.settings.model_dump(), "output_dir": str(options.output_dir), "max_file_mb": options.max_file_bytes // (1024 * 1024), "feedback_available": request.app.state.douyin.messenger is not None, "supported_parsers": ["parse_video", "api", "builtin"]}
 
 
 @router.post("/api/douyin/config", tags=["群聊抖音解析"])
