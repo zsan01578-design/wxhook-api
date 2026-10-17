@@ -2,10 +2,13 @@
 
 const $ = id => document.getElementById(id);
 const state = { groups: [], blocked_members: [], startup: null, sync: null, media: null, callbacks: null };
-let selectedId = "", tab = "features", view = "groups", filter = "all", blacklistTab = "groups";
+let selectedId = "", tab = "messages", view = "groups", filter = "all", blacklistTab = "groups";
 let members = [], messages = [], audit = [], memberQuery = "", detailVersion = "", listVersion = "";
 let refreshJob, pollTimer, toastTimer, detailToken = 0, mutating = false, connected = false;
 let messagePage = 1, messageQuery = "", messageMeta = {total: 0, has_more: false};
+let ownWxid = "", resetChatScroll = true;
+const drafts = new Map(), sendStates = new Map();
+const chatSignatures = new WeakMap();
 
 function el(tag, className = "", text) {
   const node = document.createElement(tag);
@@ -138,7 +141,7 @@ function renderList() {
   $("group-list").replaceChildren(...(nodes.length ? nodes : [el("div", "list-empty", state.groups.length ? "没有符合条件的群聊" : "还没有群聊\n点击 + 添加，或等待群消息自动发现")]));
 }
 function selectGroup(id) {
-  selectedId = id; tab = "features"; memberQuery = ""; messagePage = 1; messageQuery = ""; view = "groups"; detailVersion = "";
+  selectedId = id; tab = "messages"; memberQuery = ""; messagePage = 1; messageQuery = ""; view = "groups"; detailVersion = ""; resetChatScroll = true;
   document.body.classList.add("mobile-detail");
   updateView(); renderList();
   renderHeader(current());
@@ -156,6 +159,9 @@ function updateView() {
   $("group-workspace").hidden = blacklist || !current();
   $("welcome").hidden = blacklist || Boolean(current());
   $("blacklist-view").hidden = !blacklist;
+  document.querySelector(".workspace").classList.toggle("chat-selected", !blacklist && Boolean(current()));
+  $("overview").hidden = !blacklist && Boolean(current());
+  updateChatMode();
   if (blacklist) renderBlacklist();
   else if (!current()) renderWelcome();
 }
@@ -179,6 +185,27 @@ function renderHeader(group) {
   $("restriction-banner").hidden = group.active;
   $("restriction-banner").textContent = group.blocked ? "此群已加入黑名单，所有自动功能均已停止。移出黑名单后恢复原有配置。" : "此群的自动功能已暂停，打开群功能总开关即可恢复。";
   document.querySelectorAll("[data-tab]").forEach(node => { node.classList.toggle("active", node.dataset.tab === tab); node.setAttribute("aria-current", node.dataset.tab === tab ? "page" : "false"); });
+  updateChatMode();
+}
+
+function updateChatMode() {
+  const chatting = view === "groups" && Boolean(current()) && tab === "messages";
+  $("group-workspace").classList.toggle("chatting", chatting);
+  $("tab-content").classList.toggle("chat-content", chatting);
+  $("chat-compose").hidden = !chatting;
+  if (!chatting) return;
+  const form = $("chat-compose"), draft = $("chat-draft"), group = current();
+  if (form.dataset.group !== group.id) {
+    form.dataset.group = group.id;
+    draft.value = drafts.get(group.id) || "";
+  }
+  $("compose-label").textContent = `发送到 ${nameOf(group)}`;
+  draft.placeholder = `发送消息到「${nameOf(group)}」…`;
+  const status = sendStates.get(group.id);
+  $("compose-status").textContent = status?.message || "";
+  $("compose-status").classList.toggle("send-error", Boolean(status?.error));
+  $("chat-send").disabled = Boolean(status?.pending) || !draft.value.trim();
+  $("chat-send").textContent = status?.pending ? "发送中…" : "发送";
 }
 function renderFeatures(group) {
   const content = $("tab-content"), heading = el("div", "section-heading"), copy = el("div");
@@ -230,7 +257,9 @@ function renderInspector(group) {
   });
   memberSection.append(el("p", "inspector-hint", group.members_sync === "complete" ? "已同步微信当前成员关系，离群成员的历史记录和本地设置会保留。" : "尚未取得完整微信成员关系，此处为已发现或手动添加的成员。"));
   const tip = el("div", "inspector-tip"); tip.append(icon("shield"), el("strong", "", "让群聊保持有序"), el("p", "", "黑名单只停止本系统的自动处理，不会退群、踢人或屏蔽微信消息。成员黑名单仅在所在群生效。"));
-  node.replaceChildren(heading, ...rows, noteLabel, el("p", "group-note", group.note || "还没有备注，记录这个群的用途吧。"), memberSection, tip);
+  const shortcuts = el("div", "inspector-actions");
+  shortcuts.append(button("功能配置", "button small", () => setTab("features"), "settings"), button("群黑名单", "button small", () => blockGroupDialog(group), "shield"));
+  node.replaceChildren(heading, shortcuts, ...rows, noteLabel, el("p", "group-note", group.note || "还没有备注，记录这个群的用途吧。"), memberSection, tip);
 }
 function renderMembers(group) {
   const heading = el("div", "section-heading"), copy = el("div");
@@ -257,36 +286,69 @@ function renderMemberTable(group) {
   table.append(head, body); $("member-table-container").replaceChildren(table);
 }
 function renderMessages() {
-  const heading = el("div", "section-heading"), copy = el("div"), group = current();
-  copy.append(el("h3", "", "聊天记录"), el("p", "", `已保存 ${messageMeta.total} 条${messageQuery ? "匹配记录" : "消息"} · 微信历史与实时消息 · 重启保留`)); heading.append(copy);
-  const search = el("form", "message-search"), input = el("input", "form-input");
-  input.type = "search"; input.placeholder = "搜索聊天内容"; input.value = messageQuery; input.maxLength = 200; input.setAttribute("aria-label", "搜索聊天记录");
-  const submit = button("搜索", "button small"); submit.type = "submit"; search.append(input, submit);
-  search.addEventListener("submit", event => { event.preventDefault(); messageQuery = input.value.trim(); messagePage = 1; detailVersion = ""; loadDetail().catch(error => toast(error.message, true)); });
-  const pager = el("div", "message-pager"), prev = button("上一页", "button small", () => turnMessagePage(-1)), next = button("下一页", "button small", () => turnMessagePage(1));
-  prev.disabled = messagePage <= 1; next.disabled = !messageMeta.has_more;
-  pager.append(prev, el("span", "", `第 ${messagePage} 页`), next);
-  const progress = el("p", group.history_error ? "form-error" : "form-note", group.history_error || (group.history_complete ? "微信本机可见历史已完成首次导入，后续自动增量更新。" : "正在后台分批导入微信本机历史，可先查看已保存的消息。"));
-  progress.append(document.createTextNode(" 历史同步只归档，不触发解析；新分享需要通过实时消息回调接收。"));
-  if (!messages.length) { $("tab-content").replaceChildren(heading, search, progress, empty(messageQuery ? "没有匹配的聊天记录" : "等待同步聊天记录", "登录微信后会自动导入当前电脑可读取的群聊天记录。"), pager); return; }
+  const group = current();
+  let log = $("chat-log");
+  if (!log || log.dataset.group !== group.id) {
+    const toolbar = el("div", "chat-toolbar"), search = el("form", "message-search"), input = el("input", "form-input");
+    input.type = "search"; input.placeholder = "搜索聊天记录"; input.value = messageQuery; input.maxLength = 200; input.setAttribute("aria-label", "搜索聊天记录");
+    const submit = button("", "icon-button", null, "search"); submit.type = "submit"; submit.setAttribute("aria-label", "搜索");
+    search.append(input, submit);
+    search.addEventListener("submit", event => { event.preventDefault(); messageQuery = input.value.trim(); messagePage = 1; detailVersion = ""; resetChatScroll = true; loadDetail().catch(error => toast(error.message, true)); });
+    const pager = el("div", "message-pager"), prev = button("", "icon-button", () => turnMessagePage(-1), "back"), next = button("", "icon-button", () => turnMessagePage(1), "arrow");
+    prev.id = "chat-newer"; prev.title = "较新的消息"; prev.setAttribute("aria-label", "上一页");
+    next.id = "chat-older"; next.title = "更早的消息"; next.setAttribute("aria-label", "下一页");
+    const pageLabel = el("span"); pageLabel.id = "chat-page"; pager.append(prev, pageLabel, next);
+    const count = el("span", "chat-count"); count.id = "chat-count"; toolbar.append(search, count, pager);
+    const notice = el("p", "chat-history-notice"); notice.id = "chat-history-notice";
+    const viewport = el("div", "chat-viewport");
+    log = el("div", "chat-log"); log.id = "chat-log"; log.dataset.group = group.id; log.setAttribute("role", "log"); log.setAttribute("aria-label", "群聊消息");
+    const jump = button("回到最新消息", "chat-jump", latestMessages, "chat"); jump.id = "chat-jump"; jump.hidden = true;
+    log.addEventListener("scroll", () => { jump.hidden = messagePage === 1 && !messageQuery && log.scrollHeight - log.clientHeight - log.scrollTop < 80; });
+    viewport.append(log, jump); $("tab-content").replaceChildren(toolbar, notice, viewport);
+    resetChatScroll = true;
+  }
+  $("chat-newer").disabled = messagePage <= 1;
+  $("chat-older").disabled = !messageMeta.has_more;
+  $("chat-page").textContent = `第 ${messagePage} 页`;
+  $("chat-count").textContent = `${messageMeta.total} 条${messageQuery ? "匹配记录" : "消息"}`;
+  const notice = $("chat-history-notice");
+  notice.hidden = !group.history_error && group.history_complete;
+  notice.textContent = group.history_error || "正在同步历史消息，可先查看已保存的记录。";
+  notice.classList.toggle("send-error", Boolean(group.history_error));
+  const signature = JSON.stringify([messages, members.map(person => [person.id, person.name, person.blocked]), messagePage, messageQuery, ownWxid]);
+  if (chatSignatures.get(log) === signature && !resetChatScroll) return;
+  const oldTop = log.scrollTop, oldHeight = log.scrollHeight, follow = resetChatScroll || oldHeight - log.clientHeight - oldTop < 80;
+  chatSignatures.set(log, signature);
   const stack = el("div", "message-stack");
-  messages.forEach((message, i) => {
+  let lastTimestamp = 0;
+  [...messages].reverse().forEach((message, i) => {
+    if (!i || message.timestamp - lastTimestamp > 300) stack.append(el("div", "chat-time-divider", dateText(new Date(message.timestamp * 1000).toISOString(), true)));
+    lastTimestamp = message.timestamp;
     const person = members.find(member => member.id === message.sender) || { id: message.sender || "未知成员" };
-    const row = el("div", "chat-message"), body = el("div", "chat-message-body"), meta = el("div", "chat-meta");
-    meta.append(el("span", "", person.name || person.id), el("time", "", dateText(new Date(message.timestamp * 1000).toISOString(), true)), badge(message.source === "history" ? "微信历史" : "实时消息", "gray"));
+    const self = Boolean(ownWxid) && message.sender === ownWxid;
+    const row = el("div", `chat-message${self ? " is-self" : ""}`), body = el("div", "chat-message-body"), meta = el("div", "chat-meta");
+    meta.append(el("span", "", self ? "我" : person.name || person.id), el("time", "", new Date(message.timestamp * 1000).toLocaleTimeString("zh-CN", {hour: "2-digit", minute: "2-digit", hour12: false})));
     if (person.blocked) meta.append(badge("已拉黑", "red"));
     body.append(meta, el("div", "chat-bubble", message.content || "（空消息）"));
     if (message.type !== 1 || message.truncated) body.append(el("p", "form-note", `${message.type !== 1 ? `类型 ${message.type} · 展示原始内容` : ""}${message.truncated ? " · 内容过长已截断" : ""}`));
     row.append(memberAvatar(person, i), body); stack.append(row);
-  }); $("tab-content").replaceChildren(heading, search, progress, pager, stack);
+  });
+  log.replaceChildren(messages.length ? stack : empty(messageQuery ? "没有匹配的聊天记录" : "还没有聊天消息", messageQuery ? "换个关键词试试。" : "消息同步后会显示在这里，也可以发送第一条群消息。"));
+  resetChatScroll = false;
+  requestAnimationFrame(() => {
+    if (!log.isConnected || log.dataset.group !== selectedId) return;
+    log.scrollTop = follow ? log.scrollHeight : Math.max(0, oldTop + log.scrollHeight - oldHeight);
+    $("chat-jump").hidden = messagePage === 1 && !messageQuery && follow;
+  });
 }
-function turnMessagePage(delta) { messagePage += delta; detailVersion = ""; loadDetail().then(() => $("tab-content").scrollTop = 0).catch(error => toast(error.message, true)); }
+function turnMessagePage(delta) { messagePage += delta; detailVersion = ""; resetChatScroll = true; loadDetail().catch(error => toast(error.message, true)); }
+function latestMessages() { messagePage = 1; messageQuery = ""; detailVersion = ""; resetChatScroll = true; const input = document.querySelector(".message-search input"); if (input) input.value = ""; loadDetail().catch(error => toast(error.message, true)); }
 function renderAudit() {
   const heading = el("div", "section-heading"), copy = el("div"); copy.append(el("h3", "", "操作记录"), el("p", "", "记录当前群的配置调整与黑名单操作，最近 100 条。")); heading.append(copy);
   const rows = audit.map(event => { const node = el("div", "audit-row"); node.append(el("div", "", event.action), el("p", "", event.target), el("time", "", dateText(event.created_at))); return node; });
   $("tab-content").replaceChildren(heading, ...(rows.length ? rows : [empty("还没有操作记录", "修改功能或管理黑名单后，操作会记录在这里。", "clock")]));
 }
-function setTab(value) { tab = value; detailVersion = ""; loadDetail().catch(error => toast(error.message, true)); }
+function setTab(value) { if (tab !== value) resetChatScroll = true; tab = value; detailVersion = ""; updateChatMode(); loadDetail().catch(error => toast(error.message, true)); }
 async function loadDetail() {
   const group = current();
   if (!group || view !== "groups") return;
@@ -301,7 +363,7 @@ async function loadDetail() {
   messages = inbox?.messages || [];
   if (inbox) messageMeta = inbox;
   audit = history?.events || [];
-  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, tab, state.media]);
+  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, tab, state.media, ownWxid]);
   if (version === detailVersion) return;
   detailVersion = version;
   renderHeader(current()); renderInspector(current());
@@ -402,7 +464,7 @@ function addGroupDialog(mode = "manual") {
   }
   const form = el("form"), id = formField(form, "群 ID", "例如 123456789@chatroom", "", false, 140), name = formField(form, "群名称（选填）", "例如：产品交流群"); id.required = true; id.pattern = "[A-Za-z0-9_\\-]{1,128}@chatroom";
   form.append(el("p", "form-note", "请填写真实群 ID，不能填写群昵称。添加到本地管理名单后，可单独开启功能；不会创建新的微信群。"));
-  const footer = formFooter(form, "添加群聊"); body.append(form); bindForm(form, footer, async () => { const data = await api("/api/manage/groups", { id: id.value.trim(), name: name.value.trim() }); selectedId = data.id; tab = "features"; memberQuery = ""; view = "groups"; detailVersion = ""; document.body.classList.add("mobile-detail"); });
+  const footer = formFooter(form, "添加群聊"); body.append(form); bindForm(form, footer, async () => { const data = await api("/api/manage/groups", { id: id.value.trim(), name: name.value.trim() }); selectedId = data.id; tab = "messages"; memberQuery = ""; messagePage = 1; messageQuery = ""; resetChatScroll = true; view = "groups"; detailVersion = ""; document.body.classList.add("mobile-detail"); });
 }
 
 async function checkConnection() {
@@ -411,9 +473,40 @@ async function checkConnection() {
     connected = String(data.IsLogin ?? data.data?.IsLogin) === "1";
     $("connection-dot").className = `live-dot${connected ? "" : " error"}`;
     $("connection-label").textContent = connected ? "微信已连接" : "等待微信登录";
+    if (connected) {
+      let identity = data.currentWxid || data.data?.currentWxid || "";
+      if (!identity) {
+        try { const profile = await api("/GetSelfProfile", {}); identity = profile.data?.wxid || profile.wxid || ""; } catch { /* Identity is optional for bubble alignment. */ }
+      }
+      if (typeof identity === "string" && identity && identity !== ownWxid) { ownWxid = identity; detailVersion = ""; }
+    }
   } catch {
     connected = false; $("connection-dot").className = "live-dot error"; $("connection-label").textContent = "微信未连接";
   }
+}
+
+async function sendChat(event) {
+  event.preventDefault();
+  const target = $("chat-compose").dataset.group, text = $("chat-draft").value;
+  if (!target || !text.trim() || sendStates.get(target)?.pending) return;
+  const group = state.groups.find(item => item.id === target), targetName = group ? nameOf(group) : target;
+  sendStates.set(target, {pending: true, message: "正在发送…"}); updateChatMode();
+  try {
+    const result = await api("/SendTextMsg", {wxidorgid: target, msg: text});
+    if (String(result.ret) !== "0") throw new Error(result.retmsg || result.msg || "微信未确认发送成功");
+    if (drafts.get(target) === text) drafts.delete(target);
+    if ($("chat-compose").dataset.group === target && $("chat-draft").value === text) $("chat-draft").value = "";
+    sendStates.set(target, {pending: false, message: "已发送，等待微信消息同步。"});
+    if (selectedId !== target) toast(`已发送到「${targetName}」`);
+    updateChatMode();
+    // Refresh history through the existing background worker; never retry an uncertain send.
+    api("/api/manage/sync", {}).catch(() => {});
+    await refreshState(true);
+  } catch (error) {
+    const message = `发送未确认：${error.message} 请先在微信查看结果，再决定是否重试。`;
+    sendStates.set(target, {pending: false, message, error: true});
+    if (selectedId !== target) toast(`「${targetName}」${message}`, true);
+  } finally { updateChatMode(); }
 }
 function connectionDialog() {
   const body = showDialog("连接与消息接收", "本机服务"), status = el("p", "modal-copy", $("connection-label").textContent), startup = el("p", "form-note", state.startup?.message || "启动 main.py 后，在原版微信中完成登录。群消息通过 Hook 回调自动接收。"), result = el("p", "form-note"), actions = el("div", "form-actions");
@@ -469,6 +562,9 @@ async function poll() {
   if (!document.hidden) pollTimer = setTimeout(poll, 3000);
 }
 $("group-search").addEventListener("input", renderList);
+$("chat-draft").addEventListener("input", () => { const target = $("chat-compose").dataset.group; if (target) { drafts.set(target, $("chat-draft").value); if (!sendStates.get(target)?.pending) sendStates.delete(target); } updateChatMode(); });
+$("chat-draft").addEventListener("keydown", event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.isComposing) { event.preventDefault(); $("chat-compose").requestSubmit(); } });
+$("chat-compose").addEventListener("submit", sendChat);
 document.querySelectorAll("[data-filter]").forEach(node => node.addEventListener("click", () => {
   filter = node.dataset.filter; document.querySelectorAll("[data-filter]").forEach(item => { item.classList.toggle("active", item === node); item.setAttribute("aria-pressed", String(item === node)); }); renderList();
 }));
