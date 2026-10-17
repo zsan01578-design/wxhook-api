@@ -1,7 +1,13 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import asyncio
 import os
 from pathlib import Path
 import re
+import tempfile
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+import yaml
 
 from wxhook_api.core.config import PROJECT_ROOT, load_yaml
 
@@ -12,6 +18,38 @@ class ChatbotOptions:
     bot_wxid: str = ""
     mention_names: tuple[str, ...] = ()
     max_reply_chars: int = 2000
+
+
+class MentionSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mention_names: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]] = Field(max_length=20)
+
+
+async def save_mention_names(options: ChatbotOptions, names: list[str]) -> ChatbotOptions:
+    updated = replace(options, mention_names=tuple(dict.fromkeys(names)))
+    path = Path(os.getenv("WXHOOK_CHATBOT_CONFIG") or PROJECT_ROOT / "chatbot.local.yml")
+
+    def write():
+        values = load_yaml(path) if path.is_file() else {
+            "enabled": options.enabled, "bot-wxid": options.bot_wxid,
+            "max-reply-chars": options.max_reply_chars,
+        }
+        values["mention-names"] = list(updated.mention_names)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as file:
+                temporary = Path(file.name)
+                yaml.safe_dump(values, file, allow_unicode=True, sort_keys=False)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary and temporary.exists():
+                temporary.unlink()
+
+    await asyncio.to_thread(write)
+    return updated
 
 
 def load_chatbot_options() -> ChatbotOptions:

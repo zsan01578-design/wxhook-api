@@ -48,6 +48,8 @@ def install_exception_handlers(app: FastAPI) -> None:
             return invalid_json_response()
         if request.url.path == "/api/manage/chat-model":
             return error_response(422, "validation_error", "请检查 Base URL、模型名称及 API Key 格式；地址须为 HTTP(S)，不能包含账号或查询参数。")
+        if request.url.path == "/api/manage/chatbot/mentions":
+            return error_response(422, "validation_error", "机器人显示名最多 20 个，每个 1–80 字，请每行填写一个。")
         if request.url.path == "/api/douyin/config":
             # Explain configuration errors without returning rejected values,
             # which may include an account-specific parsing endpoint.

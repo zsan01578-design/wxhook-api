@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 
 from wxhook_api.schemas.requests import ContactSearchRequest
+from wxhook_api.core.chatbot_config import MentionSettings
 from wxhook_api.services.groups import GROUP_PATTERN
 from wxhook_api.services.chat_model import ModelError, ModelSettings
 from wxhook_api.services.wechat_sync import SyncError, records
@@ -74,6 +75,15 @@ async def sync_now(request: Request):
 @router.get("/chat-model")
 async def get_chat_model(request: Request):
     return JSONResponse(request.app.state.chat_model.snapshot(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/chatbot/mentions")
+async def configure_mentions(body: MentionSettings, request: Request):
+    try:
+        await request.app.state.chatbot.configure_mentions(body.mention_names)
+    except OSError:
+        raise HTTPException(500, "无法保存机器人显示名，请检查本机配置文件的写入权限。") from None
+    return JSONResponse({"saved": True, "chatbot": request.app.state.chatbot.snapshot()}, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/chat-model")

@@ -10,10 +10,10 @@ from typing import Callable, Protocol
 from uuid import uuid4
 
 from wxhook_api.clients.hook_client import HookClient
-from wxhook_api.core.chatbot_config import ChatbotOptions
+from wxhook_api.core.chatbot_config import ChatbotOptions, save_mention_names
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.douyin_delivery import DeliveryError, DouyinMessenger
-from wxhook_api.services.groups import GroupManager, event_group
+from wxhook_api.services.groups import GroupManager, event_group, now
 
 
 class AnswerProvider(Protocol):
@@ -83,10 +83,42 @@ class MentionChatService:
         self._accepting = False
         self.last_error = ""
         self.sent = 0
+        self._recent: OrderedDict[str, dict] = OrderedDict()
+        self._names_lock = asyncio.Lock()
+        self._profile_names: tuple[str, ...] = ()
 
     def snapshot(self) -> dict:
         return {"enabled": self.options.enabled, "answer_configured": self.provider is not None,
-                "identity_known": bool(self._identity), "pending": self._queue.qsize(), "sent": self.sent, "last_error": self.last_error}
+                "identity_known": bool(self._identity and self._profile_valid), "mention_names": list(self._names),
+                "configured_mention_names": list(self.options.mention_names),
+                "pending": self._queue.qsize(), "sent": self.sent, "last_error": self.last_error,
+                "recent_events": [dict(item) for item in self._recent.values()]}
+
+    def _report(self, event: CallbackEvent) -> dict:
+        group = event_group(event)
+        report = {"group_id": group, "msgid": str(event.msgid)[:128], "received_at": now(),
+                  "status": "received", "message": "已收到实时群消息"}
+        self._recent[group] = report
+        self._recent.move_to_end(group)
+        while len(self._recent) > 100:
+            self._recent.popitem(last=False)
+        return report
+
+    async def configure_mentions(self, names: list[str]) -> None:
+        async with self._names_lock:
+            self.options = await save_mention_names(self.options, names)
+            self._names = tuple(dict.fromkeys((*self.options.mention_names, *self._profile_names)))
+            self._profile_checked = 0.0
+
+    async def _group_names(self, group: str) -> tuple[str, ...]:
+        # The Hook can return a valid wxid but an empty nickname. Use only the
+        # synchronized name of this exact account, never the question sender.
+        if not self._identity or not self.groups:
+            return self._names
+        members = await self.groups.members(group)
+        own = next((member for member in members if member["id"] == self._identity), None)
+        name = own.get("wechat_name", "") if own else ""
+        return tuple(dict.fromkeys((*self._names, name))) if name else self._names
 
     def allowed(self, group: str, sender: str) -> bool:
         return bool(group and self.groups and self.groups.allowed(group, sender)
@@ -134,8 +166,11 @@ class MentionChatService:
             self._identity = identity
             self._profile_valid = True
             nickname = profile.get("nickname")
-            if isinstance(nickname, str) and 0 < len(nickname) <= 80:
-                self._names = tuple(dict.fromkeys((*self.options.mention_names, nickname)))
+            if isinstance(nickname, str) and 0 < len(nickname.strip()) <= 80:
+                self._profile_names = (nickname.strip(),)
+            else:
+                self._profile_names = ()
+            self._names = tuple(dict.fromkeys((*self.options.mention_names, *self._profile_names)))
             self.last_error = ""
             return True
         except Exception:
@@ -146,18 +181,35 @@ class MentionChatService:
     async def receive(self, event: CallbackEvent) -> bool:
         # Returning True also prevents our own model answer (which may contain
         # URLs) or an @ question from triggering a second automatic feature.
-        if self.own_message(event):
-            return True
         group = event_group(event)
-        if not self._accepting or event.type != 1 or not self.allowed(group, event.sender):
+        report = self._report(event) if group else {}
+        if self.own_message(event):
+            report.update(status="self", message="机器人自己发送的消息不触发问答，请使用另一个微信账号提问")
+            return True
+        if not self._accepting:
+            report.update(status="disabled", message="@问答全局开关已关闭")
+            return False
+        if event.type != 1:
+            report.update(status="nontext", message="此消息不是文本，不触发问答")
+            return False
+        if not self.allowed(group, event.sender):
+            report.update(status="policy", message="群功能、@问答开关或群/成员黑名单阻止了问答")
             return False
         ids, _ = mention_ids(event)
         if not ids and "@" not in event.content:
+            report.update(status="no_mention", message="消息中没有 @提及，不触发问答")
             return False
         if not await self._identify() or self.own_message(event):
+            report.update(status="identity", message=self.last_error or "消息来自机器人自己，不触发问答")
             return self.own_message(event)
-        question = addressed_question(event, self._identity, self._names)
+        names = await self._group_names(group)
+        report["mention_names"] = list(names)
+        question = addressed_question(event, self._identity, names)
         if question is None:
+            message = "未匹配到 @当前机器人，请在网页配置机器人群内显示名；明确 @其他人的消息不会触发"
+            if not names and not ids:
+                message = "微信接口返回的机器人昵称为空，请在网页填写机器人群内显示名后发送新的 @提问"
+            report.update(status="not_addressed", message=message)
             return False
         msgid = str(event.msgid)
         if msgid not in {"", "0"}:
@@ -166,14 +218,17 @@ class MentionChatService:
             key = "callback:" + uuid4().hex
         item = (group, key)
         if item in self._seen:
+            report.update(status="duplicate", message="重复回调已忽略，同一条消息不会再次回复")
             return True
         self._seen[item] = None
         while len(self._seen) > 1000:
             self._seen.popitem(last=False)
         try:
-            self._queue.put_nowait({"group": group, "sender": event.sender, "key": key, "question": question})
+            report.update(status="queued", message="已识别 @机器人，等待调用模型")
+            self._queue.put_nowait({"group": group, "sender": event.sender, "key": key, "question": question, "report": report})
         except asyncio.QueueFull:
             self.last_error = "问答队列已满，未创建本次回复"
+            report.update(status="queue_full", message=self.last_error)
         return True
 
     async def _answer(self, question: str) -> str:
@@ -199,37 +254,47 @@ class MentionChatService:
             claimed = False
             status = "failed"
             attempted = False
+            report = job["report"]
             try:
                 if not self.allowed(job["group"], job["sender"]):
+                    report.update(status="policy", message="排队期间群开关或黑名单发生变化，已停止问答")
                     continue
                 claimed = await self.groups.claim_chat_reply(job["group"], job["key"])
                 if not claimed:
+                    report.update(status="duplicate", message="此消息已处理或已尝试发送，不会重复回复；请发送新的提问")
                     continue
+                report.update(status="answering", message="正在等待模型回复")
                 answer = await self._answer(job["question"])
                 limit = self.options.max_reply_chars
                 if len(answer) > limit:
                     answer = answer[:limit - 1] + "…"
                 if not self._accepting or not self.allowed(job["group"], job["sender"]):
                     status = "skipped"
+                    report.update(status="skipped", message="生成回复期间问答已被暂停，未发送")
                     continue
                 # The durable claim precedes the only outbound send attempt.
                 await self.groups.finish_chat_reply(job["group"], job["key"], "sending")
                 if not self._accepting or not self.allowed(job["group"], job["sender"]):
                     status = "skipped"
+                    report.update(status="skipped", message="发送前问答已被暂停，未发送")
                     continue
+                report.update(status="sending", message="模型回复已生成，正在发送到微信群")
                 attempted = True
                 await self._messenger.text(job["group"], answer)
                 status = "sent"
                 self.sent += 1
+                report.update(status="sent", message="Hook 已确认发送一条回复")
             except asyncio.CancelledError:
                 status = "unknown" if attempted else "interrupted"
                 raise
             except DeliveryError as exc:
                 status = "unknown" if exc.uncertain else "failed"
                 self.last_error = "回复发送未确认，请检查群聊；同一条消息不会自动重发"
+                report.update(status=status, message=self.last_error)
             except Exception:
                 status = "unknown" if attempted else "failed"
                 self.last_error = "问答处理失败；同一条消息不会自动重发"
+                report.update(status=status, message=self.last_error)
             finally:
                 try:
                     if claimed:

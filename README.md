@@ -90,8 +90,13 @@
 
 使用消息扩展字段中的 `atlist / at_list / atuserlist / at_user_list / atUserList` 或 `source / msgsource / msg_source`
 XML 的 `atuserlist` 匹配真实 wxid；存在明确的 @ID 时优先使用 ID，不会把 @其他人误认成机器人。
-Hook 未提供 @ID 时，以当前微信昵称或本机配置的群内显示名匹配带空格边界的 `@昵称` 文本。
-微信的提及分隔空格 U+2005 同样支持。群里改过机器人显示名时，把 `chatbot.yml` 复制为被 Git 忽略的 `chatbot.local.yml`：
+Hook 未提供 @ID 时，以当前微信昵称、本机配置的群内显示名或已同步的机器人群成员名称匹配带空格边界的 `@昵称` 文本。
+微信的提及分隔空格 U+2005 同样支持。部分 Hook 的 `GetSelfProfile` 会返回有效 wxid 但昵称为空（`selfInfoMatched=false`），
+此时无法只靠账号昵称识别 @。在群「功能配置 → 配置机器人群内显示名」填写 @时实际显示的名字，不含 @，每行一个。
+保存后立即生效，无须重启；请使用另一个微信账号发送新的 @提问。页面同时显示识别到的称呼、
+最近实时消息的处理状态及未触发原因。历史同步显示的消息不会触发问答。
+
+显示名保存在被 Git 忽略的 `chatbot.local.yml`，也可以手动配置：
 
 ```yaml
 enabled: true
@@ -101,8 +106,8 @@ mention-names:
 max-reply-chars: 2000
 ```
 
-修改后重启 `main.py`。`WXHOOK_CHATBOT_CONFIG` 可指定配置文件，`WXHOOK_CHATBOT_ENABLED=false` 可临时关闭全部问答。
-这一版不增加依赖，不需要额外启动服务。可让群成员使用微信的 @ 功能发送 `@机器人 你好` 验证单条提示。
+手动修改文件后重启 `main.py`；网页保存显示名立即生效。`WXHOOK_CHATBOT_CONFIG` 可指定配置文件，`WXHOOK_CHATBOT_ENABLED=false` 可临时关闭全部问答。
+不需要额外启动服务。可让群成员使用微信的 @ 功能发送 `@机器人 你好` 验证回复。
 
 每个触发事件只生成一条最终回复，不发送“正在思考”等过程提示；超长回答截短为一条消息，不拆分发送。
 接口失败也仅发送一条失败提示；发送失败或超时不会再补发第二条，以免已经送达的消息重复出现。

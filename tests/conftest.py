@@ -14,3 +14,4 @@ def isolated_management_database(tmp_path, monkeypatch):
     # Mention reply tests explicitly inject a service with a mocked Hook.
     monkeypatch.setenv("WXHOOK_CHATBOT_ENABLED", "false")
     monkeypatch.setenv("WXHOOK_CHAT_MODEL_CONFIG", str(tmp_path / "chat-model.local.json"))
+    monkeypatch.setenv("WXHOOK_CHATBOT_CONFIG", str(tmp_path / "chatbot.local.yml"))

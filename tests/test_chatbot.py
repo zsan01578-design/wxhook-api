@@ -258,3 +258,71 @@ def test_local_configuration_and_environment_switch(tmp_path, monkeypatch):
     assert load_chatbot_options() == ChatbotOptions(True, BOT, ("群内机器人",), 1000)
     monkeypatch.setenv("WXHOOK_CHATBOT_ENABLED", "false")
     assert not load_chatbot_options().enabled
+
+
+async def test_empty_hook_nickname_can_be_fixed_from_web_without_restart(tmp_path):
+    provider = Answers()
+    profile = {"ret": 0, "data": {"wxid": BOT, "nickname": "", "selfInfoMatched": False}}
+    async with context(tmp_path, provider=provider, bot_options=ChatbotOptions(), profile=profile) as state:
+        await state.submit(event("@群内助手\u2005你是谁", roomid=""))
+        assert not state.sends and not provider.questions
+        report = state.bot.snapshot()["recent_events"][-1]
+        assert report["status"] == "not_addressed" and "昵称为空" in report["message"]
+        response = await state.client.post("/api/manage/chatbot/mentions", json={"mention_names": ["群内助手"]})
+        assert response.status_code == 200 and response.json()["saved"]
+        assert state.bot.snapshot()["configured_mention_names"] == ["群内助手"]
+        assert load_chatbot_options().mention_names == ("群内助手",)
+        await state.submit(event("@群内助手\u2005你是谁", msgid=2, roomid=""))
+        assert provider.questions == ["你是谁"] and len(state.sends) == 1
+        report = state.bot.snapshot()["recent_events"][-1]
+        assert report["status"] == "sent" and report["group_id"] == GROUP
+        assert "你是谁" not in json.dumps(report, ensure_ascii=False)
+
+
+async def test_empty_nickname_uses_synced_name_of_the_bot_member(tmp_path):
+    provider = Answers()
+    async with context(tmp_path, provider=provider, bot_options=ChatbotOptions(), profile={"wxid": BOT, "nickname": ""}) as state:
+        await state.app.state.groups.sync_contacts([{"id": GROUP, "name": "测试群"}],
+            {GROUP: [{"id": BOT, "name": "群内助手"}, {"id": MEMBER, "name": "其他人"}]})
+        await state.submit(event(MEMBER + ":\n@群内助手\u2005你好", roomid=""))
+        assert provider.questions == ["你好"] and len(state.sends) == 1
+        assert state.bot.snapshot()["recent_events"][-1]["mention_names"] == ["群内助手"]
+        await state.submit(event("@其他人\u2005你好", msgid=2, roomid=""))
+        assert len(state.sends) == 1
+
+
+async def test_saved_display_name_never_overrides_explicit_other_mention_id(tmp_path):
+    async with context(tmp_path, provider=Answers()) as state:
+        await state.client.post("/api/manage/chatbot/mentions", json={"mention_names": ["群内助手"]})
+        await state.submit(event("@群内助手\u2005你好", atlist=["wxid_other"]))
+        assert not state.sends
+        assert state.bot.snapshot()["recent_events"][-1]["status"] == "not_addressed"
+
+
+async def test_mention_name_save_failure_keeps_existing_runtime_names(tmp_path, monkeypatch):
+    async def fail(*args):
+        raise PermissionError("do not expose storage details")
+
+    async with context(tmp_path, provider=Answers()) as state:
+        monkeypatch.setattr("wxhook_api.services.chatbot.save_mention_names", fail)
+        response = await state.client.post("/api/manage/chatbot/mentions", json={"mention_names": ["新名字"]})
+        assert response.status_code == 500 and "storage details" not in response.text
+        assert state.bot.snapshot()["configured_mention_names"] == ["机器人"]
+        await state.submit()
+        assert len(state.sends) == 1
+
+
+@pytest.mark.parametrize("names", [[""], ["x" * 81], ["机器人"] * 21])
+async def test_invalid_mention_names_get_actionable_validation(tmp_path, names):
+    async with context(tmp_path) as state:
+        response = await state.client.post("/api/manage/chatbot/mentions", json={"mention_names": names})
+        assert response.status_code == 422 and "显示名" in response.text
+
+
+async def test_diagnostics_explain_policy_and_self_message_skips(tmp_path):
+    async with context(tmp_path, provider=Answers()) as state:
+        await state.client.patch(f"/api/manage/groups/{GROUP}", json={"chat_enabled": False})
+        await state.submit()
+        assert state.bot.snapshot()["recent_events"][-1]["status"] == "policy"
+        await state.submit(event(sender=BOT, msgid=2))
+        assert state.bot.snapshot()["recent_events"][-1]["status"] == "self"

@@ -53,7 +53,7 @@ async function api(path, body, method = "POST", timeout = 15000) {
   const data = await response.json();
   if (!response.ok) {
     let message = data.error?.message || data.detail || `请求失败（${response.status}）`;
-    if (Array.isArray(message) || (data.error?.code === "validation_error" && path !== "/api/manage/chat-model")) message = "请检查填写内容：群 ID 须以 @chatroom 结尾，成员须填写真实 wxid，名称最多 80 字。";
+    if (Array.isArray(message) || (data.error?.code === "validation_error" && !["/api/manage/chat-model", "/api/manage/chatbot/mentions"].includes(path))) message = "请检查填写内容：群 ID 须以 @chatroom 结尾，成员须填写真实 wxid，名称最多 80 字。";
     throw new Error(message);
   }
   return data;
@@ -223,6 +223,11 @@ function renderFeatures(group) {
   const chat = state.chatbot;
   const chatStatus = chat?.enabled === false ? "@问答总开关已关闭。" : chat?.answer_configured ? "问答接口已接入。" : "问答接口待接入，被 @ 时只回复一条“问答接口尚未配置”提示。";
   chatNote.append(icon("info"), el("span", "", `${chatStatus}${chat?.last_error ? ` ${chat.last_error}` : ""}`), button("配置 AI 模型", "text-link", modelSettingsDialog));
+  const diagnostic = el("div", "model-test-result");
+  const recent = chat?.recent_events?.find(item => item.group_id === group.id);
+  const knownNames = chat?.mention_names?.length ? chat.mention_names : recent?.mention_names;
+  const names = knownNames?.length ? knownNames.join("、") : "尚未识别";
+  diagnostic.append(el("p", "", `当前识别的机器人称呼：${names}\n${recent ? `最近实时消息：${dateText(recent.received_at)}\n处理状态：${recent.message}` : "本次启动尚未收到此群的实时消息。历史同步显示的消息不会触发问答。"}`), button("配置机器人群内显示名", "button small", mentionSettingsDialog));
   const runtime = el("div", "feature-footnote"), media = state.media;
   if (media) {
     const provider = {parse_video: "parse-video-py（抖音 / 小红书 / B站）", api: "指定接口（仅抖音）", builtin: "公开分享页（仅抖音）"}[media.parser_provider] || media.parser_provider;
@@ -237,7 +242,7 @@ function renderFeatures(group) {
   safetyTitle.append(icon("shield"), document.createTextNode("群聊黑名单"));
   safetyCopy.append(safetyTitle, el("p", "", "拉黑后不再处理此群的自动功能，消息仍可记录。"));
   safety.append(safetyCopy, button(group.blocked ? "移出黑名单" : "加入黑名单", `button ${group.blocked ? "" : "danger"} small`, () => blockGroupDialog(group), group.blocked ? "check" : "block"));
-  content.replaceChildren(heading, master, list, chatNote, note, ...(media ? [runtime] : []), safety);
+  content.replaceChildren(heading, master, list, chatNote, diagnostic, note, ...(media ? [runtime] : []), safety);
 }
 function renderInspector(group) {
   const node = $("inspector"), heading = el("div", "inspector-heading");
@@ -361,7 +366,7 @@ async function loadDetail() {
   messages = inbox?.messages || [];
   if (inbox) messageMeta = inbox;
   audit = history?.events || [];
-  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, tab, state.media, ownWxid, state.chatbot?.enabled, state.chatbot?.answer_configured, state.chatbot?.last_error]);
+  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, tab, state.media, ownWxid, state.chatbot]);
   if (version === detailVersion) return;
   detailVersion = version;
   renderHeader(current()); renderInspector(current());
@@ -414,6 +419,15 @@ function bindForm(form, footer, save) {
 }
 function infoDialog(title, description) {
   const body = showDialog(title); body.append(el("p", "modal-copy", description)); const actions = el("div", "form-actions"); actions.append(button("知道了", "button primary", () => $("modal").close())); body.append(actions);
+}
+
+function mentionSettingsDialog() {
+  const body = showDialog("机器人群内显示名", "@问答识别"), form = el("form");
+  form.append(el("p", "modal-copy", "填写微信中 @机器人时显示的名字。接口返回的昵称为空，或群内昵称与账号昵称不同时，需要在这里补充。"));
+  const names = formField(form, "机器人显示名（每行一个，不含 @）", "填写机器人在群内显示的名字", (state.chatbot?.configured_mention_names || []).join("\n"), true, 1700);
+  form.append(el("p", "form-note", "不同群的显示名可分行填写，最多 20 个。保存后立即生效，请用另一个微信账号发送新的 @提问验证。"));
+  const footer = formFooter(form, "保存显示名"); body.append(form);
+  bindForm(form, footer, () => api("/api/manage/chatbot/mentions", {mention_names: names.value.split(/\r?\n/).map(name => name.trim().replace(/^@/, "").trim()).filter(Boolean)}));
 }
 
 async function modelSettingsDialog() {
