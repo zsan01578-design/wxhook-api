@@ -1,5 +1,5 @@
 # 已启用机器人的群默认同时启用 @问答，可在群管理中单独关闭。
-# 当前模型接口待接入；被 @ 时只回复一条“接口尚未配置”提示。
+# 在网页左侧「AI 模型」配置 Base URL、模型名称和 API Key，保存时自动测试。
 enabled: true
 # 留空时通过 GetSelfProfile 自动识别；也可复制到 chatbot.local.yml 本地配置。
 bot-wxid: ''

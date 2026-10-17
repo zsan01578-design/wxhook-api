@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 
 from wxhook_api.schemas.requests import ContactSearchRequest
 from wxhook_api.services.groups import GROUP_PATTERN
+from wxhook_api.services.chat_model import ModelError, ModelSettings
 from wxhook_api.services.wechat_sync import SyncError, records
 
 
@@ -68,6 +69,22 @@ async def sync_now(request: Request):
     if not request.app.state.wechat_sync.request():
         raise HTTPException(409, "自动同步已关闭，请启用 WXHOOK_SYNC_ENABLED 后重启")
     return {"scheduled": True, "sync": request.app.state.wechat_sync.status}
+
+
+@router.get("/chat-model")
+async def get_chat_model(request: Request):
+    return JSONResponse(request.app.state.chat_model.snapshot(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/chat-model")
+async def configure_chat_model(body: ModelSettings, request: Request):
+    try:
+        result = await request.app.state.chat_model.configure(body)
+    except ModelError as exc:
+        result = {"saved": False, "test": {"ok": False, "message": str(exc)}}
+    except OSError:
+        raise HTTPException(500, "模型测试通过，但配置保存失败，请检查 data 目录写入权限和磁盘空间。") from None
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/groups/{group}/messages")

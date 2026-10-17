@@ -24,6 +24,7 @@ from wxhook_api.core.runtime import source_revision
 from wxhook_api.routes import account, callbacks, contacts, douyin, health, history, manage, media, messages, querydb, ui
 from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.chatbot import MentionChatService
+from wxhook_api.services.chat_model import ChatModelConfiguration
 from wxhook_api.services.douyin_delivery import DouyinMessenger
 from wxhook_api.services.events import EventDispatcher
 from wxhook_api.services.groups import GroupManager
@@ -44,6 +45,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     chatbot = chat_service or MentionChatService(load_chatbot_options())
     chatbot.groups = groups
     chatbot.default_group_enabled = douyin_worker.allowed
+    model_configuration = ChatModelConfiguration(chatbot)
 
     async def automatic_message(event):
         if await chatbot.receive(event):
@@ -95,6 +97,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.groups = groups
     app.state.wechat_sync = synchronizer
     app.state.chatbot = chatbot
+    app.state.chat_model = model_configuration
     app.state.runtime_revision = source_revision()
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
     install_exception_handlers(app)

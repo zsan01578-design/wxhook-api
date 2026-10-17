@@ -46,6 +46,8 @@ def install_exception_handlers(app: FastAPI) -> None:
                 return JSONResponse(status_code=422, content={"error": {"code": "validation_error", "message": "Hook callback fields are incompatible", "fields": result["fields"]}})
         if invalid_json:
             return invalid_json_response()
+        if request.url.path == "/api/manage/chat-model":
+            return error_response(422, "validation_error", "请检查 Base URL、模型名称及 API Key 格式；地址须为 HTTP(S)，不能包含账号或查询参数。")
         if request.url.path == "/api/douyin/config":
             # Explain configuration errors without returning rejected values,
             # which may include an account-specific parsing endpoint.

@@ -7,6 +7,7 @@ let members = [], messages = [], audit = [], memberQuery = "", detailVersion = "
 let refreshJob, pollTimer, toastTimer, detailToken = 0, mutating = false, connected = false;
 let messagePage = 1, messageQuery = "", messageMeta = {total: 0, has_more: false};
 let ownWxid = "", resetChatScroll = true;
+let modelSaving = false;
 const chatSignatures = new WeakMap();
 
 function el(tag, className = "", text) {
@@ -45,14 +46,14 @@ function toast(text, error = false) {
   $("toast").hidden = false;
   toastTimer = setTimeout(() => $("toast").hidden = true, error ? 6500 : 3000);
 }
-async function api(path, body, method = "POST") {
-  const options = { cache: "no-store", signal: AbortSignal.timeout(15000) };
+async function api(path, body, method = "POST", timeout = 15000) {
+  const options = { cache: "no-store", signal: AbortSignal.timeout(timeout) };
   if (body !== undefined) Object.assign(options, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const response = await fetch(path, options);
   const data = await response.json();
   if (!response.ok) {
     let message = data.error?.message || data.detail || `请求失败（${response.status}）`;
-    if (Array.isArray(message) || data.error?.code === "validation_error") message = "请检查填写内容：群 ID 须以 @chatroom 结尾，成员须填写真实 wxid，名称最多 80 字。";
+    if (Array.isArray(message) || (data.error?.code === "validation_error" && path !== "/api/manage/chat-model")) message = "请检查填写内容：群 ID 须以 @chatroom 结尾，成员须填写真实 wxid，名称最多 80 字。";
     throw new Error(message);
   }
   return data;
@@ -221,7 +222,7 @@ function renderFeatures(group) {
   const chatNote = el("div", "feature-footnote");
   const chat = state.chatbot;
   const chatStatus = chat?.enabled === false ? "@问答总开关已关闭。" : chat?.answer_configured ? "问答接口已接入。" : "问答接口待接入，被 @ 时只回复一条“问答接口尚未配置”提示。";
-  chatNote.append(icon("info"), el("span", "", `${chatStatus}可在 chatbot.local.yml 配置机器人群内显示名。${chat?.last_error ? ` ${chat.last_error}` : ""}`));
+  chatNote.append(icon("info"), el("span", "", `${chatStatus}${chat?.last_error ? ` ${chat.last_error}` : ""}`), button("配置 AI 模型", "text-link", modelSettingsDialog));
   const runtime = el("div", "feature-footnote"), media = state.media;
   if (media) {
     const provider = {parse_video: "parse-video-py（抖音 / 小红书 / B站）", api: "指定接口（仅抖音）", builtin: "公开分享页（仅抖音）"}[media.parser_provider] || media.parser_provider;
@@ -414,6 +415,56 @@ function bindForm(form, footer, save) {
 function infoDialog(title, description) {
   const body = showDialog(title); body.append(el("p", "modal-copy", description)); const actions = el("div", "form-actions"); actions.append(button("知道了", "button primary", () => $("modal").close())); body.append(actions);
 }
+
+async function modelSettingsDialog() {
+  const body = showDialog("AI 对话模型", "机器人 · 全部群共用");
+  body.append(el("p", "form-note", "正在读取模型配置…"));
+  let settings;
+  try { settings = await api("/api/manage/chat-model"); }
+  catch (error) { if (body.isConnected) body.replaceChildren(el("p", "form-error", error.message)); return; }
+  if (!$("modal").open || $("modal-title").textContent !== "AI 对话模型") return;
+  body.replaceChildren();
+  const form = el("form");
+  form.append(el("p", "modal-copy", "填写服务商提供的模型名称和接口地址。保存时自动发送一条测试消息，测试通过后立即用于群内 @问答。"));
+  const base = formField(form, "Base URL", "例如 https://api.siliconflow.cn/v1", settings.base_url, false, 2048);
+  base.required = true; base.type = "url";
+  form.append(el("p", "form-note", "使用兼容 OpenAI 的 Chat Completions 服务，地址通常以 /v1 结尾。"));
+  const model = formField(form, "模型名称", "填写服务商的完整模型 ID", settings.model, false, 256);
+  model.required = true;
+  const key = formField(form, "API Key", settings.has_api_key ? "已保存密钥；留空沿用，更换地址时请重新填写" : "填写 API Key；本地免密服务可留空", "", false, 4096);
+  key.type = "password"; key.spellcheck = false;
+  form.append(el("p", "form-note", "密钥仅保存在运行服务的电脑上，页面不会回显。测试消息只发给模型服务，结果显示在此处。"));
+  const result = el("div", "model-test-result"); result.setAttribute("role", "status"); result.setAttribute("aria-live", "polite"); result.hidden = true;
+  if (settings.load_error) { result.hidden = false; result.textContent = settings.load_error; }
+  form.append(result);
+  const footer = formFooter(form, "保存并测试");
+  footer.error.setAttribute("role", "alert");
+  body.append(form);
+  form.addEventListener("submit", async event => {
+    event.preventDefault(); if (modelSaving || mutating) return;
+    modelSaving = true; mutating = true;
+    const fields = [base, model, key, ...form.querySelectorAll("button"), $("close-modal")];
+    fields.forEach(node => node.disabled = true);
+    footer.submit.textContent = "正在测试…"; footer.error.textContent = "";
+    result.hidden = false; result.className = "model-test-result";
+    result.textContent = "正在向模型发送测试消息，请稍候…";
+    try {
+      const data = await api("/api/manage/chat-model", {base_url: base.value.trim(), model: model.value.trim(), api_key: key.value.trim() || null}, "POST", 60000);
+      if (!data.saved || !data.test?.ok) {
+        result.classList.add("failed"); result.textContent = `测试未通过：${data.test?.message || "请检查模型配置。"}\n原有配置保持生效，请修改后重试。`;
+        return;
+      }
+      key.value = ""; key.placeholder = data.settings.has_api_key ? "已保存密钥；留空沿用，更换地址时请重新填写" : "本地免密服务可留空";
+      base.value = data.settings.base_url;
+      result.classList.add("passed"); result.textContent = `${data.test.message}\n模型回复：${data.test.reply}`;
+      await refreshState(true);
+    } catch (error) {
+      result.classList.add("failed"); result.textContent = error.name === "TimeoutError" ? "请求超时，请重新打开配置查看保存状态后重试。" : `保存或测试失败：${error.message}`;
+    } finally {
+      modelSaving = false; mutating = false; fields.forEach(node => node.disabled = false); footer.submit.textContent = "保存并测试";
+    }
+  });
+}
 function confirmDialog(title, description, save, label = "确认", danger = false) {
   const body = showDialog(title, "访问管理"), form = el("form"); form.append(el("p", "modal-copy", description));
   const footer = formFooter(form, label); if (danger) footer.submit.className = "button danger"; body.append(form); bindForm(form, footer, save);
@@ -548,8 +599,10 @@ $("nav-groups").addEventListener("click", () => { view = "groups"; document.body
 $("nav-blacklist").addEventListener("click", () => { view = "blacklist"; document.body.classList.add("mobile-detail"); updateView(); renderList(); });
 $("back-to-list").addEventListener("click", () => { view = "groups"; document.body.classList.remove("mobile-detail"); updateView(); renderList(); });
 $("connection-settings").addEventListener("click", connectionDialog);
+$("ai-model-settings").addEventListener("click", modelSettingsDialog);
 $("connection-indicator").addEventListener("click", connectionDialog);
-$("close-modal").addEventListener("click", () => $("modal").close());
-$("modal").addEventListener("click", event => { if (event.target === $("modal")) { const rect = $("modal").getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $("modal").close(); } });
+$("close-modal").addEventListener("click", () => { if (!modelSaving) $("modal").close(); });
+$("modal").addEventListener("cancel", event => { if (modelSaving) event.preventDefault(); });
+$("modal").addEventListener("click", event => { if (!modelSaving && event.target === $("modal")) { const rect = $("modal").getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $("modal").close(); } });
 document.addEventListener("visibilitychange", () => { clearTimeout(pollTimer); if (!document.hidden) { poll(); checkConnection(); } });
 renderOverview(); checkConnection(); poll();
