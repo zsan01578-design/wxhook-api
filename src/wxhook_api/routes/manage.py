@@ -9,6 +9,7 @@ from wxhook_api.core.chatbot_config import MentionSettings
 from wxhook_api.services.groups import GROUP_PATTERN
 from wxhook_api.services.chat_model import ModelDefinition, ModelError, ModelSettings
 from wxhook_api.services.wechat_sync import SyncError, records
+from wxhook_api.services.chat_summary import local_date
 
 
 router = APIRouter(prefix="/api/manage", tags=["群聊管理"])
@@ -129,6 +130,20 @@ async def messages(group: GroupId, request: Request, page: int = Query(1, ge=1),
 @router.get("/groups/{group}/word-cloud")
 async def word_cloud(group: GroupId, request: Request):
     return JSONResponse(await request.app.state.groups.word_cloud(group, bot_wxid=request.app.state.chatbot.identity), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/groups/{group}/summary")
+async def get_summary(group: GroupId, request: Request):
+    return JSONResponse({"summary": await request.app.state.chat_summary.groups.get_summary(group, local_date())}, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/groups/{group}/summary")
+async def refresh_summary(group: GroupId, request: Request):
+    try:
+        result = await request.app.state.chat_summary.get(group, force=True)
+    except ModelError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return JSONResponse({"summary": result}, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/groups")

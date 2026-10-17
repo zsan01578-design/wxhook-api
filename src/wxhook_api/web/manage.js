@@ -8,7 +8,7 @@ let refreshJob, pollTimer, toastTimer, detailToken = 0, mutating = false, connec
 let messagePage = 1, messageQuery = "", messageMeta = {total: 0, has_more: false};
 let ownWxid = "", resetChatScroll = true;
 let modelSaving = false;
-let wordCloud = null;
+let wordCloud = null, chatSummary = null;
 const chatSignatures = new WeakMap();
 
 function el(tag, className = "", text) {
@@ -260,10 +260,26 @@ function renderInspector(group) {
   } else {
     cloudSection.append(renderWordCloud(wordCloud.words), el("p", "inspector-hint", `最近 ${wordCloud.sampled_messages} 条成员文本消息（不含机器人） · 字越大，出现越多。点击词语查看相关消息。`));
   }
+  const summarySection = el("section", "inspector-summary"), summaryHeading = el("div", "inspector-heading"), summaryActions = el("div", "summary-actions");
+  summaryHeading.append(el("h3", "", "今日群聊总结"));
+  const refreshSummary = button("刷新总结", "button small", async event => {
+    const source = event.currentTarget; source.disabled = true; source.textContent = "生成中…";
+    try {
+      const result = await api(`${groupPath(group.id)}/summary`, {}, "POST", 60000);
+      chatSummary = result.summary; detailVersion = ""; renderInspector(group); toast("群聊总结已刷新");
+    } catch (error) { toast(error.message, true); }
+    finally { if (source.isConnected) { source.disabled = false; source.textContent = "刷新总结"; } }
+  });
+  summaryActions.append(refreshSummary); summaryHeading.append(summaryActions); summarySection.append(summaryHeading);
+  if (chatSummary?.group_id !== group.id || !chatSummary) {
+    summarySection.append(el("p", "inspector-hint", "今天 18:00 自动生成，也可以点击刷新总结。"));
+  } else {
+    summarySection.append(el("div", "chat-summary-text", chatSummary.summary), el("p", "inspector-hint", `${chatSummary.message_count} 条成员消息 · 更新于 ${dateText(chatSummary.updated_at, true)}`));
+  }
   const tip = el("div", "inspector-tip"); tip.append(icon("shield"), el("strong", "", "让群聊保持有序"), el("p", "", "黑名单只停止本系统的自动处理，不会退群、踢人或屏蔽微信消息。成员黑名单仅在所在群生效。"));
   const shortcuts = el("div", "inspector-actions");
   shortcuts.append(button("功能配置", "button small", () => setTab("features"), "settings"), button("群黑名单", "button small", () => blockGroupDialog(group), "shield"));
-  node.replaceChildren(heading, shortcuts, ...rows, noteLabel, el("p", "group-note", group.note || "还没有备注，记录这个群的用途吧。"), cloudSection, tip);
+  node.replaceChildren(heading, shortcuts, ...rows, noteLabel, el("p", "group-note", group.note || "还没有备注，记录这个群的用途吧。"), cloudSection, summarySection, tip);
 }
 function renderWordCloud(words) {
   const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
@@ -395,19 +411,21 @@ async function loadDetail() {
   const group = current();
   if (!group || view !== "groups") return;
   const token = ++detailToken, requestedTab = tab, requestedPage = messagePage, requestedQuery = messageQuery;
-  const [people, inbox, history, cloud] = await Promise.all([
+  const [people, inbox, history, cloud, summaryResponse] = await Promise.all([
     api(`${groupPath(group.id)}/members`),
     requestedTab === "messages" ? api(`${groupPath(group.id)}/messages?page=${requestedPage}&q=${encodeURIComponent(requestedQuery)}`) : Promise.resolve(null),
     requestedTab === "audit" ? api(`/api/manage/audit?group=${encodeURIComponent(group.id)}`) : Promise.resolve(null),
-    api(`${groupPath(group.id)}/word-cloud`).catch(error => ({group_id: group.id, error: error.message || "词云暂时无法加载，稍后自动重试。"}))
+    api(`${groupPath(group.id)}/word-cloud`).catch(error => ({group_id: group.id, error: error.message || "词云暂时无法加载，稍后自动重试。"})),
+    api(`${groupPath(group.id)}/summary`).catch(() => ({summary: null}))
   ]);
   if (token !== detailToken || group.id !== selectedId || requestedTab !== tab || view !== "groups") return;
   members = people.members;
   wordCloud = cloud;
+  chatSummary = summaryResponse.summary;
   messages = inbox?.messages || [];
   if (inbox) messageMeta = inbox;
   audit = history?.events || [];
-  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, cloud, tab, state.media, ownWxid, state.chatbot]);
+  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, cloud, chatSummary, tab, state.media, ownWxid, state.chatbot]);
   if (version === detailVersion) return;
   detailVersion = version;
   renderHeader(current()); renderInspector(current());

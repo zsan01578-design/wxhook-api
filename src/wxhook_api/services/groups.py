@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -28,6 +28,11 @@ def event_group(event: CallbackEvent) -> str:
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _day_bounds(summary_date: str) -> tuple[int, int]:
+    local = datetime.strptime(summary_date, "%Y-%m-%d").replace(tzinfo=timezone(timedelta(hours=8)))
+    return int(local.timestamp()), int((local + timedelta(days=1)).timestamp())
 
 
 class GroupManager:
@@ -84,6 +89,11 @@ class GroupManager:
                         group_id TEXT NOT NULL, message_key TEXT NOT NULL, status TEXT NOT NULL,
                         created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                         PRIMARY KEY (group_id, message_key)
+                    );
+                    CREATE TABLE IF NOT EXISTS chat_summaries (
+                        group_id TEXT NOT NULL, summary_date TEXT NOT NULL, summary TEXT NOT NULL,
+                        message_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                        PRIMARY KEY (group_id, summary_date)
                     );
                 """)
                 migrations = {
@@ -409,6 +419,55 @@ class GroupManager:
         while len(self._word_cloud_cache) > 32:
             self._word_cloud_cache.popitem(last=False)
         return result
+
+    async def summary_messages(self, group: str, summary_date: str, *, bot_wxid: str = "") -> list[dict]:
+        """Return today's text messages in Asia/Shanghai, excluding the bot."""
+        def read():
+            account = None
+            with self._connect() as db:
+                row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
+                account = row[0] if row else bot_wxid
+                rows = db.execute("""SELECT sender,timestamp,content,json_extract(raw_json,'$.is_self') AS is_self
+                    FROM chat_messages WHERE group_id=? AND type=1
+                    AND timestamp>=? AND timestamp<? AND (?='' OR sender<>?)
+                    ORDER BY timestamp,id""", (group, *_day_bounds(summary_date), account, account))
+                result = []
+                for item in rows:
+                    if item["is_self"] in (True, 1, "1", "true"):
+                        continue
+                    if account and item["sender"] in ("", group) and item["content"].startswith((account + ":\n", account + ":\r\n")):
+                        continue
+                    result.append(dict(item))
+                return result
+        async with self._lock:
+            return await asyncio.to_thread(read)
+
+    async def get_summary(self, group: str, summary_date: str) -> dict | None:
+        def read():
+            with self._connect() as db:
+                row = db.execute("SELECT group_id,summary_date,summary,message_count,created_at,updated_at FROM chat_summaries WHERE group_id=? AND summary_date=?", (group, summary_date)).fetchone()
+                return dict(row) if row else None
+        async with self._lock:
+            return await asyncio.to_thread(read)
+
+    async def save_summary(self, group: str, summary_date: str, summary: str, message_count: int) -> dict:
+        timestamp = now()
+        def write():
+            with self._connect() as db:
+                db.execute("""INSERT INTO chat_summaries(group_id,summary_date,summary,message_count,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?) ON CONFLICT(group_id,summary_date) DO UPDATE SET summary=excluded.summary,message_count=excluded.message_count,updated_at=excluded.updated_at""",
+                    (group, summary_date, summary, message_count, timestamp, timestamp))
+                row = db.execute("SELECT group_id,summary_date,summary,message_count,created_at,updated_at FROM chat_summaries WHERE group_id=? AND summary_date=?", (group, summary_date)).fetchone()
+                return dict(row)
+        async with self._lock:
+            return await asyncio.to_thread(write)
+
+    async def summary_group_ids(self) -> list[str]:
+        def read():
+            with self._connect() as db:
+                return [row[0] for row in db.execute("SELECT id FROM groups ORDER BY id")]
+        async with self._lock:
+            return await asyncio.to_thread(read)
 
     async def messages(self, group: str, *, page: int = 1, size: int = 50, query: str = "") -> dict:
         def read():

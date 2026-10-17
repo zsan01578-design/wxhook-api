@@ -229,3 +229,9 @@ class ChatModelConfiguration:
                 raise ModelError("不能删除正在启用的模型，请先启用其他模型。")
             await self._commit({key: value for key, value in self.models.items() if key != model_id}, self.active_id)
             return {"saved": True, "settings": self.snapshot()}
+
+    async def answer(self, question: str) -> str:
+        if not self.settings:
+            raise ModelError("AI 模型尚未配置。")
+        provider = ChatCompletionsProvider(self.settings, self.transport)
+        return await provider.answer(question)

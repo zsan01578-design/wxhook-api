@@ -86,6 +86,7 @@ class MentionChatService:
         self._recent: OrderedDict[str, dict] = OrderedDict()
         self._names_lock = asyncio.Lock()
         self._profile_names: tuple[str, ...] = ()
+        self.summary_service = None
 
     @property
     def identity(self) -> str:
@@ -235,11 +236,19 @@ class MentionChatService:
             report.update(status="queue_full", message=self.last_error)
         return True
 
-    async def _answer(self, question: str) -> str:
+    async def _answer(self, question: str, group: str = "") -> str:
         if not question:
             return "我在，请在 @ 后写下你的问题。"
         if len(question) > 8000:
             return "问题太长了，请缩短后重新 @ 我。"
+        compact_question = re.sub(r"\s+", "", question or "")
+        if re.fullmatch(r"(?:今天|今日)?(?:聊天)?总结[。！!？?]?", compact_question) and self.summary_service:
+            try:
+                result = await self.summary_service.get(group)
+                return result["summary"]
+            except Exception as exc:
+                self.last_error = str(exc)
+                return f"暂时无法生成群聊总结：{self.last_error}"
         if self.provider is None:
             return "问答接口尚未配置，请联系管理员。"
         try:
@@ -268,7 +277,7 @@ class MentionChatService:
                     report.update(status="duplicate", message="此消息已处理或已尝试发送，不会重复回复；请发送新的提问")
                     continue
                 report.update(status="answering", message="正在等待模型回复")
-                answer = await self._answer(job["question"])
+                answer = await self._answer(job["question"], job["group"])
                 limit = self.options.max_reply_chars
                 if len(answer) > limit:
                     answer = answer[:limit - 1] + "…"

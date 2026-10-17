@@ -25,6 +25,7 @@ from wxhook_api.routes import account, callbacks, contacts, douyin, health, hist
 from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.chatbot import MentionChatService
 from wxhook_api.services.chat_model import ChatModelConfiguration
+from wxhook_api.services.chat_summary import ChatSummaryService
 from wxhook_api.services.douyin_delivery import DouyinMessenger
 from wxhook_api.services.events import EventDispatcher
 from wxhook_api.services.groups import GroupManager
@@ -46,6 +47,8 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     chatbot.groups = groups
     chatbot.default_group_enabled = douyin_worker.allowed
     model_configuration = ChatModelConfiguration(chatbot)
+    summary_service = ChatSummaryService(groups, model_configuration, chatbot.identity)
+    chatbot.summary_service = summary_service
 
     async def automatic_message(event):
         if await chatbot.receive(event):
@@ -67,6 +70,8 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             await groups.start(douyin_worker.options.settings.groups)
             await douyin_worker.start()
             await chatbot.start(app.state.hook_client)
+            summary_service.bot_wxid = chatbot.identity
+            await summary_service.start()
             await dispatcher.start()
             synchronizer.start(app.state.hook_client)
             yield
@@ -76,6 +81,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
                 await dispatcher.stop(settings.shutdown_timeout)
             finally:
                 try:
+                    await summary_service.stop()
                     try:
                         await chatbot.stop()
                     finally:
@@ -98,6 +104,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.wechat_sync = synchronizer
     app.state.chatbot = chatbot
     app.state.chat_model = model_configuration
+    app.state.chat_summary = summary_service
     app.state.runtime_revision = source_revision()
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
     install_exception_handlers(app)
