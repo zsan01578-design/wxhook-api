@@ -47,7 +47,7 @@
     <aside class="conversations" aria-label="群聊列表">
       <div class="list-heading"><div><h1>群聊</h1><span id="group-total">0 个群聊</span></div><button class="icon-button" id="add-group-small" aria-label="添加群聊" title="添加群聊"><svg class="icon"><use href="#i-plus"/></svg></button></div>
       <div class="search-field"><svg class="icon"><use href="#i-search"/></svg><input id="group-search" type="search" placeholder="搜索群名称或群 ID" aria-label="搜索群聊" autocomplete="off"></div>
-      <div class="list-filters" aria-label="筛选群聊"><button data-filter="all" class="active" aria-pressed="true">全部</button><button data-filter="active" aria-pressed="false">运行中</button><button data-filter="blocked" aria-pressed="false">已拉黑</button></div>
+      <div class="list-filters" aria-label="筛选群聊"><button data-filter="all" class="active" aria-pressed="true">全部</button><button data-filter="active" aria-pressed="false">已启用</button><button data-filter="inactive" aria-pressed="false">未启用</button><button data-filter="blocked" aria-pressed="false">已拉黑</button></div>
       <div id="group-list" class="group-list"><div class="list-empty">正在载入群聊…</div></div>
       <div class="list-footer"><span class="live-dot"></span><span>微信自动同步 · 实时记录消息</span></div>
     </aside>
@@ -64,11 +64,6 @@
           <div id="restriction-banner" class="restriction-banner" hidden></div>
           <nav class="tabs" aria-label="群聊管理内容"><button data-tab="messages" class="active" aria-current="page">群消息</button><button data-tab="features">功能配置</button><button data-tab="members">群成员 <span id="member-tab-count">0</span></button><button data-tab="audit">操作记录</button></nav>
           <div id="tab-content" class="tab-content"></div>
-          <form id="chat-compose" class="chat-compose" hidden>
-            <label id="compose-label" for="chat-draft">发送群消息</label>
-            <textarea id="chat-draft" rows="3" maxlength="10000" placeholder="输入消息…" aria-label="群消息内容"></textarea>
-            <div class="chat-compose-footer"><p id="compose-status" role="status" aria-live="polite"></p><div><span>Ctrl / ⌘ + Enter 发送</span><button id="chat-send" class="button primary" type="submit" disabled>发送</button></div></div>
-          </form>
           <footer class="detail-footer"><svg class="icon"><use href="#i-shield"/></svg><span>配置仅保存在本机 · 修改后立即生效</span><span class="footer-mark">WXHOOK</span></footer>
         </section>
         <aside id="inspector" class="inspector" aria-label="群聊资料"></aside>

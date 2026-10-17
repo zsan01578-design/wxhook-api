@@ -7,7 +7,6 @@ let members = [], messages = [], audit = [], memberQuery = "", detailVersion = "
 let refreshJob, pollTimer, toastTimer, detailToken = 0, mutating = false, connected = false;
 let messagePage = 1, messageQuery = "", messageMeta = {total: 0, has_more: false};
 let ownWxid = "", resetChatScroll = true;
-const drafts = new Map(), sendStates = new Map();
 const chatSignatures = new WeakMap();
 
 function el(tag, className = "", text) {
@@ -62,6 +61,8 @@ const groupPath = id => `/api/manage/groups/${encodeURIComponent(id)}`;
 const memberPath = (group, member) => `${groupPath(group)}/members/${encodeURIComponent(member)}`;
 const current = () => state.groups.find(group => group.id === selectedId);
 const nameOf = group => group.name || group.id;
+const robotEnabled = group => Boolean(group.active && group.douyin_enabled);
+const robotStatus = group => group.blocked ? "已拉黑" : robotEnabled(group) ? "机器人已启用" : "机器人未启用";
 function dateText(value, short = false) {
   if (!value) return "暂无消息";
   const date = new Date(value);
@@ -114,8 +115,8 @@ function toggleSwitch(label, checked, disabled, onChange) {
 function renderOverview() {
   const data = [
     ["users", state.groups.length, "管理群聊"],
-    ["chat", state.groups.filter(group => group.active).length, "运行中群聊"],
-    ["video", state.groups.filter(group => group.active && group.douyin_enabled).length, "已启用解析"],
+    ["chat", state.groups.filter(robotEnabled).length, "已启用机器人"],
+    ["video", state.groups.filter(group => !robotEnabled(group) && !group.blocked).length, "未启用机器人"],
     ["shield", state.groups.filter(group => group.blocked).length + state.blocked_members.length, "黑名单对象"]
   ];
   $("overview").replaceChildren(...data.map(([symbol, value, label]) => {
@@ -126,14 +127,18 @@ function renderOverview() {
 }
 function renderList() {
   const query = $("group-search").value.trim().toLowerCase();
-  const rows = state.groups.filter(group => (!query || `${group.name} ${group.id} ${group.note}`.toLowerCase().includes(query)) && (filter === "all" || (filter === "active" ? group.active : group.blocked)));
+  const rows = state.groups.filter(group => (!query || `${group.name} ${group.id} ${group.note}`.toLowerCase().includes(query)) &&
+    (filter === "all" || (filter === "active" ? robotEnabled(group) : filter === "inactive" ? !robotEnabled(group) && !group.blocked : group.blocked)))
+    .sort((left, right) => Number(robotEnabled(right)) - Number(robotEnabled(left)));
   const nodes = rows.map(group => {
-    const node = button("", `group-item${selectedId === group.id && view === "groups" ? " selected" : ""}`, () => selectGroup(group.id));
+    const enabled = robotEnabled(group);
+    const node = button("", `group-item ${group.blocked ? "robot-blocked" : enabled ? "robot-on" : "robot-off"}${selectedId === group.id && view === "groups" ? " selected" : ""}`, () => selectGroup(group.id));
     node.setAttribute("aria-pressed", String(selectedId === group.id && view === "groups"));
     const copy = el("div", "group-item-copy"), title = el("div", "group-item-title"), meta = el("div", "group-item-meta"), status = el("span");
     title.append(el("strong", "", nameOf(group)));
     if (group.pinned) title.append(icon("pin"));
-    status.append(el("span", `tiny-dot${group.blocked ? " red" : !group.active ? " gray" : ""}`), document.createTextNode(group.blocked ? "已拉黑" : group.active ? "运行中" : "已暂停"));
+    status.className = "robot-state";
+    status.append(el("span", `tiny-dot${group.blocked ? " red" : !enabled ? " gray" : ""}`), document.createTextNode(robotStatus(group)));
     meta.append(status, el("span", "", group.members_sync === "complete" ? `${group.current_member_count} 位群成员` : `${group.member_count} 位已发现成员`));
     copy.append(title, el("p", "", group.last_message || group.note || "等待群内第一条消息"), meta);
     node.append(avatar(group), copy); return node;
@@ -174,11 +179,12 @@ function renderWelcome(error) {
 
 function renderHeader(group) {
   const copy = el("div", "group-heading-copy"), title = el("div", "group-heading-title"), id = el("p", "group-id"), tools = el("div", "header-tools");
-  title.append(el("h2", "", nameOf(group)), badge(group.blocked ? "已拉黑" : group.active ? "运行中" : "已暂停", group.blocked ? "red" : !group.active ? "gray" : ""));
+  title.append(el("h2", "", nameOf(group)), badge(robotStatus(group), group.blocked ? "red" : !robotEnabled(group) ? "gray" : ""));
   id.append(document.createTextNode(group.id), iconButton("info", "群 ID 说明", () => infoDialog("群 ID", "这是微信中群聊的唯一标识。管理系统中的群名称和备注仅保存在本机，不会修改微信群名称。")));
   copy.append(title, id);
   const pin = iconButton("pin", group.pinned ? "取消置顶" : "置顶群聊", event => mutation(event.currentTarget, groupPath(group.id), { pinned: !group.pinned }, group.pinned ? "已取消置顶" : "群聊已置顶"));
   pin.setAttribute("aria-pressed", String(group.pinned));
+  pin.title = group.pinned ? "取消在同类群聊中的置顶" : "在相同机器人状态的群聊中置顶";
   tools.append(pin, iconButton("edit", "编辑群资料", () => editGroupDialog(group)));
   $("group-header").replaceChildren(avatar(group, true), copy, tools);
   $("member-tab-count").textContent = group.member_count;
@@ -192,20 +198,6 @@ function updateChatMode() {
   const chatting = view === "groups" && Boolean(current()) && tab === "messages";
   $("group-workspace").classList.toggle("chatting", chatting);
   $("tab-content").classList.toggle("chat-content", chatting);
-  $("chat-compose").hidden = !chatting;
-  if (!chatting) return;
-  const form = $("chat-compose"), draft = $("chat-draft"), group = current();
-  if (form.dataset.group !== group.id) {
-    form.dataset.group = group.id;
-    draft.value = drafts.get(group.id) || "";
-  }
-  $("compose-label").textContent = `发送到 ${nameOf(group)}`;
-  draft.placeholder = `发送消息到「${nameOf(group)}」…`;
-  const status = sendStates.get(group.id);
-  $("compose-status").textContent = status?.message || "";
-  $("compose-status").classList.toggle("send-error", Boolean(status?.error));
-  $("chat-send").disabled = Boolean(status?.pending) || !draft.value.trim();
-  $("chat-send").textContent = status?.pending ? "发送中…" : "发送";
 }
 function renderFeatures(group) {
   const content = $("tab-content"), heading = el("div", "section-heading"), copy = el("div");
@@ -244,7 +236,7 @@ function renderFeatures(group) {
 function renderInspector(group) {
   const node = $("inspector"), heading = el("div", "inspector-heading");
   heading.append(el("h3", "", "群聊资料"), iconButton("edit", "编辑群资料", () => editGroupDialog(group)));
-  const lines = [["管理状态", group.blocked ? "黑名单" : group.active ? "正常运行" : "已暂停"], [group.members_sync === "complete" ? "微信当前群成员" : "已发现成员", `${group.members_sync === "complete" ? group.current_member_count : group.member_count} 人`], ["成员黑名单", `${group.blocked_member_count} 人`], ["已保存消息", `${group.message_count} 条`], ["最近活跃", dateText(group.last_seen, true)]];
+  const lines = [["机器人状态", group.blocked ? "已拉黑" : robotEnabled(group) ? "已启用" : "未启用"], [group.members_sync === "complete" ? "微信当前群成员" : "已发现成员", `${group.members_sync === "complete" ? group.current_member_count : group.member_count} 人`], ["成员黑名单", `${group.blocked_member_count} 人`], ["已保存消息", `${group.message_count} 条`], ["最近活跃", dateText(group.last_seen, true)]];
   const rows = lines.map(([label, value]) => { const row = el("div", "info-line"); row.append(el("span", "", label), el("strong", "", value)); return row; });
   const noteLabel = el("div", "note-label"); noteLabel.append(el("span", "", "群备注"), button("编辑", "text-link", () => editGroupDialog(group)));
   const memberSection = el("div", "inspector-members"), memberHeading = el("div", "inspector-heading");
@@ -314,7 +306,7 @@ function renderMessages() {
   const notice = $("chat-history-notice");
   notice.hidden = !group.history_error && group.history_complete;
   notice.textContent = group.history_error || "正在同步历史消息，可先查看已保存的记录。";
-  notice.classList.toggle("send-error", Boolean(group.history_error));
+  notice.classList.toggle("chat-error", Boolean(group.history_error));
   const signature = JSON.stringify([messages, members.map(person => [person.id, person.name, person.blocked]), messagePage, messageQuery, ownWxid]);
   if (chatSignatures.get(log) === signature && !resetChatScroll) return;
   const oldTop = log.scrollTop, oldHeight = log.scrollHeight, follow = resetChatScroll || oldHeight - log.clientHeight - oldTop < 80;
@@ -333,7 +325,7 @@ function renderMessages() {
     if (message.type !== 1 || message.truncated) body.append(el("p", "form-note", `${message.type !== 1 ? `类型 ${message.type} · 展示原始内容` : ""}${message.truncated ? " · 内容过长已截断" : ""}`));
     row.append(memberAvatar(person, i), body); stack.append(row);
   });
-  log.replaceChildren(messages.length ? stack : empty(messageQuery ? "没有匹配的聊天记录" : "还没有聊天消息", messageQuery ? "换个关键词试试。" : "消息同步后会显示在这里，也可以发送第一条群消息。"));
+  log.replaceChildren(messages.length ? stack : empty(messageQuery ? "没有匹配的聊天记录" : "还没有聊天消息", messageQuery ? "换个关键词试试。" : "群消息同步后会显示在这里。"));
   resetChatScroll = false;
   requestAnimationFrame(() => {
     if (!log.isConnected || log.dataset.group !== selectedId) return;
@@ -485,29 +477,6 @@ async function checkConnection() {
   }
 }
 
-async function sendChat(event) {
-  event.preventDefault();
-  const target = $("chat-compose").dataset.group, text = $("chat-draft").value;
-  if (!target || !text.trim() || sendStates.get(target)?.pending) return;
-  const group = state.groups.find(item => item.id === target), targetName = group ? nameOf(group) : target;
-  sendStates.set(target, {pending: true, message: "正在发送…"}); updateChatMode();
-  try {
-    const result = await api("/SendTextMsg", {wxidorgid: target, msg: text});
-    if (String(result.ret) !== "0") throw new Error(result.retmsg || result.msg || "微信未确认发送成功");
-    if (drafts.get(target) === text) drafts.delete(target);
-    if ($("chat-compose").dataset.group === target && $("chat-draft").value === text) $("chat-draft").value = "";
-    sendStates.set(target, {pending: false, message: "已发送，等待微信消息同步。"});
-    if (selectedId !== target) toast(`已发送到「${targetName}」`);
-    updateChatMode();
-    // Refresh history through the existing background worker; never retry an uncertain send.
-    api("/api/manage/sync", {}).catch(() => {});
-    await refreshState(true);
-  } catch (error) {
-    const message = `发送未确认：${error.message} 请先在微信查看结果，再决定是否重试。`;
-    sendStates.set(target, {pending: false, message, error: true});
-    if (selectedId !== target) toast(`「${targetName}」${message}`, true);
-  } finally { updateChatMode(); }
-}
 function connectionDialog() {
   const body = showDialog("连接与消息接收", "本机服务"), status = el("p", "modal-copy", $("connection-label").textContent), startup = el("p", "form-note", state.startup?.message || "启动 main.py 后，在原版微信中完成登录。群消息通过 Hook 回调自动接收。"), result = el("p", "form-note"), actions = el("div", "form-actions");
   actions.append(button("检查连接", "button", async event => { const source = event.currentTarget; source.disabled = true; await checkConnection(); status.textContent = $("connection-label").textContent; try { callbackInfo(received, await api("/api/callback/status")); } catch (error) { received.textContent = `读取回调诊断失败：${error.message}`; } source.disabled = false; }), button("启用消息接收", "button primary", async event => {
@@ -538,7 +507,7 @@ async function refreshState(force = false) {
   refreshJob = (async () => {
     try {
       Object.assign(state, await api("/api/manage/state"));
-      if (!selectedId || !current()) selectedId = state.groups[0]?.id || "";
+      if (!selectedId || !current()) selectedId = (state.groups.find(robotEnabled) || state.groups[0])?.id || "";
       const version = JSON.stringify(state.groups);
       if (version !== listVersion) { listVersion = version; renderList(); }
       const sync = state.sync;
@@ -562,9 +531,6 @@ async function poll() {
   if (!document.hidden) pollTimer = setTimeout(poll, 3000);
 }
 $("group-search").addEventListener("input", renderList);
-$("chat-draft").addEventListener("input", () => { const target = $("chat-compose").dataset.group; if (target) { drafts.set(target, $("chat-draft").value); if (!sendStates.get(target)?.pending) sendStates.delete(target); } updateChatMode(); });
-$("chat-draft").addEventListener("keydown", event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.isComposing) { event.preventDefault(); $("chat-compose").requestSubmit(); } });
-$("chat-compose").addEventListener("submit", sendChat);
 document.querySelectorAll("[data-filter]").forEach(node => node.addEventListener("click", () => {
   filter = node.dataset.filter; document.querySelectorAll("[data-filter]").forEach(item => { item.classList.toggle("active", item === node); item.setAttribute("aria-pressed", String(item === node)); }); renderList();
 }));
