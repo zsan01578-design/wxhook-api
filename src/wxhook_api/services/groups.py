@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
@@ -14,6 +15,7 @@ from uuid import uuid4
 
 from wxhook_api.core.config import PROJECT_ROOT
 from wxhook_api.schemas.events import CallbackEvent
+from wxhook_api.services.word_cloud import frequent_words
 
 
 GROUP_PATTERN = r"[A-Za-z0-9_-]{1,128}@chatroom"
@@ -36,6 +38,7 @@ class GroupManager:
         self._lock = asyncio.Lock()
         self._policies: dict[str, dict] = {}
         self._blocked_members: set[tuple[str, str]] = set()
+        self._word_cloud_cache: OrderedDict[str, tuple[str, dict]] = OrderedDict()
 
     @contextmanager
     def _connect(self):
@@ -372,6 +375,26 @@ class GroupManager:
                 return self._save_messages(db, group, normalized)
         async with self._lock:
             return await asyncio.to_thread(write)
+
+    async def word_cloud(self, group: str) -> dict:
+        def read():
+            with self._connect() as db:
+                return [row[0] for row in db.execute("""SELECT substr(content,1,2000) FROM chat_messages
+                    WHERE group_id=? AND type=1 ORDER BY timestamp DESC,id DESC LIMIT 1000""", (group,))]
+        async with self._lock:
+            texts = await asyncio.to_thread(read)
+        signature = hashlib.sha256(json.dumps(texts, ensure_ascii=False).encode()).hexdigest()
+        cached = self._word_cloud_cache.get(group)
+        if cached and cached[0] == signature:
+            self._word_cloud_cache.move_to_end(group)
+            return cached[1]
+        words = await asyncio.to_thread(frequent_words, texts)
+        result = {"group_id": group, "words": words, "sampled_messages": len(texts), "message_limit": 1000}
+        self._word_cloud_cache[group] = (signature, result)
+        self._word_cloud_cache.move_to_end(group)
+        while len(self._word_cloud_cache) > 32:
+            self._word_cloud_cache.popitem(last=False)
+        return result
 
     async def messages(self, group: str, *, page: int = 1, size: int = 50, query: str = "") -> dict:
         def read():

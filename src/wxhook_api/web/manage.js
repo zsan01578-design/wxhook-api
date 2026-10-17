@@ -8,6 +8,7 @@ let refreshJob, pollTimer, toastTimer, detailToken = 0, mutating = false, connec
 let messagePage = 1, messageQuery = "", messageMeta = {total: 0, has_more: false};
 let ownWxid = "", resetChatScroll = true;
 let modelSaving = false;
+let wordCloud = null;
 const chatSignatures = new WeakMap();
 
 function el(tag, className = "", text) {
@@ -250,19 +251,57 @@ function renderInspector(group) {
   const lines = [["机器人状态", group.blocked ? "已拉黑" : robotEnabled(group) ? "已启用" : "未启用"], [group.members_sync === "complete" ? "微信当前群成员" : "已发现成员", `${group.members_sync === "complete" ? group.current_member_count : group.member_count} 人`], ["成员黑名单", `${group.blocked_member_count} 人`], ["已保存消息", `${group.message_count} 条`], ["最近活跃", dateText(group.last_seen, true)]];
   const rows = lines.map(([label, value]) => { const row = el("div", "info-line"); row.append(el("span", "", label), el("strong", "", value)); return row; });
   const noteLabel = el("div", "note-label"); noteLabel.append(el("span", "", "群备注"), button("编辑", "text-link", () => editGroupDialog(group)));
-  const memberSection = el("div", "inspector-members"), memberHeading = el("div", "inspector-heading");
-  memberHeading.append(el("h3", "", "群成员"), button("查看全部", "text-link", () => setTab("members"), "arrow")); memberSection.append(memberHeading);
-  if (!members.length) memberSection.append(el("p", "inspector-hint", "等待群成员发言后自动发现，也可以手动添加成员。"));
-  members.slice(0, 5).forEach((member, i) => {
-    const row = el("div", "member-preview"), copy = el("div", "member-preview-copy");
-    copy.append(el("strong", "", member.name || member.id), el("p", "", member.blocked ? "已加入黑名单" : member.last_seen ? "已发现成员" : "手动添加"));
-    row.append(memberAvatar(member, i), copy, iconButton(member.blocked ? "check" : "block", member.blocked ? `解除 ${member.name || member.id} 黑名单` : `拉黑 ${member.name || member.id}`, () => blockMemberDialog(group.id, member))); memberSection.append(row);
-  });
-  memberSection.append(el("p", "inspector-hint", group.members_sync === "complete" ? "已同步微信当前成员关系，离群成员的历史记录和本地设置会保留。" : "尚未取得完整微信成员关系，此处为已发现或手动添加的成员。"));
+  const cloudSection = el("section", "inspector-word-cloud"), cloudHeading = el("div", "inspector-heading");
+  cloudHeading.append(el("h3", "", "群聊词云")); cloudSection.append(cloudHeading);
+  if (wordCloud?.group_id !== group.id || wordCloud.error) {
+    cloudSection.append(el("p", "inspector-hint", wordCloud?.error || "正在生成词云…"));
+  } else if (!wordCloud.words.length) {
+    cloudSection.append(el("p", "word-cloud-empty", "暂无可展示的词语"), el("p", "inspector-hint", "群内文字消息积累后，会自动生成词云。"));
+  } else {
+    cloudSection.append(renderWordCloud(wordCloud.words), el("p", "inspector-hint", `最近 ${wordCloud.sampled_messages} 条文本消息 · 字越大，出现越多。点击词语查看相关消息。`));
+  }
   const tip = el("div", "inspector-tip"); tip.append(icon("shield"), el("strong", "", "让群聊保持有序"), el("p", "", "黑名单只停止本系统的自动处理，不会退群、踢人或屏蔽微信消息。成员黑名单仅在所在群生效。"));
   const shortcuts = el("div", "inspector-actions");
   shortcuts.append(button("功能配置", "button small", () => setTab("features"), "settings"), button("群黑名单", "button small", () => blockGroupDialog(group), "shield"));
-  node.replaceChildren(heading, shortcuts, ...rows, noteLabel, el("p", "group-note", group.note || "还没有备注，记录这个群的用途吧。"), memberSection, tip);
+  node.replaceChildren(heading, shortcuts, ...rows, noteLabel, el("p", "group-note", group.note || "还没有备注，记录这个群的用途吧。"), cloudSection, tip);
+}
+function renderWordCloud(words) {
+  const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 220 240"); svg.setAttribute("class", "word-cloud");
+  svg.setAttribute("role", "group"); svg.setAttribute("aria-label", "群聊高频词，点击词语搜索聊天记录");
+  const measure = document.createElement("canvas").getContext("2d"), boxes = [];
+  const palette = ["#07955d", "#287b8d", "#5d739d", "#90805b", "#758c6a", "#956d80"];
+  const max = words[0].count, min = words[words.length - 1].count;
+  words.forEach((word, index) => {
+    let size = max === min ? 17 : 11 + 18 * Math.sqrt((word.count - min) / (max - min));
+    measure.font = `600 ${size}px "Microsoft YaHei", sans-serif`;
+    let width = measure.measureText(word.text).width;
+    if (width > 200) { size *= 200 / width; width = 200; }
+    const height = size * 1.3;
+    let box;
+    for (let step = 0; step < 1400; step++) {
+      const angle = step * .32, radius = step * .13;
+      const x = 110 + Math.cos(angle) * radius, y = 120 + Math.sin(angle) * radius * .9;
+      const candidate = {left: x - width / 2 - 3, right: x + width / 2 + 3, top: y - height / 2 - 2, bottom: y + height / 2 + 2, x, y};
+      if (candidate.left < 2 || candidate.right > 218 || candidate.top < 2 || candidate.bottom > 238) continue;
+      if (boxes.some(b => candidate.left < b.right && candidate.right > b.left && candidate.top < b.bottom && candidate.bottom > b.top)) continue;
+      box = candidate; break;
+    }
+    if (!box) return;
+    boxes.push(box);
+    const text = document.createElementNS(ns, "text"), title = document.createElementNS(ns, "title");
+    text.setAttribute("x", box.x); text.setAttribute("y", box.y);
+    text.setAttribute("text-anchor", "middle"); text.setAttribute("dominant-baseline", "central");
+    text.setAttribute("font-size", size.toFixed(1)); text.setAttribute("font-weight", "600");
+    text.setAttribute("fill", palette[index % palette.length]); text.setAttribute("role", "button"); text.setAttribute("tabindex", "0");
+    text.setAttribute("aria-label", `${word.text}，${word.count} 次，搜索相关消息`);
+    text.textContent = word.text; title.textContent = `${word.text} · ${word.count} 次`; text.append(title);
+    const search = () => { messageQuery = word.text; messagePage = 1; detailVersion = ""; resetChatScroll = true; const input = document.querySelector(".message-search input"); if (input) input.value = word.text; setTab("messages"); };
+    text.addEventListener("click", search);
+    text.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); search(); } });
+    svg.append(text);
+  });
+  return svg;
 }
 function renderMembers(group) {
   const heading = el("div", "section-heading"), copy = el("div");
@@ -356,17 +395,19 @@ async function loadDetail() {
   const group = current();
   if (!group || view !== "groups") return;
   const token = ++detailToken, requestedTab = tab, requestedPage = messagePage, requestedQuery = messageQuery;
-  const [people, inbox, history] = await Promise.all([
+  const [people, inbox, history, cloud] = await Promise.all([
     api(`${groupPath(group.id)}/members`),
     requestedTab === "messages" ? api(`${groupPath(group.id)}/messages?page=${requestedPage}&q=${encodeURIComponent(requestedQuery)}`) : Promise.resolve(null),
-    requestedTab === "audit" ? api(`/api/manage/audit?group=${encodeURIComponent(group.id)}`) : Promise.resolve(null)
+    requestedTab === "audit" ? api(`/api/manage/audit?group=${encodeURIComponent(group.id)}`) : Promise.resolve(null),
+    api(`${groupPath(group.id)}/word-cloud`).catch(() => ({group_id: group.id, error: "词云暂时无法加载，稍后自动重试。"}))
   ]);
   if (token !== detailToken || group.id !== selectedId || requestedTab !== tab || view !== "groups") return;
   members = people.members;
+  wordCloud = cloud;
   messages = inbox?.messages || [];
   if (inbox) messageMeta = inbox;
   audit = history?.events || [];
-  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, tab, state.media, ownWxid, state.chatbot]);
+  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, cloud, tab, state.media, ownWxid, state.chatbot]);
   if (version === detailVersion) return;
   detailVersion = version;
   renderHeader(current()); renderInspector(current());

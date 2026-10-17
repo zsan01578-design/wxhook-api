@@ -13,4 +13,13 @@ context-local HTTP policy through the pinned SDK's client factory. SDK source is
 not vendored or modified. Recheck the factory integration and platform tests when
 updating the pinned revision.
 
+## jieba
+
+- Project: https://github.com/fxsjy/jieba
+- Version: `>=0.42.1,<1`
+- License: MIT (included in the installed package).
+
+Used locally to segment Chinese text for group word frequencies. Chat contents
+are not sent to a third-party service for this feature.
+
 Other dependencies retain their respective licenses in their installed packages.

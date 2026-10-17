@@ -126,6 +126,11 @@ async def messages(group: GroupId, request: Request, page: int = Query(1, ge=1),
     return JSONResponse(await request.app.state.groups.messages(group, page=page, size=size, query=q), headers={"Cache-Control": "no-store"})
 
 
+@router.get("/groups/{group}/word-cloud")
+async def word_cloud(group: GroupId, request: Request):
+    return JSONResponse(await request.app.state.groups.word_cloud(group), headers={"Cache-Control": "no-store"})
+
+
 @router.post("/groups")
 async def add_group(body: GroupCreate, request: Request):
     added = await request.app.state.groups.add_group(body.id, body.name)
