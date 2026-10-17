@@ -399,7 +399,7 @@ async function loadDetail() {
     api(`${groupPath(group.id)}/members`),
     requestedTab === "messages" ? api(`${groupPath(group.id)}/messages?page=${requestedPage}&q=${encodeURIComponent(requestedQuery)}`) : Promise.resolve(null),
     requestedTab === "audit" ? api(`/api/manage/audit?group=${encodeURIComponent(group.id)}`) : Promise.resolve(null),
-    api(`${groupPath(group.id)}/word-cloud`).catch(() => ({group_id: group.id, error: "词云暂时无法加载，稍后自动重试。"}))
+    api(`${groupPath(group.id)}/word-cloud`).catch(error => ({group_id: group.id, error: error.message || "词云暂时无法加载，稍后自动重试。"}))
   ]);
   if (token !== detailToken || group.id !== selectedId || requestedTab !== tab || view !== "groups") return;
   members = people.members;

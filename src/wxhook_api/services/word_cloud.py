@@ -3,9 +3,6 @@
 from collections import Counter
 import re
 
-import jieba
-
-
 STOP_WORDS = set("""
 的 了 是 我 你 他 她 它 们 在 和 与 就 都 而 及 或 这 那 也 又 还 很 有 没 不 吗 呢 啊 哦 嗯 吧 呀 啦 哈 哈哈 哈哈哈
 我们 你们 他们 她们 它们 自己 什么 怎么 为什么 这个 那个 这些 那些 一个 一些 这样 那样 这里 那里
@@ -18,7 +15,17 @@ LINK_OR_ID = re.compile(r"https?://\S+|www\.\S+|\bwxid_[\w-]+\b|\b[\w-]+@chatroo
 MENTION = re.compile(r"@[^\s@\u2005]+")
 
 
+class WordCloudUnavailable(RuntimeError):
+    """An optional runtime dependency is missing; other features can keep running."""
+
+
 def frequent_words(messages: list[str], limit: int = 40) -> list[dict]:
+    try:
+        import jieba
+    except ModuleNotFoundError as exc:
+        if exc.name != "jieba":
+            raise
+        raise WordCloudUnavailable("词云缺少 jieba 分词库。请在运行项目的 Python 环境执行 python -m pip install jieba，安装后重启。") from None
     counts = Counter()
     for text in messages:
         text = re.sub(r"^[A-Za-z0-9_.-]{1,256}:\r?\n", "", text)

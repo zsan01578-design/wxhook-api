@@ -9,6 +9,7 @@ from wxhook_api.core.chatbot_config import MentionSettings
 from wxhook_api.services.groups import GROUP_PATTERN
 from wxhook_api.services.chat_model import ModelDefinition, ModelError, ModelSettings
 from wxhook_api.services.wechat_sync import SyncError, records
+from wxhook_api.services.word_cloud import WordCloudUnavailable
 
 
 router = APIRouter(prefix="/api/manage", tags=["群聊管理"])
@@ -128,7 +129,11 @@ async def messages(group: GroupId, request: Request, page: int = Query(1, ge=1),
 
 @router.get("/groups/{group}/word-cloud")
 async def word_cloud(group: GroupId, request: Request):
-    return JSONResponse(await request.app.state.groups.word_cloud(group, bot_wxid=request.app.state.chatbot.identity), headers={"Cache-Control": "no-store"})
+    try:
+        result = await request.app.state.groups.word_cloud(group, bot_wxid=request.app.state.chatbot.identity)
+    except WordCloudUnavailable as exc:
+        return JSONResponse({"error": {"code": "word_cloud_unavailable", "message": str(exc)}}, status_code=503, headers={"Cache-Control": "no-store"})
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/groups")

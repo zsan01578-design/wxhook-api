@@ -1,4 +1,6 @@
 import httpx
+import subprocess
+import sys
 from asgi_lifespan import LifespanManager
 
 from tests.test_chatbot import event
@@ -114,3 +116,29 @@ async def test_robot_messages_do_not_consume_the_thousand_member_message_limit(t
     result = await manager.word_cloud(GROUP)
     assert result["sampled_messages"] == 1000
     assert result["words"] == [{"text": "苹果", "count": 1000}]
+
+
+def test_app_import_and_creation_do_not_require_jieba():
+    result = subprocess.run([sys.executable, "-c",
+        "import sys; sys.modules['jieba'] = None; from wxhook_api.main import create_app; create_app()"],
+        capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
+async def test_missing_jieba_shows_install_hint_and_keeps_management_and_messages_available(tmp_path, monkeypatch):
+    def no_network(request):
+        raise AssertionError("No network needed for management or word cloud")
+
+    with monkeypatch.context() as missing:
+        missing.setitem(sys.modules, "jieba", None)
+        app = create_app(douyin_service=make_service(tmp_path), hook_transport=httpx.MockTransport(no_network))
+        async with LifespanManager(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            await app.state.groups.receive(CallbackEvent.model_validate(event("苹果 苹果", msgid=1)))
+            cloud = await client.get(f"/api/manage/groups/{GROUP}/word-cloud")
+            assert cloud.status_code == 503 and cloud.headers["cache-control"] == "no-store"
+            assert "python -m pip install jieba" in cloud.json()["error"]["message"]
+            for url in ("/", "/api/manage/state", "/api/manage/chat-model", f"/api/manage/groups/{GROUP}/messages"):
+                assert (await client.get(url)).status_code == 200
+    # A failed computation must not be cached as a successful empty word cloud.
+    result = await app.state.groups.word_cloud(GROUP)
+    assert result["words"] == [{"text": "苹果", "count": 2}]
