@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import os
 from pathlib import Path
 import re
@@ -50,11 +50,35 @@ class GroupSettings(BaseModel):
 
 
 @dataclass(frozen=True)
+class MediaRetention:
+    enabled: bool = True
+    hour: int = 3
+    sent_hours: int = 24
+    other_hours: int = 72
+    record_days: int = 30
+
+
+def load_media_retention(values: dict | None = None) -> MediaRetention:
+    values = values or {}
+    enabled = values.get("cleanup-enabled", True)
+    override = os.getenv("WXHOOK_MEDIA_CLEANUP_ENABLED")
+    if override is not None:
+        if override.lower() not in {"true", "false", "1", "0", "on", "off"}:
+            raise ValueError("WXHOOK_MEDIA_CLEANUP_ENABLED 必须为 true 或 false")
+        enabled = override.lower() in {"true", "1", "on"}
+    hour = values.get("cleanup-hour", 3)
+    if not isinstance(enabled, bool) or isinstance(hour, bool) or not isinstance(hour, int) or not 0 <= hour <= 23:
+        raise ValueError("cleanup-enabled 必须为布尔值，cleanup-hour 必须为 0 到 23 的整数")
+    return MediaRetention(enabled=enabled, hour=hour)
+
+
+@dataclass(frozen=True)
 class DouyinOptions:
     settings: GroupSettings
     config_path: Path
     output_dir: Path
     max_file_bytes: int = 100 * 1024 * 1024
+    retention: MediaRetention = field(default_factory=load_media_retention)
 
 
 def load_douyin_options() -> DouyinOptions:
@@ -82,7 +106,7 @@ def load_douyin_options() -> DouyinOptions:
     size = values.get("max-file-mb", 100)
     if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 500:
         raise ValueError("douyin 配置的 max-file-mb 必须是 1 到 500 的整数")
-    return DouyinOptions(settings, target, output.resolve(), size * 1024 * 1024)
+    return DouyinOptions(settings, target, output.resolve(), size * 1024 * 1024, load_media_retention(values))
 
 
 def save_group_settings(options: DouyinOptions, settings: GroupSettings) -> DouyinOptions:
@@ -97,6 +121,8 @@ def save_group_settings(options: DouyinOptions, settings: GroupSettings) -> Douy
         "parser-api-url": settings.parser_api_url,
         "output-dir": str(options.output_dir),
         "max-file-mb": options.max_file_bytes // (1024 * 1024),
+        "cleanup-enabled": options.retention.enabled,
+        "cleanup-hour": options.retention.hour,
     }
     options.config_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = options.config_path.with_suffix(".yml.tmp")

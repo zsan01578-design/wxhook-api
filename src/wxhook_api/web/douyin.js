@@ -54,6 +54,8 @@ async function loadConfig() {
     element("send-results").checked = data.settings.send_results ?? true;
     element("output-dir").textContent = data.output_dir;
     element("file-limit").textContent = `单文件上限 ${data.max_file_mb} MB；图集按原顺序保存。`;
+    const cleanup = data.cleanup_policy;
+    element("cleanup-policy").textContent = cleanup?.enabled ? `每天 ${String(cleanup.hour).padStart(2, "0")}:00（北京时间）清理：已回传媒体保留 ${cleanup.sent_hours} 小时，其他媒体保留 ${cleanup.other_hours / 24} 天，解析记录保留 ${cleanup.record_days} 天。服务启动时也会补清理过期文件。` : "自动清理已关闭，媒体文件会继续保留在本机。";
     message("config-status", data.settings.enabled && data.settings.groups.length ? `默认名单已启用 ${data.settings.groups.length} 个群，独立配置以群管理为准。` : "默认群名单未启用，独立配置以群管理为准。");
     if (element("parser-provider").value === "api" && !element("parser-api-url").value) message("config-status", "请填写完整解析接口地址并保存。", true);
     if (data.feedback_available === false) message("config-status", "群内发送总开关已关闭；如需提示和回传，请检查 WXHOOK_DOUYIN_FEEDBACK_ENABLED 后重启。", true);
@@ -130,7 +132,12 @@ function renderJobs(data) {
   if (data.revision === revision) return;
   revision = data.revision;
   element("job-count").textContent = `${data.jobs.length} 条`;
-  if (!data.jobs.length) return;
+  if (!data.jobs.length) {
+    const empty = node("div", "empty-state");
+    empty.append(node("h3", "", "暂无解析记录"), node("p", "", "新任务的解析结果会显示在这里，过期记录会自动清理。"));
+    element("jobs").replaceChildren(empty);
+    return;
+  }
   const openJobs = new Set([...element("jobs").querySelectorAll("details[open]")].map((item) => item.dataset.job));
   const fragment = document.createDocumentFragment();
   for (const job of data.jobs) {
@@ -145,12 +152,15 @@ function renderJobs(data) {
     if (job.error) card.append(node("p", "feedback error", job.error));
     if (job.delivery_error) card.append(node("p", "feedback error", `回传：${job.delivery_error}`));
     if (job.storage_error) card.append(node("p", "feedback error", job.storage_error));
+    if (job.cleanup_error) card.append(node("p", "feedback error", job.cleanup_error));
+    if (job.files_cleaned_at) card.append(node("p", "message-meta", `文件已清理 · ${new Date(job.files_cleaned_at).toLocaleString("zh-CN", {hour12: false})} · 解析记录仍保留`));
+    else if (job.files?.some(file => file.cleaned)) card.append(node("p", "message-meta", "部分文件已按保留规则清理。"));
     const noticeNames = { start: "开始提示", failure: "失败提示", delivery_failure: "回传失败提示", complete: "完成提示" };
     for (const [stage, result] of Object.entries(job.notifications || {})) {
       if (["failed", "unknown"].includes(result.status)) card.append(node("p", "feedback error", `${noticeNames[stage] || "群提示"}未确认：${result.error || "请检查 Hook"}`));
     }
     card.append(safeLink(job.source_url, "原始分享 ↗"));
-    const files = job.files || [];
+    const files = job.files_cleaned_at ? [] : (job.files || []).filter(file => !file.cleaned);
     if (files.length) {
       const details = node("details", "media-details");
       details.dataset.job = job.id;
@@ -179,7 +189,7 @@ function renderJobs(data) {
       }
       details.append(grid);
       card.append(details);
-    } else if (job.status === "parsed") {
+    } else if (job.status === "parsed" && !job.files_cleaned_at) {
       const links = node("div", "asset-links");
       (job.assets || []).forEach((asset, index) => {
         if (asset.urls?.[0]) links.append(safeLink(asset.urls[0], `${asset.kind === "image" ? "图片" : "视频"} ${index + 1} ↗`));
@@ -198,6 +208,13 @@ async function poll() {
   try {
     const data = await request("/api/douyin/jobs");
     renderJobs(data);
+    const cleanup = data.cleanup;
+    if (cleanup?.enabled) {
+      const next = cleanup.next_run_at ? `下次清理：${new Date(cleanup.next_run_at).toLocaleString("zh-CN", {hour12:false})}` : "正在检查过期文件";
+      const last = cleanup.last_run_at ? ` · 上次清理 ${cleanup.deleted_files || 0} 个媒体文件、${cleanup.deleted_records || 0} 条过期记录，释放 ${((cleanup.bytes_freed || 0) / 1024 / 1024).toFixed(1)} MB` : "";
+      const skipped = cleanup.skipped_unsafe ? ` · ${cleanup.skipped_unsafe} 个目录无法验证，已跳过` : "";
+      message("cleanup-status", cleanup.error || `${next}${last}${skipped}`, Boolean(cleanup.error));
+    } else message("cleanup-status", "");
     message("jobs-status", `正在等待群内分享 · 队列中 ${data.pending} 个任务`);
     await recentGroups();
   } catch (error) {

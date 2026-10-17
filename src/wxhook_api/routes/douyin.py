@@ -1,4 +1,5 @@
 import mimetypes
+from dataclasses import asdict
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -8,6 +9,18 @@ from wxhook_api.routes.ui import WEB_ROOT
 
 
 router = APIRouter()
+
+
+class LeasedFileResponse(FileResponse):
+    def __init__(self, *args, release, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.release = release
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.release()
 
 
 @router.get("/douyin", include_in_schema=False)
@@ -22,7 +35,7 @@ async def douyin_page():
 @router.get("/api/douyin/config", tags=["群聊抖音解析"])
 async def get_config(request: Request):
     options = request.app.state.douyin.options
-    return {"settings": options.settings.model_dump(), "output_dir": str(options.output_dir), "max_file_mb": options.max_file_bytes // (1024 * 1024), "feedback_available": request.app.state.douyin.messenger is not None, "supported_parsers": ["parse_video", "api", "builtin"]}
+    return {"settings": options.settings.model_dump(), "output_dir": str(options.output_dir), "max_file_mb": options.max_file_bytes // (1024 * 1024), "feedback_available": request.app.state.douyin.messenger is not None, "supported_parsers": ["parse_video", "api", "builtin"], "cleanup_policy": asdict(options.retention)}
 
 
 @router.post("/api/douyin/config", tags=["群聊抖音解析"])
@@ -43,8 +56,15 @@ async def list_jobs(request: Request):
 
 @router.get("/api/douyin/files/{job_id}/{filename}", tags=["群聊抖音解析"])
 async def download_file(job_id: str, filename: str, request: Request, download: bool = False):
-    path = request.app.state.douyin.file_path(job_id, filename)
+    service = request.app.state.douyin
+    path = await service.acquire_file(job_id, filename)
     if path is None:
+        if service.is_file_cleaned(job_id, filename):
+            raise HTTPException(status_code=410, detail="文件已按保留规则清理")
         raise HTTPException(status_code=404, detail="文件不存在或不属于当前解析记录")
     media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    return FileResponse(path, media_type=media_type, filename=filename if download else None, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+    try:
+        return LeasedFileResponse(path, release=lambda: service.release_file(job_id), media_type=media_type, filename=filename if download else None, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+    except Exception:
+        service.release_file(job_id)
+        raise

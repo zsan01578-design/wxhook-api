@@ -36,12 +36,13 @@
           <p id="config-status" class="feedback" role="status"></p>
         </form>
         <div class="tip"><strong>最近收到消息的群</strong><p>点击群 ID 添加到上方名单，再保存配置。</p><div id="recent-groups" class="recent-groups">暂无群消息。请先让目标群发送一条消息。</div></div>
-        <div class="tip"><strong>文件保存位置</strong><p id="output-dir" class="output-path">正在读取…</p><p id="file-limit"></p><p>支持分享文案、短链接及卡片中的链接。B站当前解析第一分 P；图集保存静态图片。</p></div>
+        <div class="tip"><strong>文件保存位置</strong><p id="output-dir" class="output-path">正在读取…</p><p id="file-limit"></p><p id="cleanup-policy"></p><p>支持分享文案、短链接及卡片中的链接。B站当前解析第一分 P；图集保存静态图片。</p></div>
       </section>
       <section class="panel">
         <div class="inbox-heading"><div class="section-heading"><span class="section-number">02</span><h2>解析结果</h2></div><span id="job-count" class="count">0 条</span></div>
-        <p class="section-description">结果每 2 秒刷新 · 最近 100 条记录 · 保存的文件重启后仍保留</p>
+        <p class="section-description">结果每 2 秒刷新 · 最近 100 条记录 · 媒体按保留规则定时清理</p>
         <p id="jobs-status" class="inbox-status" role="status"></p>
+        <p id="cleanup-status" class="inbox-status" role="status"></p>
         <div id="jobs"><div class="empty-state"><span class="empty-icon" aria-hidden="true">↓</span><h3>等待群内分享</h3><p>保存群配置后，在目标群发送抖音、小红书或 B站分享链接。</p></div></div>
       </section>
     </div>

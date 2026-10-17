@@ -16,3 +16,7 @@ parser-provider: parse_video
 parser-api-url: ''
 output-dir: downloads/douyin
 max-file-mb: 100
+# 每天北京时间凌晨 3 点清理；启动时也会补清理已过期的文件。
+# 已回传保留 24 小时，失败或未回传保留 3 天，解析记录保留 30 天。
+cleanup-enabled: true
+cleanup-hour: 3

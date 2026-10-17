@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import heapq
 import json
 from pathlib import Path
 import re
@@ -19,6 +20,7 @@ from wxhook_api.services.douyin_delivery import DeliveryError, DouyinMessenger
 from wxhook_api.services.douyin_api import DouyinAPIParser
 from wxhook_api.services.parse_video import ParseVideoParser, REFERERS, source_platform
 from wxhook_api.services.groups import GroupManager, event_group
+from wxhook_api.services.media_cleanup import ACTIVE_STATES, cleanup_media, next_cleanup_at, safe_child, timestamp, utcnow
 
 
 def media_extension(prefix: bytes, kind: str) -> str:
@@ -45,6 +47,10 @@ class DouyinService:
         self._client: httpx.AsyncClient | None = None
         self._worker: asyncio.Task | None = None
         self._notice_worker: asyncio.Task | None = None
+        self._cleanup_worker: asyncio.Task | None = None
+        self._maintenance_lock = asyncio.Lock()
+        self._active_jobs: set[str] = set()
+        self._file_leases: dict[str, int] = {}
         self._notices: asyncio.Queue[tuple[dict, str, str]] = asyncio.Queue(maxsize=20)
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=50)
         self._jobs: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -54,6 +60,7 @@ class DouyinService:
         self.revision = uuid4().hex
         self.group_manager: GroupManager | None = None
         self.messenger: DouyinMessenger | None = None
+        self.cleanup_status = {"enabled": options.retention.enabled, "next_run_at": "", "last_run_at": "", "error": ""}
 
     def allowed(self, group: str, sender: str = "") -> bool:
         fallback = self.options.settings.enabled and group in self.options.settings.groups
@@ -73,14 +80,17 @@ class DouyinService:
         self.revision = uuid4().hex
 
     def snapshot(self) -> dict[str, Any]:
-        return {"revision": self.revision, "jobs": list(reversed(self._jobs.values()))[:100], "pending": self._queue.qsize()}
+        return {"revision": self.revision, "jobs": list(reversed(self._jobs.values()))[:100], "pending": self._queue.qsize(), "cleanup": dict(self.cleanup_status)}
 
     def _load_saved(self) -> None:
         if not self.options.output_dir.is_dir():
             return
-        paths = sorted(self.options.output_dir.glob("*/result.json"), key=lambda path: path.stat().st_mtime, reverse=True)[:100]
-        for path in reversed(paths):
+        root = self.options.output_dir.resolve()
+        recent = []
+        for path in root.glob("*/result.json"):
             try:
+                if not re.fullmatch(r"[a-f0-9]{32}", path.parent.name) or not safe_child(path.parent, root, directory=True) or not safe_child(path, path.parent):
+                    continue
                 if path.stat().st_size > 3 * 1024 * 1024:
                     continue
                 job = json.loads(path.read_text(encoding="utf-8"))
@@ -90,11 +100,20 @@ class DouyinService:
                     job.update(status="interrupted", error="上次服务已停止，请重新发送链接")
                     if job.get("delivery_status") == "sending":
                         job.update(delivery_status="unknown", delivery_error="上次回传被中断，部分文件可能已发送，请先查看群聊；不会自动重发")
-                self._jobs[job["id"]] = job
-                if str(job.get("msgid", "0")) not in {"", "0"}:
-                    self._seen[(job.get("group_id", ""), str(job["msgid"]), job.get("source_url", ""))] = None
+                # Cleanup rewrites old metadata. Its filesystem mtime must not
+                # push old cleaned records ahead of genuinely recent tasks.
+                created = timestamp(job.get("created_at")) or timestamp(job.get("finished_at")) or datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+                entry = (created, job["id"], job)
+                if len(recent) < 100:
+                    heapq.heappush(recent, entry)
+                elif entry[:2] > recent[0][:2]:
+                    heapq.heapreplace(recent, entry)
             except (OSError, ValueError):
                 continue
+        for _, _, job in sorted(recent):
+            self._jobs[job["id"]] = job
+            if str(job.get("msgid", "0")) not in {"", "0"}:
+                self._seen[(job.get("group_id", ""), str(job["msgid"]), job.get("source_url", ""))] = None
 
     async def start(self) -> None:
         await asyncio.to_thread(self._load_saved)
@@ -106,9 +125,15 @@ class DouyinService:
         self._accepting = True
         self._worker = asyncio.create_task(self._run())
         self._notice_worker = asyncio.create_task(self._run_notices())
+        if self.options.retention.enabled:
+            self._cleanup_worker = asyncio.create_task(self._run_cleanup())
 
     async def stop(self) -> None:
         self._accepting = False
+        if self._cleanup_worker is not None:
+            self._cleanup_worker.cancel()
+            await asyncio.gather(self._cleanup_worker, return_exceptions=True)
+            self._cleanup_worker = None
         if self._worker is not None:
             self._worker.cancel()
             await asyncio.gather(self._worker, return_exceptions=True)
@@ -185,12 +210,16 @@ class DouyinService:
     async def _run_notices(self) -> None:
         while True:
             job, stage, message = await self._notices.get()
+            async with self._maintenance_lock:
+                self._active_jobs.add(job["id"])
             try:
                 await self._notice(job, stage, message)
+                job["finished_at"] = utcnow().isoformat()
                 await asyncio.to_thread(self._save, job)
             except OSError:
                 job["storage_error"] = "无法保存群提示记录，请检查下载目录"
             finally:
+                self._active_jobs.discard(job["id"])
                 self._notices.task_done()
                 self._changed()
 
@@ -258,6 +287,8 @@ class DouyinService:
     async def _run(self) -> None:
         while True:
             job = await self._queue.get()
+            async with self._maintenance_lock:
+                self._active_jobs.add(job["id"])
             try:
                 if not self.allowed(job["group_id"], job["sender"]):
                     raise DouyinError("群聊或成员已被限制，或解析功能已停用")
@@ -312,11 +343,81 @@ class DouyinService:
                 if job["status"] == "failed":
                     await self._notice(job, "failure", f"解析失败：{job['error']}")
                 try:
+                    job["finished_at"] = utcnow().isoformat()
                     await asyncio.to_thread(self._save, job)
                 except OSError:
                     job["storage_error"] = "无法保存解析记录，请检查下载目录权限和剩余磁盘空间"
+                self._active_jobs.discard(job["id"])
                 self._queue.task_done()
                 self._changed()
+
+    async def cleanup_expired(self, *, now: datetime | None = None):
+        policy = self.options.retention
+        if not policy.enabled:
+            return None
+        async with self._maintenance_lock:
+            checked = now or utcnow()
+            active = self._active_jobs | self._file_leases.keys() | {
+                job_id for job_id, job in self._jobs.items() if job.get("status") in ACTIVE_STATES
+            }
+            work = asyncio.create_task(asyncio.to_thread(cleanup_media, self.options.output_dir, policy, active, checked))
+            cancelled = False
+            try:
+                report = await asyncio.shield(work)
+            except asyncio.CancelledError:
+                # Finish the bounded filesystem pass before shutdown; do not leave
+                # an untracked deletion thread running after service.stop().
+                cancelled = True
+                report = await work
+            for job_id, job in report.updated.items():
+                if job_id in self._jobs:
+                    self._jobs[job_id].clear()
+                    self._jobs[job_id].update(job)
+            for job_id in report.removed:
+                self._jobs.pop(job_id, None)
+            self.cleanup_status.update(report.summary(), last_run_at=checked.isoformat(),
+                error="部分文件无法清理，将在下次清理时重试" if report.errors else "")
+            self._changed()
+            if cancelled:
+                raise asyncio.CancelledError
+            return report
+
+    async def _run_cleanup(self) -> None:
+        # Catch up expired files when the computer was off at the scheduled time.
+        deadline = utcnow()
+        while True:
+            self.cleanup_status["next_run_at"] = deadline.isoformat()
+            delay = (deadline - utcnow()).total_seconds()
+            if delay > 0:
+                await asyncio.sleep(min(delay, 60))
+                continue
+            try:
+                await self.cleanup_expired()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.cleanup_status["error"] = "自动清理暂时失败，将在 1 分钟后重试"
+                deadline = utcnow() + timedelta(minutes=1)
+            else:
+                deadline = next_cleanup_at(utcnow(), self.options.retention.hour)
+
+    async def acquire_file(self, job_id: str, filename: str) -> Path | None:
+        async with self._maintenance_lock:
+            path = self.file_path(job_id, filename)
+            if path is not None:
+                self._file_leases[job_id] = self._file_leases.get(job_id, 0) + 1
+            return path
+
+    def release_file(self, job_id: str) -> None:
+        remaining = self._file_leases.get(job_id, 0) - 1
+        if remaining > 0:
+            self._file_leases[job_id] = remaining
+        else:
+            self._file_leases.pop(job_id, None)
+
+    def is_file_cleaned(self, job_id: str, filename: str) -> bool:
+        job = self._jobs.get(job_id, {})
+        return any(file.get("name") == filename and (job.get("files_cleaned_at") or file.get("cleaned")) for file in job.get("files", []))
 
     async def _download_asset(self, asset: dict, folder: Path, index: int, group: str, remaining: int, sender: str = "", platform: str = "douyin") -> dict:
         last_error = None
@@ -379,7 +480,7 @@ class DouyinService:
         if not re.fullmatch(r"[a-f0-9]{32}", job_id) or not re.fullmatch(r"\d{3}\.(mp4|jpg|png|webp|gif|avif)", filename):
             return None
         job = self._jobs.get(job_id)
-        if not job or not any(file.get("name") == filename for file in job.get("files", [])):
+        if not job or job.get("files_cleaned_at") or not any(file.get("name") == filename and not file.get("cleaned") for file in job.get("files", [])):
             return None
         path = (self.options.output_dir / job_id / filename).resolve()
         if not path.is_relative_to(self.options.output_dir.resolve()) or not path.is_file():
