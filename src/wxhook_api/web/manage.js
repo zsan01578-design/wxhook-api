@@ -190,14 +190,14 @@ function renderFeatures(group) {
   const list = el("div", "feature-list");
   const features = [
     ["video", "抖音分享解析", "自动识别群内抖音分享链接，解析视频与图集。", "douyin_enabled", !group.active],
-    ["download", "自动保存视频与图片", "解析成功后将媒体保存到本机，随时查看与下载。", "auto_download", !group.active || !group.douyin_enabled]
+    ["download", "自动保存视频与图片", "解析成功后保存到本机，并用于自动回传到来源群。", "auto_download", !group.active || !group.douyin_enabled]
   ];
   features.forEach(([symbol, title, description, key, disabled]) => {
     const row = el("div", "feature-row"), art = el("div", "feature-icon"), text = el("div", "feature-copy");
     art.append(icon(symbol)); text.append(el("h3", "", title), el("p", "", description));
     row.append(art, text, toggleSwitch(title, group[key], disabled, source => mutation(source, groupPath(group.id), { [key]: !group[key] }, `${title}已${group[key] ? "关闭" : "开启"}`))); list.append(row);
   });
-  const note = el("div", "feature-footnote"); note.append(icon("info"), el("span", "", "自动保存依赖抖音分享解析。关闭自动保存后，仍可在“资源”中查看解析出的媒体链接。"));
+  const note = el("div", "feature-footnote"); note.append(icon("info"), el("span", "", "回传媒体需要启用自动保存。群内处理提示和回传开关在“资源”页统一配置；关闭自动保存后只保留解析链接。"));
   const safety = el("div", "safety-section"), safetyCopy = el("div"), safetyTitle = el("h3");
   safetyTitle.append(icon("shield"), document.createTextNode("群聊黑名单"));
   safetyCopy.append(safetyTitle, el("p", "", "拉黑后不再处理此群的自动功能，消息仍可记录。"));

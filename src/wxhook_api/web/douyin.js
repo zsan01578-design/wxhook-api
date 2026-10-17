@@ -39,9 +39,12 @@ async function loadConfig() {
     element("enabled").checked = data.settings.enabled;
     element("groups").value = data.settings.groups.join("\n");
     element("auto-download").checked = data.settings.auto_download;
+    element("notify-group").checked = data.settings.notify_group ?? true;
+    element("send-results").checked = data.settings.send_results ?? true;
     element("output-dir").textContent = data.output_dir;
     element("file-limit").textContent = `单文件上限 ${data.max_file_mb} MB；图集按原顺序保存。`;
     message("config-status", data.settings.enabled && data.settings.groups.length ? `默认名单已启用 ${data.settings.groups.length} 个群，独立配置以群管理为准。` : "默认群名单未启用，独立配置以群管理为准。");
+    if (data.feedback_available === false) message("config-status", "群内发送总开关已关闭；如需提示和回传，请检查 WXHOOK_DOUYIN_FEEDBACK_ENABLED 后重启。", true);
   } catch (error) {
     message("config-status", `读取配置失败：${error.message}`, true);
   }
@@ -55,7 +58,7 @@ element("group-form").addEventListener("submit", async (event) => {
   try {
     const groups = [...new Set(element("groups").value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))];
     const enabled = element("enabled").checked;
-    await request("/api/douyin/config", { enabled, groups, auto_download: element("auto-download").checked });
+    await request("/api/douyin/config", { enabled, groups, auto_download: element("auto-download").checked, notify_group: element("notify-group").checked, send_results: element("send-results").checked });
     element("groups").value = groups.join("\n");
     message("config-status", enabled && groups.length ? `默认名单已保存，共 ${groups.length} 个群；独立配置以群管理为准。` : "已保存，默认群名单未启用；独立配置以群管理为准。");
   } catch (error) {
@@ -87,7 +90,8 @@ async function recentGroups() {
   }
 }
 
-const states = { queued: "排队中", parsing: "解析中", downloading: "保存中", completed: "已保存", parsed: "已解析", failed: "失败", interrupted: "已中断" };
+const states = { queued: "排队中", parsing: "解析中", downloading: "保存中", sending: "回传中", completed: "已保存", parsed: "已解析", failed: "解析失败", interrupted: "已中断" };
+const deliveries = { sent: "已回传", partial: "部分回传", failed: "回传失败", unknown: "回传待确认" };
 
 function safeLink(url, label, className = "text-button") {
   try {
@@ -113,10 +117,18 @@ function renderJobs(data) {
   for (const job of data.jobs) {
     const card = node("article", "message-card media-job");
     const header = node("div", "message-header");
-    header.append(node("strong", "message-peer", job.title || "抖音分享"), node("span", job.status === "failed" ? "count error" : "count", states[job.status] || job.status));
+    const label = job.status === "failed" || job.status === "interrupted" ? states[job.status] : deliveries[job.delivery_status] || states[job.status] || job.status;
+    const hasError = job.status === "failed" || ["partial", "failed", "unknown"].includes(job.delivery_status);
+    header.append(node("strong", "message-peer", job.title || "抖音分享"), node("span", hasError ? "count error" : "count", label));
     card.append(header, node("p", "message-meta", `${job.group_id} · ${job.sender}`));
     if (job.author) card.append(node("p", "message-meta", `作者：${job.author} · ${job.kind === "images" ? "图集" : "视频"}`));
     if (job.error) card.append(node("p", "feedback error", job.error));
+    if (job.delivery_error) card.append(node("p", "feedback error", `回传：${job.delivery_error}`));
+    if (job.storage_error) card.append(node("p", "feedback error", job.storage_error));
+    const noticeNames = { start: "开始提示", failure: "失败提示", delivery_failure: "回传失败提示", complete: "完成提示" };
+    for (const [stage, result] of Object.entries(job.notifications || {})) {
+      if (["failed", "unknown"].includes(result.status)) card.append(node("p", "feedback error", `${noticeNames[stage] || "群提示"}未确认：${result.error || "请检查 Hook"}`));
+    }
     card.append(safeLink(job.source_url, "原始分享 ↗"));
     const files = job.files || [];
     if (files.length) {
@@ -142,6 +154,7 @@ function renderJobs(data) {
           tile.append(video);
         }
         tile.append(safeLink(`${url}?download=true`, `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB ↓`));
+        if (file.send_status) tile.append(node("p", "message-meta", {sent: "Hook 已确认发送", sending: "正在发送", failed: "发送失败", unknown: "发送结果待确认", skipped: "已停止回传"}[file.send_status] || file.send_status));
         grid.append(tile);
       }
       details.append(grid);

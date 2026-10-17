@@ -21,6 +21,9 @@
           <textarea id="groups" rows="6" placeholder="123456789@chatroom" spellcheck="false"></textarea>
           <p class="field-note">填写群 ID，不是群昵称。可以先在消息页面查看群消息中的 ID。</p>
           <label class="check-label"><input id="auto-download" type="checkbox" checked>解析成功后自动保存视频和图片</label>
+          <label class="check-label"><input id="notify-group" type="checkbox" checked>在来源群提示开始、失败和完成</label>
+          <label class="check-label"><input id="send-results" type="checkbox" checked>将视频或图片发回来源群</label>
+          <p class="field-note">回传需要该群启用自动保存。视频以 MP4 文件发送，静态图片按原顺序作为图片消息发送。</p>
           <button class="primary" id="save-settings" type="submit">保存群配置</button>
           <p id="config-status" class="feedback" role="status"></p>
         </form>

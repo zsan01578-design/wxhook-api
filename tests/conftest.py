@@ -7,3 +7,5 @@ def isolated_management_database(tmp_path, monkeypatch):
     monkeypatch.setenv("WXHOOK_MANAGEMENT_DB", str(tmp_path / "management.sqlite3"))
     # Legacy bridge tests assert exact Hook calls; synchronization has dedicated integration tests.
     monkeypatch.setenv("WXHOOK_SYNC_ENABLED", "false")
+    # Real outbound messages are tested only with an explicitly mocked Hook.
+    monkeypatch.setenv("WXHOOK_DOUYIN_FEEDBACK_ENABLED", "false")

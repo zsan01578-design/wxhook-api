@@ -7,6 +7,7 @@ if __name__ == "__main__" and not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from contextlib import asynccontextmanager
+import os
 import sqlite3
 
 import httpx
@@ -20,6 +21,7 @@ from wxhook_api.core.douyin_config import load_douyin_options
 from wxhook_api.core.errors import install_exception_handlers
 from wxhook_api.routes import account, callbacks, contacts, douyin, health, history, manage, media, messages, querydb, ui
 from wxhook_api.services.douyin import DouyinService
+from wxhook_api.services.douyin_delivery import DouyinMessenger
 from wxhook_api.services.events import EventDispatcher
 from wxhook_api.services.groups import GroupManager
 from wxhook_api.services.inbox import MessageInbox
@@ -46,6 +48,8 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             owned_client = HookClient(settings.hook_base_url, connect_timeout=settings.connect_timeout, read_timeout=settings.read_timeout, transport=hook_transport)
             app.state.hook_client = owned_client
         try:
+            if os.getenv("WXHOOK_DOUYIN_FEEDBACK_ENABLED", "true").lower() not in {"false", "0", "off"}:
+                douyin_worker.messenger = DouyinMessenger(app.state.hook_client)
             await groups.start(douyin_worker.options.settings.groups)
             await douyin_worker.start()
             await dispatcher.start()
@@ -58,6 +62,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             finally:
                 try:
                     await douyin_worker.stop()
+                    douyin_worker.messenger = None
                 finally:
                     if owned_client is not None:
                         await owned_client.aclose()

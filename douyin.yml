@@ -5,5 +5,8 @@ groups: []
 # groups:
 #   - '123456789@chatroom'
 auto-download: true
+# 在来源群提示开始和失败；下载成功后回传图片或 MP4 文件。
+notify-group: true
+send-results: true
 output-dir: downloads/douyin
 max-file-mb: 100

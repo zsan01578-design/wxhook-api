@@ -17,6 +17,8 @@ class GroupSettings(BaseModel):
     enabled: bool = False
     groups: list[str] = Field(default_factory=list, max_length=100)
     auto_download: bool = True
+    notify_group: bool = True
+    send_results: bool = True
 
     @field_validator("groups")
     @classmethod
@@ -44,6 +46,8 @@ def load_douyin_options() -> DouyinOptions:
         enabled=values.get("enabled", False),
         groups=values.get("groups", []),
         auto_download=values.get("auto-download", True),
+        notify_group=values.get("notify-group", True),
+        send_results=values.get("send-results", True),
     )
     output = Path(values.get("output-dir", "downloads/douyin")).expanduser()
     if not output.is_absolute():
@@ -59,6 +63,8 @@ def save_group_settings(options: DouyinOptions, settings: GroupSettings) -> Douy
         "enabled": settings.enabled,
         "groups": settings.groups,
         "auto-download": settings.auto_download,
+        "notify-group": settings.notify_group,
+        "send-results": settings.send_results,
         "output-dir": str(options.output_dir),
         "max-file-mb": options.max_file_bytes // (1024 * 1024),
     }
