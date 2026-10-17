@@ -15,6 +15,7 @@ import httpx
 from wxhook_api.core.douyin_config import DouyinOptions, GroupSettings, save_group_settings
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links
+from wxhook_api.services.groups import GroupManager, event_group
 
 
 def media_extension(prefix: bytes, kind: str) -> str:
@@ -46,9 +47,17 @@ class DouyinService:
         self._accepting = False
         self._config_lock = asyncio.Lock()
         self.revision = uuid4().hex
+        self.group_manager: GroupManager | None = None
 
-    def allowed(self, group: str) -> bool:
-        return self.options.settings.enabled and group in self.options.settings.groups
+    def allowed(self, group: str, sender: str = "") -> bool:
+        fallback = self.options.settings.enabled and group in self.options.settings.groups
+        if self.group_manager is None:
+            return fallback
+        return self.group_manager.allowed(group, sender) and self.group_manager.feature(group, "douyin_enabled", fallback)
+
+    def auto_download(self, group: str) -> bool:
+        fallback = self.options.settings.auto_download
+        return self.group_manager.feature(group, "auto_download", fallback) if self.group_manager else fallback
 
     async def configure(self, settings: GroupSettings) -> None:
         async with self._config_lock:
@@ -98,8 +107,8 @@ class DouyinService:
             self._client = None
 
     async def receive(self, event: CallbackEvent) -> None:
-        group = event.roomid or (event.wxid if event.wxid.endswith("@chatroom") else "")
-        if not self._accepting or not self.allowed(group):
+        group = event_group(event)
+        if not self._accepting or not self.allowed(group, event.sender):
             return
         for link in extract_links(event.content):
             key = (group, str(event.msgid), link)
@@ -137,23 +146,23 @@ class DouyinService:
         while True:
             job = await self._queue.get()
             try:
-                if not self.allowed(job["group_id"]):
-                    raise DouyinError("该群已移出配置或解析功能已停用")
+                if not self.allowed(job["group_id"], job["sender"]):
+                    raise DouyinError("群聊或成员已被限制，或解析功能已停用")
                 job["status"] = "parsing"
                 self._changed()
                 async with asyncio.timeout(240):
                     parsed = await DouyinParser(self._client).parse(job["source_url"])
                     job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind, assets=parsed.assets)
-                    if not self.allowed(job["group_id"]):
-                        raise DouyinError("该群已移出配置或解析功能已停用")
-                    if self.options.settings.auto_download:
+                    if not self.allowed(job["group_id"], job["sender"]):
+                        raise DouyinError("群聊或成员已被限制，或解析功能已停用")
+                    if self.auto_download(job["group_id"]):
                         job["status"] = "downloading"
                         self._changed()
                         folder = self.options.output_dir / job["id"]
                         folder.mkdir(parents=True, exist_ok=True)
                         downloaded = 0
                         for index, asset in enumerate(parsed.assets, 1):
-                            file = await self._download_asset(asset, folder, index, job["group_id"], 500 * 1024 * 1024 - downloaded)
+                            file = await self._download_asset(asset, folder, index, job["group_id"], 500 * 1024 * 1024 - downloaded, job["sender"])
                             job["files"].append(file)
                             downloaded += file["size"]
                             self._changed()
@@ -181,23 +190,29 @@ class DouyinService:
                 self._queue.task_done()
                 self._changed()
 
-    async def _download_asset(self, asset: dict, folder: Path, index: int, group: str, remaining: int) -> dict:
+    async def _download_asset(self, asset: dict, folder: Path, index: int, group: str, remaining: int, sender: str = "") -> dict:
         last_error = None
         for url in asset["urls"]:
+            self._check_download_policy(group, sender)
             try:
-                return await self._download(url, asset["kind"], folder, index, group, remaining)
+                return await self._download(url, asset["kind"], folder, index, group, remaining, sender)
             except (DouyinError, httpx.HTTPError) as exc:
                 last_error = exc
         if isinstance(last_error, DouyinError):
             raise last_error
         raise DouyinError("媒体下载失败，请确认作品可公开访问后重新发送链接") from last_error
 
-    async def _download(self, url: str, kind: str, folder: Path, index: int, group: str, remaining: int) -> dict:
+    def _check_download_policy(self, group: str, sender: str) -> None:
+        if not self.allowed(group, sender) or not self.auto_download(group):
+            raise DouyinError("群聊或成员已被限制，或自动保存已停用")
+
+    async def _download(self, url: str, kind: str, folder: Path, index: int, group: str, remaining: int, sender: str = "") -> dict:
         if remaining <= 0:
             raise DouyinError("单个作品下载量超过 500 MB，已停止")
         limit = min(self.options.max_file_bytes, remaining)
         current = url
         for _ in range(7):
+            self._check_download_policy(group, sender)
             current = checked_url(current, media=True)
             async with self._client.stream("GET", current) as response:
                 if response.is_redirect:
@@ -215,8 +230,7 @@ class DouyinService:
                 try:
                     with partial.open("wb") as output:
                         async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
-                            if not self.allowed(group):
-                                raise DouyinError("该群已移出配置或解析功能已停用")
+                            self._check_download_policy(group, sender)
                             size += len(chunk)
                             if size > limit:
                                 raise DouyinError("媒体文件超过配置的大小限制，已停止下载")

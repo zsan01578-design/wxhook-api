@@ -41,7 +41,7 @@ async function loadConfig() {
     element("auto-download").checked = data.settings.auto_download;
     element("output-dir").textContent = data.output_dir;
     element("file-limit").textContent = `单文件上限 ${data.max_file_mb} MB；图集按原顺序保存。`;
-    message("config-status", data.settings.enabled && data.settings.groups.length ? `正在监听 ${data.settings.groups.length} 个配置群` : "当前未监听群聊，请填写群 ID 并启用。");
+    message("config-status", data.settings.enabled && data.settings.groups.length ? `默认名单已启用 ${data.settings.groups.length} 个群，独立配置以群管理为准。` : "默认群名单未启用，独立配置以群管理为准。");
   } catch (error) {
     message("config-status", `读取配置失败：${error.message}`, true);
   }
@@ -57,7 +57,7 @@ element("group-form").addEventListener("submit", async (event) => {
     const enabled = element("enabled").checked;
     await request("/api/douyin/config", { enabled, groups, auto_download: element("auto-download").checked });
     element("groups").value = groups.join("\n");
-    message("config-status", enabled && groups.length ? `已保存，正在监听 ${groups.length} 个群，新消息立即生效。` : "已保存，当前未监听任何群。");
+    message("config-status", enabled && groups.length ? `默认名单已保存，共 ${groups.length} 个群；独立配置以群管理为准。` : "已保存，默认群名单未启用；独立配置以群管理为准。");
   } catch (error) {
     message("config-status", `保存失败：${error.message}`, true);
   } finally {

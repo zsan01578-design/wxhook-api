@@ -7,6 +7,7 @@ if __name__ == "__main__" and not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from contextlib import asynccontextmanager
+import sqlite3
 
 import httpx
 from fastapi import FastAPI
@@ -17,18 +18,22 @@ from wxhook_api.core.body_limit import BodyLimitMiddleware
 from wxhook_api.core.config import Settings, load_settings
 from wxhook_api.core.douyin_config import load_douyin_options
 from wxhook_api.core.errors import install_exception_handlers
-from wxhook_api.routes import account, callbacks, contacts, douyin, health, history, media, messages, querydb, ui
+from wxhook_api.routes import account, callbacks, contacts, douyin, health, history, manage, media, messages, querydb, ui
 from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.events import EventDispatcher
+from wxhook_api.services.groups import GroupManager
 from wxhook_api.services.inbox import MessageInbox
 
 
-def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncBaseTransport | None = None, hook_client: HookClient | None = None, douyin_service: DouyinService | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncBaseTransport | None = None, hook_client: HookClient | None = None, douyin_service: DouyinService | None = None, group_manager: GroupManager | None = None) -> FastAPI:
     settings = settings or load_settings()
     dispatcher = EventDispatcher(settings.callback_queue_size)
+    groups = group_manager or GroupManager()
+    dispatcher.register(groups.receive)
     inbox = MessageInbox()
     dispatcher.register(inbox.receive)
     douyin_worker = douyin_service or DouyinService(load_douyin_options())
+    douyin_worker.group_manager = groups
     dispatcher.register(douyin_worker.receive)
     owned_client: HookClient | None = None
 
@@ -39,6 +44,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             owned_client = HookClient(settings.hook_base_url, connect_timeout=settings.connect_timeout, read_timeout=settings.read_timeout, transport=hook_transport)
             app.state.hook_client = owned_client
         try:
+            await groups.start(douyin_worker.options.settings.groups)
             await douyin_worker.start()
             await dispatcher.start()
             yield
@@ -60,9 +66,11 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.message_inbox = inbox
     app.state.launcher_status = None
     app.state.douyin = douyin_worker
+    app.state.groups = groups
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
     install_exception_handlers(app)
-    for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router, douyin.router):
+    app.add_exception_handler(sqlite3.Error, manage.storage_error)
+    for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router, douyin.router, manage.router):
         app.include_router(router)
     app.mount("/ui/assets", StaticFiles(directory=ui.WEB_ROOT), name="message-assets")
     return app

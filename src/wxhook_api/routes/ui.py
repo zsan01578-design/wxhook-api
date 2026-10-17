@@ -9,6 +9,16 @@ WEB_ROOT = Path(__file__).resolve().parents[1] / "web"
 
 
 @router.get("/", include_in_schema=False)
+@router.get("/manage", include_in_schema=False)
+async def management_page():
+    return FileResponse(WEB_ROOT / "manage.html", headers={
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+        "X-Content-Type-Options": "nosniff",
+    })
+
+
+@router.get("/messages", include_in_schema=False)
 async def message_page():
     return FileResponse(WEB_ROOT / "index.html", headers={
         "Cache-Control": "no-store",
