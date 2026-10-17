@@ -1,0 +1,4 @@
+# 可选：复制为 parse-video.local.yml，仅在测试机本地填写。
+# 用本人已登录小红书网页的请求头 Cookie（单行），不要把 Cookie 发到聊天或提交 Git。
+# 不需要登录的公开分享可留空；Cookie 失效时需要在本机更新。
+xiaohongshu-cookie: ''

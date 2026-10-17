@@ -21,7 +21,7 @@ class GroupSettings(BaseModel):
     auto_download: bool = True
     notify_group: bool = True
     send_results: bool = True
-    parser_provider: Literal["api", "builtin"] = "api"
+    parser_provider: Literal["parse_video", "api", "builtin"] = "parse_video"
     parser_api_url: str = Field(default="", max_length=4096)
 
     @field_validator("parser_api_url")
@@ -62,13 +62,18 @@ def load_douyin_options() -> DouyinOptions:
     target = Path(explicit).expanduser().resolve() if explicit else PROJECT_ROOT / "douyin.local.yml"
     source = target if target.is_file() or explicit else PROJECT_ROOT / "douyin.yml"
     values = load_yaml(source) if source.is_file() else {}
+    version = values.get("parser-config-version", 1)
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ValueError("parser-config-version 必须是整数")
     settings = GroupSettings(
         enabled=values.get("enabled", False),
         groups=values.get("groups", []),
         auto_download=values.get("auto-download", True),
         notify_group=values.get("notify-group", True),
         send_results=values.get("send-results", True),
-        parser_provider=values.get("parser-provider", "api"),
+        # Switch pre-library configurations once. Saving from the new UI writes
+        # version 2, so a later explicit provider choice remains authoritative.
+        parser_provider=values.get("parser-provider", "parse_video") if version >= 2 else "parse_video",
         parser_api_url=os.getenv("WXHOOK_DOUYIN_API_URL", values.get("parser-api-url", "")),
     )
     output = Path(values.get("output-dir", "downloads/douyin")).expanduser()
@@ -88,6 +93,7 @@ def save_group_settings(options: DouyinOptions, settings: GroupSettings) -> Douy
         "notify-group": settings.notify_group,
         "send-results": settings.send_results,
         "parser-provider": settings.parser_provider,
+        "parser-config-version": 2,
         "parser-api-url": settings.parser_api_url,
         "output-dir": str(options.output_dir),
         "max-file-mb": options.max_file_bytes // (1024 * 1024),

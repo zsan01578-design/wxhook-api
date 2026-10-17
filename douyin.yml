@@ -9,8 +9,10 @@ auto-download: true
 notify-group: true
 send-results: true
 # API 地址含账号标识，请在“资源”页面填写，保存到本机 douyin.local.yml。
-# 支持 api（指定接口）和 builtin（原公开分享页解析）；API 失败不会自动切换来源。
-parser-provider: api
+# 默认直接调用 Python 库，无需单独启动解析服务。
+# 兼容 api（原指定接口）和 builtin（原抖音公开分享页解析）。
+parser-config-version: 2
+parser-provider: parse_video
 parser-api-url: ''
 output-dir: downloads/douyin
 max-file-mb: 100

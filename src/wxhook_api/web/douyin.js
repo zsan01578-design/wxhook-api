@@ -5,6 +5,11 @@ let revision = "";
 let timer;
 let polling = false;
 
+function updateProvider() {
+  element("api-settings").hidden = element("parser-provider").value !== "api";
+}
+element("parser-provider").addEventListener("change", updateProvider);
+
 function message(id, text, error = false) {
   element(id).textContent = text;
   element(id).classList.toggle("error", error);
@@ -36,7 +41,8 @@ function node(tag, className, text) {
 async function loadConfig() {
   try {
     const data = await request("/api/douyin/config");
-    element("parser-provider").value = data.settings.parser_provider || "api";
+    element("parser-provider").value = data.settings.parser_provider || "parse_video";
+    updateProvider();
     element("parser-api-url").value = data.settings.parser_api_url || "";
     element("enabled").checked = data.settings.enabled;
     element("groups").value = data.settings.groups.join("\n");
@@ -125,10 +131,10 @@ function renderJobs(data) {
     const header = node("div", "message-header");
     const label = job.status === "failed" || job.status === "interrupted" ? states[job.status] : deliveries[job.delivery_status] || states[job.status] || job.status;
     const hasError = job.status === "failed" || ["partial", "failed", "unknown"].includes(job.delivery_status);
-    header.append(node("strong", "message-peer", job.title || "抖音分享"), node("span", hasError ? "count error" : "count", label));
+    header.append(node("strong", "message-peer", job.title || "群聊分享"), node("span", hasError ? "count error" : "count", label));
     card.append(header, node("p", "message-meta", `${job.group_id} · ${job.sender}`));
     if (job.author) card.append(node("p", "message-meta", `作者：${job.author} · ${job.kind === "images" ? "图集" : "视频"}`));
-    if (job.parser_provider) card.append(node("p", "message-meta", `解析来源：${job.parser_provider === "api" ? "指定接口" : "公开分享页"}`));
+    if (job.parser_provider) card.append(node("p", "message-meta", `解析来源：${{parse_video: "parse-video-py", api: "指定接口", builtin: "公开分享页"}[job.parser_provider] || job.parser_provider}${job.platform ? ` · ${{douyin: "抖音", xiaohongshu: "小红书", bilibili: "B站"}[job.platform] || job.platform}` : ""}`));
     if (job.error) card.append(node("p", "feedback error", job.error));
     if (job.delivery_error) card.append(node("p", "feedback error", `回传：${job.delivery_error}`));
     if (job.storage_error) card.append(node("p", "feedback error", job.storage_error));

@@ -189,7 +189,7 @@ function renderFeatures(group) {
   master.append(masterCopy, toggleSwitch("群功能总开关", group.enabled, group.blocked, source => mutation(source, groupPath(group.id), { enabled: !group.enabled }, group.enabled ? "已暂停此群自动功能" : "已恢复此群自动功能")));
   const list = el("div", "feature-list");
   const features = [
-    ["video", "抖音分享解析", "自动识别群内抖音分享链接，解析视频与图集。", "douyin_enabled", !group.active],
+    ["video", "分享解析", "自动识别群内抖音、小红书、B站分享，解析视频与图集。", "douyin_enabled", !group.active],
     ["download", "自动保存视频与图片", "解析成功后保存到本机，并用于自动回传到来源群。", "auto_download", !group.active || !group.douyin_enabled]
   ];
   features.forEach(([symbol, title, description, key, disabled]) => {

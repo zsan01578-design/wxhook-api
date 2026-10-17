@@ -17,6 +17,7 @@ from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links
 from wxhook_api.services.douyin_delivery import DeliveryError, DouyinMessenger
 from wxhook_api.services.douyin_api import DouyinAPIParser
+from wxhook_api.services.parse_video import ParseVideoParser, REFERERS
 from wxhook_api.services.groups import GroupManager, event_group
 
 
@@ -124,7 +125,7 @@ class DouyinService:
         group = event_group(event)
         if not self._accepting or not self.allowed(group, event.sender):
             return
-        for link in extract_links(event.content):
+        for link in extract_links(event.content, multi_platform=self.options.settings.parser_provider == "parse_video"):
             key = (group, str(event.msgid), link)
             deduplicate = str(event.msgid) not in {"", "0"}
             if deduplicate and key in self._seen:
@@ -169,7 +170,7 @@ class DouyinService:
         try:
             # Do not quote the original link/title: our own callbacks must not
             # create a new parsing task from an automatic notification.
-            await self.messenger.text(job["group_id"], f"[抖音解析 {job['id'][:8]}] {message}")
+            await self.messenger.text(job["group_id"], f"[分享解析 {job['id'][:8]}] {message}")
         except DeliveryError as exc:
             notifications[stage] = {"status": "unknown" if exc.uncertain else "failed", "error": str(exc)}
         except Exception:
@@ -266,10 +267,13 @@ class DouyinService:
                 await self._notice(job, "start", "开始解析分享链接，请稍候…")
                 async with asyncio.timeout(240):
                     config = self.options.settings
-                    parser = DouyinAPIParser(self._client, config.parser_api_url) if config.parser_provider == "api" else DouyinParser(self._client)
+                    if config.parser_provider == "parse_video":
+                        parser = ParseVideoParser(transport=self._transport)
+                    else:
+                        parser = DouyinAPIParser(self._client, config.parser_api_url) if config.parser_provider == "api" else DouyinParser(self._client)
                     job["parser_provider"] = config.parser_provider
                     parsed = await parser.parse(job["source_url"])
-                    job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind, assets=parsed.assets)
+                    job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind, assets=parsed.assets, platform=parsed.platform)
                     if not self.allowed(job["group_id"], job["sender"]):
                         raise DouyinError("群聊或成员已被限制，或解析功能已停用")
                     if self.auto_download(job["group_id"]):
@@ -279,7 +283,7 @@ class DouyinService:
                         folder.mkdir(parents=True, exist_ok=True)
                         downloaded = 0
                         for index, asset in enumerate(parsed.assets, 1):
-                            file = await self._download_asset(asset, folder, index, job["group_id"], 500 * 1024 * 1024 - downloaded, job["sender"])
+                            file = await self._download_asset(asset, folder, index, job["group_id"], 500 * 1024 * 1024 - downloaded, job["sender"], parsed.platform)
                             job["files"].append(file)
                             downloaded += file["size"]
                             self._changed()
@@ -295,7 +299,7 @@ class DouyinService:
             except DouyinError as exc:
                 job.update(status="failed", error=str(exc))
             except httpx.HTTPStatusError as exc:
-                job.update(status="failed", error=f"抖音请求返回 HTTP {exc.response.status_code}，请确认链接可访问")
+                job.update(status="failed", error=f"平台请求返回 HTTP {exc.response.status_code}，请确认链接可访问")
             except (httpx.HTTPError, TimeoutError):
                 job.update(status="failed", error="网络连接失败或解析下载超时，请检查网络后重试")
             except OSError:
@@ -312,12 +316,12 @@ class DouyinService:
                 self._queue.task_done()
                 self._changed()
 
-    async def _download_asset(self, asset: dict, folder: Path, index: int, group: str, remaining: int, sender: str = "") -> dict:
+    async def _download_asset(self, asset: dict, folder: Path, index: int, group: str, remaining: int, sender: str = "", platform: str = "douyin") -> dict:
         last_error = None
         for url in asset["urls"]:
             self._check_download_policy(group, sender)
             try:
-                return await self._download(url, asset["kind"], folder, index, group, remaining, sender)
+                return await self._download(url, asset["kind"], folder, index, group, remaining, sender, platform)
             except (DouyinError, httpx.HTTPError) as exc:
                 last_error = exc
         if isinstance(last_error, DouyinError):
@@ -328,7 +332,7 @@ class DouyinService:
         if not self.allowed(group, sender) or not self.auto_download(group):
             raise DouyinError("群聊或成员已被限制，或自动保存已停用")
 
-    async def _download(self, url: str, kind: str, folder: Path, index: int, group: str, remaining: int, sender: str = "") -> dict:
+    async def _download(self, url: str, kind: str, folder: Path, index: int, group: str, remaining: int, sender: str = "", platform: str = "douyin") -> dict:
         if remaining <= 0:
             raise DouyinError("单个作品下载量超过 500 MB，已停止")
         limit = min(self.options.max_file_bytes, remaining)
@@ -336,7 +340,7 @@ class DouyinService:
         for _ in range(7):
             self._check_download_policy(group, sender)
             current = checked_url(current, media=True)
-            async with self._client.stream("GET", current) as response:
+            async with self._client.stream("GET", current, headers={"Referer": REFERERS.get(platform, REFERERS["douyin"])}) as response:
                 if response.is_redirect:
                     current = checked_url(urljoin(current, response.headers.get("location", "")), media=True)
                     continue

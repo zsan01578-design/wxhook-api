@@ -10,6 +10,7 @@ dist/
 .tools/
 weixin_4.1.10.27.exe
 douyin.local.yml
+parse-video.local.yml
 downloads/
 .playwright-cli/
 data/

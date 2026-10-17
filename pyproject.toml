@@ -14,6 +14,7 @@ dependencies = [
   "pydantic-settings>=2.2,<3",
   "PyYAML>=6,<7",
   "Pillow>=11.3,<14",
+  "parse-video-py @ https://github.com/wujunwei928/parse-video-py/archive/5fcf87256edb5ffcdebf0e4aac2a5a41745da76e.zip",
   "uvicorn[standard]>=0.30,<1",
 ]
 

@@ -3,25 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>群聊抖音解析 · wxhook</title>
+  <title>群聊分享解析 · wxhook</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/ui/assets/style.css">
   <script src="/ui/assets/douyin.js" defer></script>
 </head>
 <body>
   <main class="workspace">
-    <header class="page-header"><div><p class="eyebrow">WXHOOK / 群聊媒体</p><h1>抖音分享解析</h1><p class="subtitle">从指定群聊收集视频与图集，保存到本机。管理系统中单独设置的群功能优先于本页默认配置。</p></div><a class="docs-link" href="/">返回群聊管理 ↗</a></header>
+    <header class="page-header"><div><p class="eyebrow">WXHOOK / 群聊媒体</p><h1>群聊分享解析</h1><p class="subtitle">解析指定群内的抖音、小红书和 B站分享，保存并回传视频或图片。管理系统中单独设置的群功能优先于本页默认配置。</p></div><a class="docs-link" href="/">返回群聊管理 ↗</a></header>
     <div class="douyin-layout">
       <section class="panel compose">
         <div class="section-heading"><span class="section-number">01</span><h2>选择群聊</h2></div>
         <p class="section-description">此处修改默认群名单。管理系统中单独设置的群功能优先，实际状态可在群聊管理中查看。</p>
         <form id="group-form">
           <label for="parser-provider">解析来源</label>
-          <select id="parser-provider"><option value="api">指定解析接口（jk.y-l.cc）</option><option value="builtin">原公开分享页解析</option></select>
+          <select id="parser-provider"><option value="parse_video">parse-video-py（抖音 / 小红书 / B站）</option><option value="api">指定解析接口（仅抖音）</option><option value="builtin">原公开分享页解析（仅抖音）</option></select>
+          <p class="field-note">默认直接在本项目中解析，无需另开服务或填写接口地址。小红书要求登录时，可在本机 parse-video.local.yml 配置本人 Cookie；失败原因会显示在下方记录中。</p>
+          <div id="api-settings" hidden>
           <label for="parser-api-url" class="api-url-label">完整接口地址</label>
           <input id="parser-api-url" type="url" placeholder="https://jk.y-l.cc/api/dsp/接口标识/用户ID/" autocomplete="off" spellcheck="false">
           <p class="field-note">填写接口方提供的完整地址，不要附加 ?url= 参数。地址含账号标识，只保存到本机配置；接口失败时会提示原因。</p>
-          <label class="check-label"><input id="enabled" type="checkbox">启用群聊抖音解析</label>
+          </div>
+          <label class="check-label"><input id="enabled" type="checkbox">启用群聊分享解析</label>
           <label for="groups">群 ID，每行一个</label>
           <textarea id="groups" rows="6" placeholder="123456789@chatroom" spellcheck="false"></textarea>
           <p class="field-note">填写群 ID，不是群昵称。可以先在消息页面查看群消息中的 ID。</p>
@@ -33,16 +36,16 @@
           <p id="config-status" class="feedback" role="status"></p>
         </form>
         <div class="tip"><strong>最近收到消息的群</strong><p>点击群 ID 添加到上方名单，再保存配置。</p><div id="recent-groups" class="recent-groups">暂无群消息。请先让目标群发送一条消息。</div></div>
-        <div class="tip"><strong>文件保存位置</strong><p id="output-dir" class="output-path">正在读取…</p><p id="file-limit"></p><p>支持抖音分享文案、短链接及视频/图文卡片中包含的链接。</p></div>
+        <div class="tip"><strong>文件保存位置</strong><p id="output-dir" class="output-path">正在读取…</p><p id="file-limit"></p><p>支持分享文案、短链接及卡片中的链接。B站当前解析第一分 P；图集保存静态图片。</p></div>
       </section>
       <section class="panel">
         <div class="inbox-heading"><div class="section-heading"><span class="section-number">02</span><h2>解析结果</h2></div><span id="job-count" class="count">0 条</span></div>
         <p class="section-description">结果每 2 秒刷新 · 最近 100 条记录 · 保存的文件重启后仍保留</p>
         <p id="jobs-status" class="inbox-status" role="status"></p>
-        <div id="jobs"><div class="empty-state"><span class="empty-icon" aria-hidden="true">↓</span><h3>等待群内分享</h3><p>保存群配置后，在目标群发送一条抖音视频或图文链接。</p></div></div>
+        <div id="jobs"><div class="empty-state"><span class="empty-icon" aria-hidden="true">↓</span><h3>等待群内分享</h3><p>保存群配置后，在目标群发送抖音、小红书或 B站分享链接。</p></div></div>
       </section>
     </div>
-    <footer class="page-footer">公开分享页需要验证或作品不可用时会显示失败原因；解析结果保存在本机。<span>WXHOOK · DOUYIN MEDIA</span></footer>
+    <footer class="page-footer">平台要求登录、验证或作品不可用时会提示失败原因；解析结果保存在本机。<span>WXHOOK · SHARED MEDIA</span></footer>
   </main>
 </body>
 </html>

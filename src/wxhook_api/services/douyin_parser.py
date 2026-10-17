@@ -12,7 +12,8 @@ import httpx
 
 
 SHARE_HOSTS = {"douyin.com", "www.douyin.com", "v.douyin.com", "m.douyin.com", "iesdouyin.com", "www.iesdouyin.com", "jingxuan.douyin.com"}
-MEDIA_DOMAINS = ("douyinvod.com", "douyinpic.com", "byteimg.com", "ibytedtos.com", "snssdk.com", "amemv.com", "pstatp.com", "bytecdn.cn", "zjcdn.com", "ixigua.com")
+PLATFORM_HOSTS = {"xiaohongshu.com", "www.xiaohongshu.com", "xhslink.com", "xhslink.cn", "bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv"}
+MEDIA_DOMAINS = ("douyinvod.com", "douyinpic.com", "byteimg.com", "ibytedtos.com", "snssdk.com", "amemv.com", "pstatp.com", "bytecdn.cn", "zjcdn.com", "ixigua.com", "365yg.com", "xiaohongshu.com", "xhscdn.com", "bilibili.com", "bilivideo.com", "bilivideo.cn", "hdslb.com")
 USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1"
 LINK_PATTERN = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&()*+,;=%]+", re.IGNORECASE)
 
@@ -21,13 +22,15 @@ class DouyinError(Exception):
     pass
 
 
-def checked_url(url: str, *, media: bool = False) -> str:
+def checked_url(url: str, *, media: bool = False, multi_platform: bool = False) -> str:
     try:
         if len(url) > 8192 or any(ord(char) < 32 for char in url):
             raise ValueError
         parsed = urlsplit(url)
         host = (parsed.hostname or "").lower()
         allowed = host in SHARE_HOSTS
+        if multi_platform or media:
+            allowed = allowed or host in PLATFORM_HOSTS
         if media:
             allowed = allowed or any(host == domain or host.endswith("." + domain) for domain in MEDIA_DOMAINS)
             allowed = allowed or host == "jk.y-l.cc"
@@ -38,13 +41,13 @@ def checked_url(url: str, *, media: bool = False) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
 
 
-def extract_links(content: str) -> list[str]:
+def extract_links(content: str, *, multi_platform: bool = False) -> list[str]:
     text = html.unescape(html.unescape(content.replace(r"\/", "/")))
     results = []
     for match in LINK_PATTERN.finditer(text):
         candidate = match.group().rstrip(".,;!?)]\u3002")
         try:
-            candidate = checked_url(candidate)
+            candidate = checked_url(candidate, multi_platform=multi_platform)
         except DouyinError:
             continue
         if candidate not in results:
@@ -151,6 +154,7 @@ class ParsedMedia:
     author: str
     kind: str
     assets: list[dict[str, Any]]
+    platform: str = "douyin"
 
 
 def parse_item(item: dict, item_id: str) -> ParsedMedia:
