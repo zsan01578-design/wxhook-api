@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import sqlite3
 from typing import Any
+from uuid import uuid4
 
 from wxhook_api.core.config import PROJECT_ROOT
 from wxhook_api.schemas.events import CallbackEvent
@@ -65,7 +68,28 @@ class GroupManager:
                         id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL,
                         target TEXT NOT NULL, action TEXT NOT NULL, created_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS chat_messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, msg_key TEXT NOT NULL,
+                        msgid TEXT NOT NULL, sender TEXT NOT NULL, type INTEGER NOT NULL,
+                        timestamp INTEGER NOT NULL, content TEXT NOT NULL, received_at TEXT NOT NULL,
+                        source TEXT NOT NULL, raw_json TEXT NOT NULL,
+                        UNIQUE(group_id, msg_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS chat_messages_timeline ON chat_messages(group_id, timestamp DESC, id DESC);
+                    CREATE TABLE IF NOT EXISTS sync_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 """)
+                migrations = {
+                    "groups": {"wechat_name": "TEXT NOT NULL DEFAULT ''", "members_sync": "TEXT NOT NULL DEFAULT 'pending'",
+                               "members_synced_at": "TEXT NOT NULL DEFAULT ''", "history_complete": "INTEGER NOT NULL DEFAULT 0",
+                               "history_next_page": "INTEGER NOT NULL DEFAULT 1", "history_error": "TEXT NOT NULL DEFAULT ''",
+                               "history_synced_at": "TEXT NOT NULL DEFAULT ''"},
+                    "members": {"wechat_name": "TEXT NOT NULL DEFAULT ''", "membership": "TEXT NOT NULL DEFAULT 'unknown'"},
+                }
+                for table, fields in migrations.items():
+                    columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                    for column, definition in fields.items():
+                        if column not in columns:
+                            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
                 for group in legacy_groups:
                     db.execute("INSERT OR IGNORE INTO groups (id, created_at) VALUES (?, ?)", (group, now()))
         async with self._lock:
@@ -91,15 +115,12 @@ class GroupManager:
         group = event_group(event)
         if not group:
             return
-        timestamp = now()
-
         def record():
             with self._connect() as db:
-                db.execute("INSERT OR IGNORE INTO groups (id, created_at) VALUES (?, ?)", (group, timestamp))
-                db.execute("UPDATE groups SET last_seen=?, last_message=?, message_count=message_count+1 WHERE id=?", (timestamp, event.content[:300], group))
-                if event.sender and len(event.sender) <= 256 and event.sender != group:
-                    db.execute("""INSERT INTO members (group_id, id, last_seen, message_count) VALUES (?, ?, ?, 1)
-                        ON CONFLICT(group_id, id) DO UPDATE SET last_seen=excluded.last_seen, message_count=message_count+1""", (group, event.sender, timestamp))
+                message_id = str(event.msgid)
+                self._save_messages(db, group, [{"key": f"server:{message_id}" if message_id not in {"", "0"} else f"callback:{uuid4().hex}",
+                    "msgid": message_id, "sender": event.sender, "type": event.type,
+                    "timestamp": event.timestamp, "content": event.content, "source": "callback", "raw": event.model_dump()}])
         async with self._lock:
             await asyncio.to_thread(record)
 
@@ -114,10 +135,14 @@ class GroupManager:
                 return [dict(row) for row in db.execute("""SELECT g.*,
                     (SELECT count(*) FROM members m WHERE m.group_id=g.id) AS member_count,
                     (SELECT count(*) FROM members m WHERE m.group_id=g.id AND m.blocked=1) AS blocked_member_count
+                    , (SELECT count(*) FROM members m WHERE m.group_id=g.id AND m.membership='current') AS current_member_count
                     FROM groups g ORDER BY pinned DESC, last_seen DESC, created_at DESC, id""")]
         async with self._lock:
             rows = await asyncio.to_thread(read)
         for row in rows:
+            row["local_name"] = row["name"]
+            row["name"] = row["name"] or row["wechat_name"]
+            row["history_complete"] = bool(row["history_complete"])
             for key in ("pinned", "enabled", "blocked"):
                 row[key] = bool(row[key])
             row["douyin_enabled"] = self.feature(row["id"], "douyin_enabled", legacy.enabled and row["id"] in legacy.groups)
@@ -170,8 +195,8 @@ class GroupManager:
                 clauses.append("m.blocked=1")
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
             with self._connect() as db:
-                rows = db.execute("SELECT m.*, g.name AS group_name FROM members m JOIN groups g ON g.id=m.group_id" + where + " ORDER BY m.blocked DESC, m.last_seen DESC, m.id", parameters)
-                return [{**dict(row), "blocked": bool(row["blocked"])} for row in rows]
+                rows = db.execute("SELECT m.*, COALESCE(NULLIF(g.name,''),g.wechat_name) AS group_name FROM members m JOIN groups g ON g.id=m.group_id" + where + " ORDER BY m.blocked DESC, m.last_seen DESC, m.id", parameters)
+                return [{**dict(row), "local_name": row["name"], "name": row["name"] or row["wechat_name"], "blocked": bool(row["blocked"])} for row in rows]
         async with self._lock:
             return await asyncio.to_thread(read)
 
@@ -207,5 +232,127 @@ class GroupManager:
             with self._connect() as db:
                 rows = db.execute("SELECT * FROM audit" + (" WHERE group_id=?" if group else "") + " ORDER BY id DESC LIMIT 100", (group,) if group else ())
                 return [dict(row) for row in rows]
+        async with self._lock:
+            return await asyncio.to_thread(read)
+
+    @staticmethod
+    def _save_messages(db, group: str, messages: list[dict]) -> tuple[int, int]:
+        db.execute("INSERT OR IGNORE INTO groups (id, created_at) VALUES (?, ?)", (group, now()))
+        added, unseen_history = 0, 0
+        for message in messages:
+            if message["source"] == "history":
+                existing = db.execute("SELECT source FROM chat_messages WHERE group_id=? AND msg_key=?", (group, message["key"])).fetchone()
+                if not existing or existing["source"] != "history":
+                    unseen_history += 1
+            timestamp = int(message["timestamp"]) or int(datetime.now(timezone.utc).timestamp())
+            timestamp = max(0, min(timestamp, 253402300799))
+            seen_at = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+            values = (group, message["key"], message["msgid"], message["sender"], message["type"], timestamp,
+                      message["content"], now(), message["source"], json.dumps(message["raw"], ensure_ascii=False))
+            inserted = db.execute("""INSERT OR IGNORE INTO chat_messages
+                (group_id,msg_key,msgid,sender,type,timestamp,content,received_at,source,raw_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""", values).rowcount
+            if not inserted:
+                if message["source"] == "history":
+                    db.execute("""UPDATE chat_messages SET raw_json=?, source='history', type=?, timestamp=?,
+                        sender=CASE WHEN ?<>'' THEN ? ELSE sender END,
+                        content=CASE WHEN ?<>'' THEN ? ELSE content END WHERE group_id=? AND msg_key=?""",
+                        (values[-1], message["type"], timestamp, message["sender"], message["sender"], message["content"], message["content"], group, message["key"]))
+                    sender = message["sender"]
+                    if sender and sender != group and len(sender) <= 256:
+                        db.execute("""INSERT INTO members (group_id,id,last_seen) VALUES (?,?,?)
+                            ON CONFLICT(group_id,id) DO UPDATE SET last_seen=MAX(last_seen,excluded.last_seen)""", (group, sender, seen_at))
+                continue
+            added += 1
+            db.execute("""UPDATE groups SET message_count=message_count+1,
+                last_message=CASE WHEN last_seen<=? THEN ? ELSE last_message END,
+                last_seen=MAX(last_seen,?) WHERE id=?""", (seen_at, message["content"][:300], seen_at, group))
+            sender = message["sender"]
+            if sender and sender != group and len(sender) <= 256:
+                db.execute("""INSERT INTO members (group_id,id,last_seen,message_count) VALUES (?,?,?,1)
+                    ON CONFLICT(group_id,id) DO UPDATE SET last_seen=MAX(last_seen,excluded.last_seen), message_count=message_count+1""", (group, sender, seen_at))
+        latest = db.execute("SELECT content,timestamp FROM chat_messages WHERE group_id=? ORDER BY timestamp DESC,id DESC LIMIT 1", (group,)).fetchone()
+        if latest:
+            db.execute("UPDATE groups SET last_message=?,last_seen=? WHERE id=?", (latest["content"][:300], datetime.fromtimestamp(latest["timestamp"], timezone.utc).isoformat(), group))
+        return added, unseen_history
+
+    async def sync_contacts(self, groups: list[dict], rosters: dict[str, list[dict]]) -> None:
+        def write():
+            with self._connect() as db:
+                timestamp = now()
+                for group in groups:
+                    db.execute("""INSERT INTO groups (id,wechat_name,created_at) VALUES (?,?,?)
+                        ON CONFLICT(id) DO UPDATE SET wechat_name=excluded.wechat_name""", (group["id"], group["name"], timestamp))
+                    status = "complete" if group["id"] in rosters else "unsupported"
+                    db.execute("UPDATE groups SET members_sync=?, members_synced_at=? WHERE id=?", (status, timestamp if status == "complete" else "", group["id"]))
+                for group, people in rosters.items():
+                    db.execute("UPDATE members SET membership='left' WHERE group_id=? AND membership='current'", (group,))
+                    for member in people:
+                        db.execute("""INSERT INTO members (group_id,id,wechat_name,membership) VALUES (?,?,?,'current')
+                            ON CONFLICT(group_id,id) DO UPDATE SET wechat_name=excluded.wechat_name,membership='current'""", (group, member["id"], member["name"]))
+        async with self._lock:
+            await asyncio.to_thread(write)
+
+    async def claim_account(self, account: str) -> None:
+        def write():
+            with self._connect() as db:
+                row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
+                if row and row[0] != account:
+                    raise ValueError("微信账号与本地资料库不一致，请为新账号设置独立的 WXHOOK_MANAGEMENT_DB 后重启")
+                db.execute("INSERT OR IGNORE INTO sync_metadata (key,value) VALUES ('account',?)", (account,))
+        async with self._lock:
+            await asyncio.to_thread(write)
+
+    async def history_checkpoint(self, group: str, *, next_page: int, complete: bool, error: str = "") -> None:
+        def write():
+            with self._connect() as db:
+                db.execute("UPDATE groups SET history_next_page=?,history_complete=?,history_error=?,history_synced_at=? WHERE id=?",
+                           (next_page, complete, error, now() if not error else "", group))
+        async with self._lock:
+            await asyncio.to_thread(write)
+
+    async def history_failure(self, group: str, error: str) -> None:
+        def write():
+            with self._connect() as db:
+                db.execute("UPDATE groups SET history_error=? WHERE id=?", (error, group))
+        async with self._lock:
+            await asyncio.to_thread(write)
+
+    async def import_history(self, group: str, rows: list[dict]) -> tuple[int, int]:
+        normalized = []
+        for row in rows:
+            server = str(row.get("server_id") or "0")
+            if server != "0":
+                key = "server:" + server
+            elif str(row.get("local_id") or "0") != "0" and row.get("db_name"):
+                key = f'local:{row["db_name"]}:{row.get("table_name", "")}:{row["local_id"]}'
+            else:
+                key = "digest:" + hashlib.sha256(json.dumps(row, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            content = str(row.get("message_content") or row.get("compress_content") or "")
+            sender = str(row.get("real_sender") or "")
+            if sender == "0":
+                sender = ""
+            if not sender:
+                prefix = re.match(r"^([A-Za-z0-9_.-]{1,256}):\n", content)
+                if prefix:
+                    sender = prefix[1]
+            normalized.append({"key": key, "msgid": server, "sender": sender, "type": int(row.get("local_type") or 0),
+                               "timestamp": int(row.get("create_time") or 0), "content": content, "source": "history", "raw": row})
+        def write():
+            with self._connect() as db:
+                return self._save_messages(db, group, normalized)
+        async with self._lock:
+            return await asyncio.to_thread(write)
+
+    async def messages(self, group: str, *, page: int = 1, size: int = 50, query: str = "") -> dict:
+        def read():
+            where, args = "group_id=?", [group]
+            if query:
+                where += " AND instr(lower(content),lower(?))>0"
+                args.append(query)
+            with self._connect() as db:
+                total = db.execute(f"SELECT count(*) FROM chat_messages WHERE {where}", args).fetchone()[0]
+                rows = db.execute(f"SELECT id,msgid,sender,type,timestamp,content,received_at,source FROM chat_messages WHERE {where} ORDER BY timestamp DESC,id DESC LIMIT ? OFFSET ?", (*args,size,(page-1)*size))
+                return {"messages": [dict(row) for row in rows], "total": total, "page": page, "size": size, "has_more": total > page*size}
         async with self._lock:
             return await asyncio.to_thread(read)

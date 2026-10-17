@@ -23,13 +23,15 @@ from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.events import EventDispatcher
 from wxhook_api.services.groups import GroupManager
 from wxhook_api.services.inbox import MessageInbox
+from wxhook_api.services.wechat_sync import SyncOptions, WeChatSync
 
 
-def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncBaseTransport | None = None, hook_client: HookClient | None = None, douyin_service: DouyinService | None = None, group_manager: GroupManager | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncBaseTransport | None = None, hook_client: HookClient | None = None, douyin_service: DouyinService | None = None, group_manager: GroupManager | None = None, sync_options: SyncOptions | None = None) -> FastAPI:
     settings = settings or load_settings()
     dispatcher = EventDispatcher(settings.callback_queue_size)
     groups = group_manager or GroupManager()
-    dispatcher.register(groups.receive)
+    synchronizer = WeChatSync(groups, sync_options or SyncOptions.from_environment())
+    dispatcher.register(synchronizer.receive if synchronizer.options.enabled else groups.receive)
     inbox = MessageInbox()
     dispatcher.register(inbox.receive)
     douyin_worker = douyin_service or DouyinService(load_douyin_options())
@@ -47,8 +49,10 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             await groups.start(douyin_worker.options.settings.groups)
             await douyin_worker.start()
             await dispatcher.start()
+            synchronizer.start(app.state.hook_client)
             yield
         finally:
+            await synchronizer.stop()
             try:
                 await dispatcher.stop(settings.shutdown_timeout)
             finally:
@@ -67,6 +71,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.launcher_status = None
     app.state.douyin = douyin_worker
     app.state.groups = groups
+    app.state.wechat_sync = synchronizer
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
     install_exception_handlers(app)
     app.add_exception_handler(sqlite3.Error, manage.storage_error)

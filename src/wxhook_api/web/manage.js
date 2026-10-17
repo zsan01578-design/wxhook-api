@@ -1,10 +1,11 @@
 "use strict";
 
 const $ = id => document.getElementById(id);
-const state = { groups: [], blocked_members: [], startup: null };
+const state = { groups: [], blocked_members: [], startup: null, sync: null };
 let selectedId = "", tab = "features", view = "groups", filter = "all", blacklistTab = "groups";
 let members = [], messages = [], audit = [], memberQuery = "", detailVersion = "", listVersion = "";
 let refreshJob, pollTimer, toastTimer, detailToken = 0, mutating = false, connected = false;
+let messagePage = 1, messageQuery = "", messageMeta = {total: 0, has_more: false};
 
 function el(tag, className = "", text) {
   const node = document.createElement(tag);
@@ -130,14 +131,14 @@ function renderList() {
     title.append(el("strong", "", nameOf(group)));
     if (group.pinned) title.append(icon("pin"));
     status.append(el("span", `tiny-dot${group.blocked ? " red" : !group.active ? " gray" : ""}`), document.createTextNode(group.blocked ? "已拉黑" : group.active ? "运行中" : "已暂停"));
-    meta.append(status, el("span", "", `${group.member_count} 位已发现成员`));
+    meta.append(status, el("span", "", group.members_sync === "complete" ? `${group.current_member_count} 位群成员` : `${group.member_count} 位已发现成员`));
     copy.append(title, el("p", "", group.last_message || group.note || "等待群内第一条消息"), meta);
     node.append(avatar(group), copy); return node;
   });
   $("group-list").replaceChildren(...(nodes.length ? nodes : [el("div", "list-empty", state.groups.length ? "没有符合条件的群聊" : "还没有群聊\n点击 + 添加，或等待群消息自动发现")]));
 }
 function selectGroup(id) {
-  selectedId = id; tab = "features"; memberQuery = ""; view = "groups"; detailVersion = "";
+  selectedId = id; tab = "features"; memberQuery = ""; messagePage = 1; messageQuery = ""; view = "groups"; detailVersion = "";
   document.body.classList.add("mobile-detail");
   updateView(); renderList();
   renderHeader(current());
@@ -161,8 +162,8 @@ function updateView() {
 function renderWelcome(error) {
   const node = $("welcome"), art = el("div", "welcome-icon"); art.append(icon("users"));
   const steps = el("div", "welcome-steps");
-  ["添加或自动发现群聊", "配置群内功能", "管理群聊与成员"].forEach((text, i) => { const item = el("span"); item.append(el("b", "", i + 1), document.createTextNode(text)); steps.append(item); });
-  node.replaceChildren(art, el("h2", "", error ? "暂时无法载入群聊" : "你的群聊，从这里管理"), el("p", "", error || "添加一个群聊，设置专属功能。收到群消息后，群聊和发言成员也会自动出现在这里。"), button(error ? "重新加载" : "添加第一个群聊", "button primary", error ? () => refreshState(true) : addGroupDialog, error ? "refresh" : "plus"), steps);
+  ["登录微信自动同步", "按群配置功能", "查看持久化聊天记录"].forEach((text, i) => { const item = el("span"); item.append(el("b", "", i + 1), document.createTextNode(text)); steps.append(item); });
+  node.replaceChildren(art, el("h2", "", error ? "暂时无法载入群聊" : "你的群聊，从这里管理"), el("p", "", error || "微信登录后会自动同步群聊、可读取的成员名单和聊天记录，也可以手动添加群聊。"), button(error ? "重新加载" : "添加群聊", "button primary", error ? () => refreshState(true) : addGroupDialog, error ? "refresh" : "plus"), steps);
 }
 
 function renderHeader(group) {
@@ -206,7 +207,7 @@ function renderFeatures(group) {
 function renderInspector(group) {
   const node = $("inspector"), heading = el("div", "inspector-heading");
   heading.append(el("h3", "", "群聊资料"), iconButton("edit", "编辑群资料", () => editGroupDialog(group)));
-  const lines = [["管理状态", group.blocked ? "黑名单" : group.active ? "正常运行" : "已暂停"], ["已发现成员", `${group.member_count} 人`], ["成员黑名单", `${group.blocked_member_count} 人`], ["最近活跃", dateText(group.last_seen, true)]];
+  const lines = [["管理状态", group.blocked ? "黑名单" : group.active ? "正常运行" : "已暂停"], [group.members_sync === "complete" ? "微信当前群成员" : "已发现成员", `${group.members_sync === "complete" ? group.current_member_count : group.member_count} 人`], ["成员黑名单", `${group.blocked_member_count} 人`], ["已保存消息", `${group.message_count} 条`], ["最近活跃", dateText(group.last_seen, true)]];
   const rows = lines.map(([label, value]) => { const row = el("div", "info-line"); row.append(el("span", "", label), el("strong", "", value)); return row; });
   const noteLabel = el("div", "note-label"); noteLabel.append(el("span", "", "群备注"), button("编辑", "text-link", () => editGroupDialog(group)));
   const memberSection = el("div", "inspector-members"), memberHeading = el("div", "inspector-heading");
@@ -217,13 +218,13 @@ function renderInspector(group) {
     copy.append(el("strong", "", member.name || member.id), el("p", "", member.blocked ? "已加入黑名单" : member.last_seen ? "已发现成员" : "手动添加"));
     row.append(memberAvatar(member, i), copy, iconButton(member.blocked ? "check" : "block", member.blocked ? `解除 ${member.name || member.id} 黑名单` : `拉黑 ${member.name || member.id}`, () => blockMemberDialog(group.id, member))); memberSection.append(row);
   });
-  memberSection.append(el("p", "inspector-hint", "成员来自群消息与手动添加，并非完整微信通讯录。"));
+  memberSection.append(el("p", "inspector-hint", group.members_sync === "complete" ? "已同步微信当前成员关系，离群成员的历史记录和本地设置会保留。" : "尚未取得完整微信成员关系，此处为已发现或手动添加的成员。"));
   const tip = el("div", "inspector-tip"); tip.append(icon("shield"), el("strong", "", "让群聊保持有序"), el("p", "", "黑名单只停止本系统的自动处理，不会退群、踢人或屏蔽微信消息。成员黑名单仅在所在群生效。"));
   node.replaceChildren(heading, ...rows, noteLabel, el("p", "group-note", group.note || "还没有备注，记录这个群的用途吧。"), memberSection, tip);
 }
 function renderMembers(group) {
   const heading = el("div", "section-heading"), copy = el("div");
-  copy.append(el("h3", "", "群成员管理"), el("p", "", "已发现和手动添加的成员；黑名单仅在当前群生效。")); heading.append(copy);
+  copy.append(el("h3", "", "群成员管理"), el("p", "", group.members_sync === "complete" ? "已同步微信成员名单，保留历史成员与本地添加记录；黑名单仅在当前群生效。" : "暂未取得完整微信成员关系，展示已发现与手动添加的成员。")); heading.append(copy);
   const tools = el("div", "member-toolbar"), search = el("div", "search-field"), input = el("input");
   input.type = "search"; input.placeholder = "搜索名称或 wxid"; input.setAttribute("aria-label", "搜索群成员"); input.value = memberQuery;
   input.addEventListener("input", () => { memberQuery = input.value; renderMemberTable(group); });
@@ -238,7 +239,7 @@ function renderMemberTable(group) {
   ["成员", "状态", "最近发言", "操作"].forEach((label, i) => headRow.append(el("th", i === 2 ? "last-active" : "", label))); head.append(headRow);
   filtered.forEach((member, i) => {
     const row = el("tr"), nameCell = el("td"), person = el("div", "member-cell"), copy = el("div");
-    copy.append(el("div", "member-name", member.name || member.id), el("div", "member-id", member.id)); person.append(memberAvatar(member, i), copy); nameCell.append(person);
+    copy.append(el("div", "member-name", member.name || member.id), el("div", "member-id", `${member.id}${member.membership === "left" ? " · 历史成员" : member.membership === "current" ? " · 群内成员" : ""}`)); person.append(memberAvatar(member, i), copy); nameCell.append(person);
     const status = el("td"); status.append(badge(member.blocked ? "已拉黑" : "正常", member.blocked ? "red" : "gray"));
     const actions = el("td"), buttons = el("div", "member-actions"); buttons.append(button("备注", "", () => editMemberDialog(group, member)), button(member.blocked ? "解除" : "拉黑", "block", () => blockMemberDialog(group.id, member))); actions.append(buttons);
     row.append(nameCell, status, el("td", "last-active member-id", dateText(member.last_seen, true)), actions); body.append(row);
@@ -246,19 +247,29 @@ function renderMemberTable(group) {
   table.append(head, body); $("member-table-container").replaceChildren(table);
 }
 function renderMessages() {
-  const heading = el("div", "section-heading"), copy = el("div"); copy.append(el("h3", "", "最近群消息"), el("p", "", "本次运行最近 100 条回调中的当前群消息，重启后清空。")); heading.append(copy);
-  if (!messages.length) { $("tab-content").replaceChildren(heading, empty("还没有收到群消息", "确认消息接收已启用后，让群成员发送一条消息。")); return; }
+  const heading = el("div", "section-heading"), copy = el("div"), group = current();
+  copy.append(el("h3", "", "聊天记录"), el("p", "", `已保存 ${messageMeta.total} 条${messageQuery ? "匹配记录" : "消息"} · 微信历史与实时消息 · 重启保留`)); heading.append(copy);
+  const search = el("form", "message-search"), input = el("input", "form-input");
+  input.type = "search"; input.placeholder = "搜索聊天内容"; input.value = messageQuery; input.maxLength = 200; input.setAttribute("aria-label", "搜索聊天记录");
+  const submit = button("搜索", "button small"); submit.type = "submit"; search.append(input, submit);
+  search.addEventListener("submit", event => { event.preventDefault(); messageQuery = input.value.trim(); messagePage = 1; detailVersion = ""; loadDetail().catch(error => toast(error.message, true)); });
+  const pager = el("div", "message-pager"), prev = button("上一页", "button small", () => turnMessagePage(-1)), next = button("下一页", "button small", () => turnMessagePage(1));
+  prev.disabled = messagePage <= 1; next.disabled = !messageMeta.has_more;
+  pager.append(prev, el("span", "", `第 ${messagePage} 页`), next);
+  const progress = el("p", group.history_error ? "form-error" : "form-note", group.history_error || (group.history_complete ? "微信本机可见历史已完成首次导入，后续自动增量更新。" : "正在后台分批导入微信本机历史，可先查看已保存的消息。"));
+  if (!messages.length) { $("tab-content").replaceChildren(heading, search, progress, empty(messageQuery ? "没有匹配的聊天记录" : "等待同步聊天记录", "登录微信后会自动导入当前电脑可读取的群聊天记录。"), pager); return; }
   const stack = el("div", "message-stack");
-  [...messages].reverse().forEach((message, i) => {
+  messages.forEach((message, i) => {
     const person = members.find(member => member.id === message.sender) || { id: message.sender || "未知成员" };
     const row = el("div", "chat-message"), body = el("div", "chat-message-body"), meta = el("div", "chat-meta");
-    meta.append(el("span", "", person.name || person.id), el("time", "", dateText(message.received_at, true)));
+    meta.append(el("span", "", person.name || person.id), el("time", "", dateText(new Date(message.timestamp * 1000).toISOString(), true)), badge(message.source === "history" ? "微信历史" : "实时消息", "gray"));
     if (person.blocked) meta.append(badge("已拉黑", "red"));
     body.append(meta, el("div", "chat-bubble", message.content || "（空消息）"));
     if (message.type !== 1 || message.truncated) body.append(el("p", "form-note", `${message.type !== 1 ? `类型 ${message.type} · 展示原始内容` : ""}${message.truncated ? " · 内容过长已截断" : ""}`));
     row.append(memberAvatar(person, i), body); stack.append(row);
-  }); $("tab-content").replaceChildren(heading, stack);
+  }); $("tab-content").replaceChildren(heading, search, progress, pager, stack);
 }
+function turnMessagePage(delta) { messagePage += delta; detailVersion = ""; loadDetail().then(() => $("tab-content").scrollTop = 0).catch(error => toast(error.message, true)); }
 function renderAudit() {
   const heading = el("div", "section-heading"), copy = el("div"); copy.append(el("h3", "", "操作记录"), el("p", "", "记录当前群的配置调整与黑名单操作，最近 100 条。")); heading.append(copy);
   const rows = audit.map(event => { const node = el("div", "audit-row"); node.append(el("div", "", event.action), el("p", "", event.target), el("time", "", dateText(event.created_at))); return node; });
@@ -268,17 +279,18 @@ function setTab(value) { tab = value; detailVersion = ""; loadDetail().catch(err
 async function loadDetail() {
   const group = current();
   if (!group || view !== "groups") return;
-  const token = ++detailToken, requestedTab = tab;
+  const token = ++detailToken, requestedTab = tab, requestedPage = messagePage, requestedQuery = messageQuery;
   const [people, inbox, history] = await Promise.all([
     api(`${groupPath(group.id)}/members`),
-    requestedTab === "messages" ? api("/ui/messages") : Promise.resolve(null),
+    requestedTab === "messages" ? api(`${groupPath(group.id)}/messages?page=${requestedPage}&q=${encodeURIComponent(requestedQuery)}`) : Promise.resolve(null),
     requestedTab === "audit" ? api(`/api/manage/audit?group=${encodeURIComponent(group.id)}`) : Promise.resolve(null)
   ]);
   if (token !== detailToken || group.id !== selectedId || requestedTab !== tab || view !== "groups") return;
   members = people.members;
-  messages = inbox?.messages.filter(message => (message.roomid || message.wxid) === group.id) || [];
+  messages = inbox?.messages || [];
+  if (inbox) messageMeta = inbox;
   audit = history?.events || [];
-  const version = JSON.stringify([current(), members, messages, audit, tab]);
+  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, tab]);
   if (version === detailVersion) return;
   detailVersion = version;
   renderHeader(current()); renderInspector(current());
@@ -343,8 +355,8 @@ function blockMemberDialog(group, member) {
   confirmDialog(member.blocked ? "解除成员黑名单？" : "将成员加入黑名单？", `${member.name || member.id}\n\n${member.blocked ? "解除后，此成员可再次触发所在群已开启的自动功能。" : "此成员在当前群内将无法触发自动功能；在其他群不受影响。此操作不会踢出成员。"}`, () => api(memberPath(group, member.id), { blocked: !member.blocked }, "PATCH"), member.blocked ? "确认解除" : "确认拉黑", !member.blocked);
 }
 function editGroupDialog(group) {
-  const body = showDialog("编辑群聊资料"), form = el("form"), name = formField(form, "群名称", "填写便于识别的群名称", group.name), note = formField(form, "群备注", "记录群用途或管理说明", group.note, true, 500);
-  form.append(el("p", "form-note", "名称和备注仅保存在本机，不修改微信中的群名称。"));
+  const body = showDialog("编辑群聊资料"), form = el("form"), name = formField(form, "群名称", group.wechat_name || "填写便于识别的群名称", group.local_name ?? group.name), note = formField(form, "群备注", "记录群用途或管理说明", group.note, true, 500);
+  form.append(el("p", "form-note", "名称和备注仅保存在本机。群名称留空时自动使用同步到的微信名称。"));
   const footer = formFooter(form); body.append(form); bindForm(form, footer, () => api(groupPath(group.id), { name: name.value.trim(), note: note.value.trim() }, "PATCH"));
 }
 function addMemberDialog(group) {
@@ -353,7 +365,7 @@ function addMemberDialog(group) {
   const footer = formFooter(form, "添加成员"); body.append(form); bindForm(form, footer, () => api(`${groupPath(group.id)}/members`, { id: id.value.trim(), name: name.value.trim() }));
 }
 function editMemberDialog(group, member) {
-  const body = showDialog("编辑成员备注"), form = el("form"), name = formField(form, "备注名称", "成员备注，仅保存在本机", member.name);
+  const body = showDialog("编辑成员备注"), form = el("form"), name = formField(form, "备注名称", member.wechat_name || "成员备注，仅保存在本机", member.local_name ?? member.name);
   form.append(el("p", "form-note", member.id)); const footer = formFooter(form); body.append(form); bindForm(form, footer, () => api(memberPath(group.id, member.id), { name: name.value.trim() }, "PATCH"));
 }
 function addGroupDialog(mode = "manual") {
@@ -410,6 +422,11 @@ async function refreshState(force = false) {
       if (!selectedId || !current()) selectedId = state.groups[0]?.id || "";
       const version = JSON.stringify(state.groups);
       if (version !== listVersion) { listVersion = version; renderList(); }
+      const sync = state.sync;
+      $("sync-status").textContent = sync?.message || "等待微信自动同步…";
+      $("sync-status").title = (sync?.warnings || []).join("\n");
+      $("sync-phase").className = `live-dot${sync?.phase === "error" || sync?.phase === "partial" ? " error" : sync?.phase === "idle" ? "" : " muted"}`;
+      $("sync-now").disabled = sync?.enabled === false;
       renderOverview(); updateView(); await loadDetail();
     } catch (error) {
       if (!listVersion) { $("welcome").hidden = false; $("group-workspace").hidden = true; renderWelcome(error.message); const retry = el("div", "list-empty", "群聊载入失败"); retry.append(document.createElement("br"), button("重新加载", "button small", () => refreshState(true))); $("group-list").replaceChildren(retry); }
@@ -433,6 +450,7 @@ document.querySelectorAll("[data-tab]").forEach(node => node.addEventListener("c
 $("add-group").addEventListener("click", () => addGroupDialog());
 $("add-group-small").addEventListener("click", () => addGroupDialog());
 $("refresh").addEventListener("click", async event => { const source = event.currentTarget; source.disabled = true; await Promise.all([refreshState(true), checkConnection()]); source.disabled = false; });
+$("sync-now").addEventListener("click", async event => { const source = event.currentTarget; source.disabled = true; try { await api("/api/manage/sync", {}); toast("已安排后台同步，进度会自动更新"); } catch (error) { toast(error.message, true); } finally { source.disabled = false; } });
 $("nav-groups").addEventListener("click", () => { view = "groups"; document.body.classList.remove("mobile-detail"); updateView(); renderList(); loadDetail().catch(error => toast(error.message, true)); });
 $("nav-blacklist").addEventListener("click", () => { view = "blacklist"; document.body.classList.add("mobile-detail"); updateView(); renderList(); });
 $("back-to-list").addEventListener("click", () => { view = "groups"; document.body.classList.remove("mobile-detail"); updateView(); renderList(); });

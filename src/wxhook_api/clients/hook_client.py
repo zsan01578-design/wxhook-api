@@ -42,6 +42,7 @@ class HookClient:
             timeout=timeout,
             follow_redirects=False,
             transport=transport,
+            trust_env=False,
         )
 
     async def __aenter__(self) -> "HookClient":

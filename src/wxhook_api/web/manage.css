@@ -6,3 +6,5 @@
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 .group-avatar .member-avatar{width:auto;height:auto;min-width:0;border-radius:3px}
 .group-main{min-height:0}.group-header{flex:none}.tab-content{min-height:0;overflow-y:auto}.inspector{overflow-y:auto}.detail-footer{flex:none}
+.sync-bar{display:flex;align-items:center;justify-content:space-between;gap:15px;margin:17px 32px 0;padding:12px 15px;background:#f0f7f3;border:1px solid #e0ece4;border-radius:7px;font-size:10px;color:#799082}.sync-bar>div{display:flex;align-items:center;gap:8px;min-width:0;line-height:1.8}.sync-bar .text-link{white-space:nowrap;flex:none}.message-search{display:flex;gap:9px;margin:0 0 16px}.message-search input{min-width:0;font-size:11px;padding:8px 10px}.message-pager{display:flex;align-items:center;justify-content:center;gap:16px;margin-top:22px;color:#97a49b;font-size:10px}@media(max-width:760px){.sync-bar{margin:12px 15px 0;font-size:9px;padding:9px 10px;gap:9px}.sync-bar .text-link{font-size:9px}.message-search input{font-size:10px}.message-search .button{font-size:10px}}
+.message-pager{margin:0 0 20px}

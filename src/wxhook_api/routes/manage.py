@@ -52,7 +52,19 @@ class MemberCreate(MemberPatch):
 async def state(request: Request):
     manager = request.app.state.groups
     groups = await manager.groups(request.app.state.douyin.options.settings)
-    return JSONResponse({"groups": groups, "blocked_members": await manager.members(blocked_only=True), "startup": request.app.state.launcher_status}, headers={"Cache-Control": "no-store"})
+    return JSONResponse({"groups": groups, "blocked_members": await manager.members(blocked_only=True), "startup": request.app.state.launcher_status, "sync": request.app.state.wechat_sync.status}, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/sync", status_code=202)
+async def sync_now(request: Request):
+    if not request.app.state.wechat_sync.request():
+        raise HTTPException(409, "自动同步已关闭，请启用 WXHOOK_SYNC_ENABLED 后重启")
+    return {"scheduled": True, "sync": request.app.state.wechat_sync.status}
+
+
+@router.get("/groups/{group}/messages")
+async def messages(group: GroupId, request: Request, page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=200), q: str = Query("", max_length=200)):
+    return JSONResponse(await request.app.state.groups.messages(group, page=page, size=size, query=q), headers={"Cache-Control": "no-store"})
 
 
 @router.post("/groups")

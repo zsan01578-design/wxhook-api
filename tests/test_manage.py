@@ -123,7 +123,7 @@ async def test_callbacks_discover_groups_and_members_and_preserve_local_names(tm
         await client.post("/receiveChatBotMsg", json=payload)
         await app.state.event_dispatcher._queue.join()
         group = next(row for row in (await client.get("/api/manage/state")).json()["groups"] if row["id"] == "new@chatroom")
-        assert group["member_count"] == 1 and group["message_count"] == 2
+        assert group["member_count"] == 1 and group["message_count"] == 1
         assert group["name"] == "本地备注" and group["last_message"] == payload["content"]
         assert not group["douyin_enabled"]
 
