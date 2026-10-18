@@ -1,4 +1,4 @@
-"""PyCharm entry point: start WeChat, the API and the message page together."""
+"""PyCharm entry point: connect WeChat, start the API and open management."""
 
 from pathlib import Path
 import sys

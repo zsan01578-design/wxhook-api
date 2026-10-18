@@ -25,7 +25,8 @@ logger = logging.getLogger("uvicorn.error")
 @dataclass(frozen=True)
 class LauncherSettings:
     wechat_path: Path
-    open_browser: bool = False
+    open_browser: bool = True
+    show_wechat_window: bool = False
 
 
 def load_launcher_settings(path: Path | None = None) -> LauncherSettings:
@@ -35,10 +36,13 @@ def load_launcher_settings(path: Path | None = None) -> LauncherSettings:
     executable = Path(os.getenv("WXHOOK_WECHAT_PATH") or values.get("wechat-path", "F:/app/Weixin/Weixin.exe")).expanduser()
     if not executable.is_absolute():
         executable = path.parent / executable
-    open_browser = values.get("open-browser", False)
+    open_browser = values.get("open-browser", True)
     if not isinstance(open_browser, bool):
         raise ValueError("launcher.yml 中的 open-browser 必须为 true 或 false")
-    return LauncherSettings(wechat_path=executable, open_browser=open_browser)
+    show_window = values.get("show-wechat-window", False)
+    if not isinstance(show_window, bool):
+        raise ValueError("launcher.yml 中的 show-wechat-window 必须为 true 或 false")
+    return LauncherSettings(wechat_path=executable, open_browser=open_browser, show_wechat_window=show_window)
 
 
 def service_url(settings: Settings) -> str:
@@ -173,14 +177,13 @@ async def run_service(settings: Settings, options: LauncherSettings) -> None:
                 await asyncio.to_thread(webbrowser.open, f"{service_url(settings)}/")
             except Exception:
                 logger.warning("无法自动打开浏览器，请手动访问 %s/", service_url(settings))
-        # Open the web tool first, then bring the native client in front of it.
-        # This also runs when Hook is already available and no process is spawned.
-        window_task = asyncio.create_task(present_wechat(options))
+        window_task = asyncio.create_task(present_wechat(options)) if options.show_wechat_window else None
         try:
             await manage_wechat(app, settings, options)
         finally:
-            window_task.cancel()
-            await asyncio.gather(window_task, return_exceptions=True)
+            if window_task is not None:
+                window_task.cancel()
+                await asyncio.gather(window_task, return_exceptions=True)
 
     task = asyncio.create_task(after_listening())
     try:
@@ -223,7 +226,8 @@ def main() -> None:
             if options.open_browser:
                 webbrowser.open(f"{service_url(settings)}/")
             start_wechat(options)
-            asyncio.run(present_wechat(options))
+            if options.show_wechat_window:
+                asyncio.run(present_wechat(options))
             return
         # Uvicorn owns the listening socket and reports the original bind error.
         # A separate bind probe can disagree with its socket reuse behaviour.

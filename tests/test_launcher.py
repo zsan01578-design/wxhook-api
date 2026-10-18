@@ -18,8 +18,29 @@ def test_launcher_path_is_relative_to_its_config_and_env_can_override(tmp_path, 
     options = launcher.load_launcher_settings(config)
     assert options.wechat_path == tmp_path / "client" / "Weixin.exe"
     assert options.open_browser is False
+    assert options.show_wechat_window is False
     monkeypatch.setenv("WXHOOK_WECHAT_PATH", str(tmp_path / "override.exe"))
     assert launcher.load_launcher_settings(config).wechat_path == tmp_path / "override.exe"
+
+
+def test_launcher_defaults_open_management_without_presenting_wechat(tmp_path):
+    options = launcher.load_launcher_settings(tmp_path / "missing.yml")
+    assert options.open_browser is True
+    assert options.show_wechat_window is False
+
+
+@pytest.mark.parametrize("setting", ["open-browser", "show-wechat-window"])
+def test_launcher_rejects_non_boolean_window_settings(tmp_path, setting):
+    config = tmp_path / "launcher.yml"
+    config.write_text(f'{setting}: "false"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=setting):
+        launcher.load_launcher_settings(config)
+
+
+def test_launcher_can_explicitly_enable_wechat_window(tmp_path):
+    config = tmp_path / "launcher.yml"
+    config.write_text("show-wechat-window: true\n", encoding="utf-8")
+    assert launcher.load_launcher_settings(config).show_wechat_window is True
 
 
 def test_existing_wechat_is_reused_without_spawning_a_process(monkeypatch):
@@ -213,12 +234,12 @@ async def test_native_window_is_presented_after_browser_even_when_hook_is_runnin
 
     monkeypatch.setattr(launcher, "present_wechat", present)
     monkeypatch.setattr(launcher, "manage_wechat", manage)
-    await launcher.run_service(load_settings(), launcher.LauncherSettings(Path("Weixin.exe"), open_browser=True))
+    await launcher.run_service(load_settings(), launcher.LauncherSettings(Path("Weixin.exe"), open_browser=True, show_wechat_window=True))
     assert events == ["browser", "native"]
 
 
 def test_reusing_service_also_presents_native_wechat(monkeypatch):
-    options = launcher.LauncherSettings(Path("Weixin.exe"), open_browser=False)
+    options = launcher.LauncherSettings(Path("Weixin.exe"), open_browser=False, show_wechat_window=True)
     monkeypatch.setattr(launcher, "load_launcher_settings", lambda: options)
     monkeypatch.setattr(launcher, "existing_service", lambda settings: True)
     start = Mock()
@@ -231,6 +252,57 @@ def test_reusing_service_also_presents_native_wechat(monkeypatch):
     start.assert_called_once_with(options)
     present.assert_awaited_once_with(options)
     serve.assert_not_called()
+
+
+@pytest.mark.parametrize("open_browser", [True, False])
+async def test_service_opens_management_after_listening_without_presenting_wechat(monkeypatch, open_browser):
+    managed = asyncio.Event()
+    server = SimpleNamespace(started=False)
+    browser = Mock(return_value=True)
+    present = AsyncMock()
+
+    async def serve():
+        await asyncio.sleep(0)
+        browser.assert_not_called()
+        server.started = True
+        await asyncio.wait_for(managed.wait(), timeout=2)
+
+    async def manage(*args):
+        managed.set()
+        await asyncio.Event().wait()
+
+    server.serve = serve
+    monkeypatch.setattr(launcher.uvicorn, "Server", lambda config: server)
+    monkeypatch.setattr(launcher.webbrowser, "open", browser)
+    monkeypatch.setattr(launcher, "present_wechat", present)
+    monkeypatch.setattr(launcher, "manage_wechat", manage)
+    settings = load_settings()
+    await launcher.run_service(settings, launcher.LauncherSettings(Path("Weixin.exe"), open_browser=open_browser))
+    if open_browser:
+        browser.assert_called_once_with(f"{launcher.service_url(settings)}/")
+    else:
+        browser.assert_not_called()
+    present.assert_not_called()
+
+
+@pytest.mark.parametrize("open_browser", [True, False])
+def test_reusing_service_opens_management_without_presenting_wechat(monkeypatch, open_browser):
+    options = launcher.LauncherSettings(Path("Weixin.exe"), open_browser=open_browser)
+    browser = Mock(return_value=True)
+    present = AsyncMock()
+    start = Mock()
+    monkeypatch.setattr(launcher, "load_launcher_settings", lambda: options)
+    monkeypatch.setattr(launcher, "existing_service", lambda settings: True)
+    monkeypatch.setattr(launcher.webbrowser, "open", browser)
+    monkeypatch.setattr(launcher, "present_wechat", present)
+    monkeypatch.setattr(launcher, "start_wechat", start)
+    launcher.main()
+    if open_browser:
+        browser.assert_called_once_with(f"{launcher.service_url(load_settings())}/")
+    else:
+        browser.assert_not_called()
+    present.assert_not_called()
+    start.assert_called_once_with(options)
 
 
 @pytest.mark.parametrize("revision", [None, "old-source-revision", "current-source-revision"])

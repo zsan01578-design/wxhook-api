@@ -1,4 +1,6 @@
 # 测试电脑微信主程序的位置，需与 version.dll、version.yml 在同一目录。
 wechat-path: 'F:\app\Weixin\Weixin.exe'
-# 同时打开网页收发工具；只想打开原版微信窗口时改为 false。
-open-browser: false
+# 服务就绪后自动打开浏览器访问群聊管理系统。
+open-browser: true
+# 默认不主动唤起微信窗口；需要自动恢复并置前时改为 true。
+show-wechat-window: false
