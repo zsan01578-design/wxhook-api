@@ -195,7 +195,7 @@ function renderHeader(group) {
   $("group-header").replaceChildren(avatar(group, true), copy, tools);
   $("member-tab-count").textContent = group.member_count;
   $("restriction-banner").hidden = group.active;
-  $("restriction-banner").textContent = group.blocked ? "此群已加入黑名单，所有自动功能均已停止。移出黑名单后恢复原有配置。" : "此群的自动功能已暂停，打开群功能总开关即可恢复。";
+  $("restriction-banner").textContent = state.chatbot?.account_error ? "检测到微信账号变化，全部自动功能已暂停。请切回原账号后重启；新账号须使用独立资料库。" : group.blocked ? "此群已加入黑名单，所有自动功能均已停止。移出黑名单后恢复原有配置。" : "此群的自动功能已暂停，打开群功能总开关即可恢复。";
   document.querySelectorAll("[data-tab]").forEach(node => { node.classList.toggle("active", node.dataset.tab === tab); node.setAttribute("aria-current", node.dataset.tab === tab ? "page" : "false"); });
   updateChatMode();
 }
@@ -215,6 +215,7 @@ function renderFeatures(group) {
   const list = el("div", "feature-list");
   const features = [
     ["chat", "@机器人问答", "只有被 @ 才回复；每条提问最多一条消息，不连续发言。", "chat_enabled", !group.active],
+    ["chat", "自动 AI 日总结", "每天 18:00 后将本群文本样本发给当前模型；需同时开启 @问答。默认关闭。", "summary_enabled", !group.active],
     ["video", "分享解析", "自动识别群内抖音、小红书、B站分享，解析视频与图集。", "douyin_enabled", !group.active],
     ["download", "自动保存视频与图片", "解析成功后保存到本机，并用于自动回传到来源群。", "auto_download", !group.active || !group.douyin_enabled]
   ];
@@ -276,7 +277,7 @@ function renderInspector(group) {
   });
   summaryActions.append(refreshSummary); summaryHeading.append(summaryActions); summarySection.append(summaryHeading);
   if (chatSummary?.group_id !== group.id || !chatSummary) {
-    summarySection.append(el("p", "inspector-hint", "今天 18:00 自动生成，也可以点击刷新总结。"));
+    summarySection.append(el("p", "inspector-hint", group.summary_enabled ? "自动总结已开启；群功能与 @问答开启时，18:00 后生成。" : "自动总结已关闭。点击刷新将本群文本样本发送给当前模型。"));
   } else {
     summarySection.append(el("div", "chat-summary-text", chatSummary.summary), el("p", "inspector-hint", `${chatSummary.message_count} 条成员消息 · 更新于 ${dateText(chatSummary.updated_at, true)}`));
   }
@@ -748,7 +749,7 @@ function searchSettingsDialog(settings = {}) {
   count.type = "number"; count.min = "1"; count.max = "10"; count.required = true;
   const limit = formField(form, "每日搜索上限", "默认 1000 次", String(settings.daily_limit ?? 1000), false, 7);
   limit.type = "number"; limit.min = "1"; limit.max = "100000"; limit.required = true;
-  form.append(el("p", "form-note", `按本机日期统计，仅成功搜索计数，跨天自动归零。今日已用 ${settings.used_today ?? 0} 次，剩余 ${settings.remaining_today ?? 0} 次。`));
+  form.append(el("p", "form-note", `按北京时间统计，请求前预留次数，失败或超时不退回，跨天自动归零。今日已用 ${settings.used_today ?? 0} 次，剩余 ${settings.remaining_today ?? 0} 次。`));
   const result = el("div", "model-test-result"); result.setAttribute("role", "status"); result.setAttribute("aria-live", "polite"); result.hidden = true;
   form.append(result);
   const footer = formFooter(form, "保存搜索配置");

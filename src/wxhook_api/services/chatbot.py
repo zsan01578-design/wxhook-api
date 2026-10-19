@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 import hashlib
 import html
 import json
@@ -12,12 +12,42 @@ from uuid import uuid4
 from wxhook_api.clients.hook_client import HookClient
 from wxhook_api.core.chatbot_config import ChatbotOptions, save_mention_names
 from wxhook_api.schemas.events import CallbackEvent
-from wxhook_api.services.douyin_delivery import DeliveryError, DouyinMessenger
+from wxhook_api.services.douyin_delivery import DeliveryBlocked, DeliveryError, DouyinMessenger
 from wxhook_api.services.groups import GroupManager, event_group, now
+from wxhook_api.core.ai_safety import ai_scope, ai_permission
+from wxhook_api.services.chat_context import ConversationTurn, GroupConversations
 
 
 class AnswerProvider(Protocol):
     async def answer(self, question: str, context: str | None = None) -> str: ...
+
+
+class GroupQuestionQueue(asyncio.Queue):
+    """Keep each group's ordering while letting other groups use free workers."""
+    def __init__(self, maxsize):
+        super().__init__(maxsize)
+        self._busy_groups = set()
+        self._changed = asyncio.Event()
+
+    def put_nowait(self, item):
+        super().put_nowait(item)
+        self._changed.set()
+
+    async def get(self):
+        while True:
+            self._changed.clear()
+            for index, item in enumerate(self._queue):
+                if item["group"] not in self._busy_groups:
+                    del self._queue[index]
+                    self._busy_groups.add(item["group"])
+                    self._wakeup_next(self._putters)
+                    return item
+            await self._changed.wait()
+
+    def finish(self, group):
+        self._busy_groups.discard(group)
+        self.task_done()
+        self._changed.set()
 
 
 def mention_ids(event: CallbackEvent) -> tuple[set[str], bool]:
@@ -73,13 +103,17 @@ class MentionChatService:
         self.default_group_enabled: Callable[[str, str], bool] = lambda group, sender: False
         self._client: HookClient | None = None
         self._messenger: DouyinMessenger | None = None
-        self._queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)
+        self._queue = GroupQuestionQueue(maxsize=100)
         self._worker: asyncio.Task | None = None
+        self._workers: list[asyncio.Task] = []
+        self._pending_groups = Counter()
+        self._pending_members = Counter()
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._identity = options.bot_wxid
         self._names = options.mention_names
         self._profile_checked = 0.0
-        self._profile_valid = bool(options.bot_wxid and options.mention_names)
+        self._profile_valid = False
+        self._identity_error = ""
         self._accepting = False
         self.last_error = ""
         self.sent = 0
@@ -89,6 +123,7 @@ class MentionChatService:
         self.summary_service = None
         self.tools_service = None
         self.search_service = None
+        self.conversations = GroupConversations()
 
     @property
     def identity(self) -> str:
@@ -96,7 +131,8 @@ class MentionChatService:
 
     def snapshot(self) -> dict:
         return {"enabled": self.options.enabled, "answer_configured": self.provider is not None,
-                "identity_known": bool(self._identity and self._profile_valid), "mention_names": list(self._names),
+                "identity_known": bool(self._identity and self._profile_valid and not (self.groups and self.groups.account_error)), "mention_names": list(self._names),
+                "account_error": self.groups.account_error if self.groups else "",
                 "configured_mention_names": list(self.options.mention_names),
                 "pending": self._queue.qsize(), "sent": self.sent, "last_error": self.last_error,
                 "recent_events": [dict(item) for item in self._recent.values()]}
@@ -137,23 +173,37 @@ class MentionChatService:
 
     async def start(self, client: HookClient) -> None:
         self._client = client
-        self._messenger = DouyinMessenger(client)
+        self._messenger = DouyinMessenger(client, account_check=self.verify_account)
         self._accepting = self.options.enabled
         if self._accepting:
-            self._worker = asyncio.create_task(self._run())
+            self._workers = [asyncio.create_task(self._run()) for _ in range(2)]
+            self._worker = self._workers[0]
 
     async def stop(self) -> None:
         self._accepting = False
-        if self._worker:
-            self._worker.cancel()
-            await asyncio.gather(self._worker, return_exceptions=True)
-            self._worker = None
+        for worker in self._workers:
+            worker.cancel()
+        await asyncio.gather(*self._workers, return_exceptions=True)
+        self._workers = []
+        self._worker = None
+        while not self._queue.empty():
+            self._queue.get_nowait()
+            self._queue.task_done()
+        self._pending_groups.clear()
+        self._pending_members.clear()
+        self.conversations.clear()
 
-    async def _identify(self) -> bool:
-        if self.options.bot_wxid and self.options.mention_names:
-            return True
+    async def verify_account(self) -> bool:
+        return await self._identify(force=True)
+
+    async def _identify(self, *, force: bool = False) -> bool:
+        if self.groups and self.groups.account_error:
+            self._profile_valid = False
+            self.last_error = self.groups.account_error
+            self._identity_error = self.last_error
+            return False
         now = asyncio.get_running_loop().time()
-        if self._profile_checked and now - self._profile_checked < 30:
+        if not force and self._profile_checked and now - self._profile_checked < 30:
             return self._profile_valid
         self._profile_checked = now
         try:
@@ -168,6 +218,8 @@ class MentionChatService:
             if self.options.bot_wxid and identity != self.options.bot_wxid:
                 self._profile_valid = False
                 self.last_error = "配置的机器人 wxid 与当前登录账号不一致"
+                self._identity_error = self.last_error
+                self.groups.suspend_account(self.last_error)
                 return False
             await self.groups.claim_account(identity)
             self._identity = identity
@@ -178,11 +230,14 @@ class MentionChatService:
             else:
                 self._profile_names = ()
             self._names = tuple(dict.fromkeys((*self.options.mention_names, *self._profile_names)))
-            self.last_error = ""
+            if self.last_error == self._identity_error:
+                self.last_error = ""
+            self._identity_error = ""
             return True
         except Exception:
             self._profile_valid = False
             self.last_error = "无法确认机器人账号，请检查微信连接或本机 chatbot.local.yml"
+            self._identity_error = self.last_error
             return False
 
     async def receive(self, event: CallbackEvent) -> bool:
@@ -206,7 +261,7 @@ class MentionChatService:
         if not ids and "@" not in event.content:
             report.update(status="no_mention", message="消息中没有 @提及，不触发问答")
             return False
-        if not await self._identify() or self.own_message(event):
+        if not await self.verify_account() or self.own_message(event):
             report.update(status="identity", message=self.last_error or "消息来自机器人自己，不触发问答")
             return self.own_message(event)
         names = await self._group_names(group)
@@ -230,19 +285,28 @@ class MentionChatService:
         self._seen[item] = None
         while len(self._seen) > 1000:
             self._seen.popitem(last=False)
+        if self._pending_groups[group] >= 3 or self._pending_members[(group, event.sender)] >= 2:
+            report.update(status="rate_limited", message="此群或成员的待处理问题过多，请等待已有回复后重试")
+            return True
         try:
             report.update(status="queued", message="已识别 @机器人，等待调用模型")
             self._queue.put_nowait({"group": group, "sender": event.sender, "key": key, "question": question, "report": report})
+            self._pending_groups[group] += 1
+            self._pending_members[(group, event.sender)] += 1
         except asyncio.QueueFull:
             self.last_error = "问答队列已满，未创建本次回复"
             report.update(status="queue_full", message=self.last_error)
         return True
 
-    async def _answer(self, question: str, group: str = "", *, sender: str | None = None, key: str = "") -> str:
+    async def _answer(self, question: str, group: str = "", *, sender: str | None = None, key: str = "",
+                      turn: ConversationTurn | None = None) -> str:
         if not question:
             return "我在，请在 @ 后写下你的问题。"
         if len(question) > 8000:
             return "问题太长了，请缩短后重新 @ 我。"
+        if re.sub(r"\s+", "", question).rstrip("。！!？?") in {"清空上下文", "重置对话"}:
+            self.conversations.clear_group(self.identity, group)
+            return "本群对话上下文已清空。"
         if self.tools_service and sender is not None:
             result = await self.tools_service.reminders.chat_command(question, group, sender, key)
             if result is not None:
@@ -264,19 +328,38 @@ class MentionChatService:
                 return f"暂时无法生成群聊总结：{self.last_error}"
         if self.provider is None:
             return "问答接口尚未配置，请联系管理员。"
+        provider = self.provider
+        conversation = None
+        if turn is not None:
+            turn.provider = provider
+            conversation = self.conversations.view(turn, provider,
+                allowed_sender=lambda member: self.groups.allowed(turn.group, member))
         try:
             async with asyncio.timeout(60):
-                context = None
-                if self.search_service is not None:
-                    context = await self.search_service.context(question)
-                if context:
-                    answer = await self.provider.answer(question, context=context)
+                with_search = getattr(provider, "answer_with_search", None)
+                if callable(with_search):
+                    if conversation is not None:
+                        answer = await with_search(question, self.search_service, conversation=conversation)
+                    else:
+                        answer = await with_search(question, self.search_service)
                 else:
-                    answer = await self.provider.answer(question)
+                    context = None
+                    if self.search_service is not None:
+                        try:
+                            context = await self.search_service.context(question)
+                        except Exception:
+                            self.last_error = "搜索不可用，已回退普通回答"
+                    answer = await provider.answer(question, context=context) if context else await provider.answer(question)
             if not isinstance(answer, str) or not answer.strip():
                 raise ValueError
+            if turn is not None:
+                turn.generated = True
             return answer.strip()
-        except Exception:
+        except Exception as exc:
+            from wxhook_api.services.chat_model import ModelError
+            if isinstance(exc, ModelError):
+                self.last_error = str(exc)
+                return self.last_error
             self.last_error = "问答接口返回失败或超时，请检查接口配置"
             return "暂时无法回答，请稍后重新 @ 我。"
 
@@ -291,12 +374,17 @@ class MentionChatService:
                 if not self.allowed(job["group"], job["sender"]):
                     report.update(status="policy", message="排队期间群开关或黑名单发生变化，已停止问答")
                     continue
+                if not await self.verify_account():
+                    report.update(status="identity", message=self.last_error)
+                    continue
                 claimed = await self.groups.claim_chat_reply(job["group"], job["key"])
                 if not claimed:
                     report.update(status="duplicate", message="此消息已处理或已尝试发送，不会重复回复；请发送新的提问")
                     continue
                 report.update(status="answering", message="正在等待模型回复")
-                answer = await self._answer(job["question"], job["group"], sender=job["sender"], key=job["key"])
+                turn = ConversationTurn(self.identity, job["group"], job["sender"], job["question"])
+                with ai_scope(job["group"], job["sender"]), ai_permission(lambda: self._accepting and self.allowed(job["group"], job["sender"])):
+                    answer = await self._answer(job["question"], job["group"], sender=job["sender"], key=job["key"], turn=turn)
                 limit = self.options.max_reply_chars
                 if len(answer) > limit:
                     answer = answer[:limit - 1] + "…"
@@ -312,13 +400,19 @@ class MentionChatService:
                     continue
                 report.update(status="sending", message="模型回复已生成，正在发送到微信群")
                 attempted = True
-                await self._messenger.text(job["group"], answer)
+                await self._messenger.text(job["group"], answer,
+                    allowed=lambda: self._accepting and self.options.enabled
+                        and self.allowed(job["group"], job["sender"]) and self.conversations.valid(turn))
                 status = "sent"
                 self.sent += 1
+                self.conversations.commit(turn, answer)
                 report.update(status="sent", message="Hook 已确认发送一条回复")
             except asyncio.CancelledError:
                 status = "unknown" if attempted else "interrupted"
                 raise
+            except DeliveryBlocked as exc:
+                status = "skipped"
+                report.update(status=status, message=str(exc))
             except DeliveryError as exc:
                 status = "unknown" if exc.uncertain else "failed"
                 self.last_error = "回复发送未确认，请检查群聊；同一条消息不会自动重发"
@@ -333,4 +427,8 @@ class MentionChatService:
                         await self.groups.finish_chat_reply(job["group"], job["key"], status)
                 except Exception:
                     self.last_error = "无法保存问答状态，请检查资料库；不会补发第二条消息"
-                self._queue.task_done()
+                self._queue.finish(job["group"])
+                for counts, scope in ((self._pending_groups, job["group"]), (self._pending_members, (job["group"], job["sender"]))):
+                    counts[scope] -= 1
+                    if counts[scope] <= 0:
+                        del counts[scope]

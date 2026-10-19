@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 import html
 import json
 import os
@@ -16,6 +16,10 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints, field_validator
 
 from wxhook_api.core.config import PROJECT_ROOT
+from wxhook_api.core.persistence import finish_before_cancel
+from wxhook_api.core.access import loopback
+from wxhook_api.core.secrets import protect_secret, reveal_secret
+from wxhook_api.core.ai_safety import MAX_RESPONSE_BYTES, check_ai_permission
 
 
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
@@ -47,6 +51,8 @@ class SearchSettings(BaseModel):
         except ValueError:
             raise ValueError("搜索 Base URL 端口无效") from None
         value = value.rstrip("/")
+        if parts.scheme == "http" and parts.hostname != "localhost" and not loopback(parts.hostname):
+            raise ValueError("远程搜索地址必须使用 HTTPS")
         if value.endswith("/tools/search"):
             value = value[:-len("/tools/search")]
         return value
@@ -117,11 +123,17 @@ class DeepSeekSearchProvider:
                 transport=self.transport,
                 follow_redirects=False,
             ) as client:
-                response = await client.post(
+                async with client.stream("POST",
                     self.base_url + "/tools/search",
                     headers={"Authorization": "Bearer " + self.api_key},
                     json={"query": query, "count": self.result_count},
-                )
+                ) as response:
+                    body = bytearray()
+                    if response.status_code == 200:
+                        async for chunk in response.aiter_bytes():
+                            if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
+                                raise SearchError("联网搜索返回内容过大，已回退普通回答。")
+                            body.extend(chunk)
         except (httpx.TimeoutException, TimeoutError):
             raise SearchError("联网搜索超时，已回退普通回答。") from None
         except httpx.RequestError:
@@ -134,7 +146,7 @@ class DeepSeekSearchProvider:
             }
             raise SearchError(hints.get(response.status_code, f"联网搜索服务返回 HTTP {response.status_code}。"))
         try:
-            payload = response.json()
+            payload = json.loads(body)
             rows = payload.get("results") if isinstance(payload, dict) else None
         except ValueError:
             raise SearchError("联网搜索返回了无法解析的数据。") from None
@@ -145,7 +157,7 @@ class DeepSeekSearchProvider:
             if not isinstance(row, dict):
                 continue
             title = _plain_text(row.get("title"), 200)
-            snippet = _plain_text(row.get("snippet"), 1000)
+            snippet = _plain_text(row.get("summary") or row.get("snippet"), 1000)
             if title or snippet:
                 results.append(SearchResult(title=title, snippet=snippet, url=_plain_text(row.get("url"), 2048)))
         return results
@@ -170,7 +182,7 @@ class WebSearchConfiguration:
         self.last_error = ""
         self._provider_override = provider
         self._transport = transport
-        self._now = now or (lambda: datetime.now().astimezone().date())
+        self._now = now or (lambda: datetime.now(timezone(timedelta(hours=8))).date())
         self._lock = asyncio.Lock()
         self._load()
         if chatbot is not None:
@@ -184,12 +196,27 @@ class WebSearchConfiguration:
             if not isinstance(raw, dict):
                 raise ValueError("search config must be an object")
             settings = {key: raw.get(key) for key in ("enabled", "base_url", "api_key", "result_count", "daily_limit")}
-            if "api_key" not in raw:
-                settings["api_key"] = None
-            self.settings = SearchSettings.model_validate(settings)
-            self.usage_date = str(raw.get("usage_date") or "")
-            self.used_today = max(0, int(raw.get("used_today") or 0))
+            settings["api_key"] = reveal_secret(raw.get("api_key"))
+            settings = SearchSettings.model_validate(settings)
+            usage_date = raw.get("usage_date", "")
+            used_today = raw.get("used_today", 0)
+            if ("usage_date" in raw) != ("used_today" in raw):
+                raise ValueError("Incomplete search usage")
+            if not isinstance(usage_date, str) or type(used_today) is not int or used_today < 0:
+                raise ValueError("Invalid search usage")
+            if usage_date:
+                if date.fromisoformat(usage_date).isoformat() != usage_date or usage_date > self._today():
+                    raise ValueError("Invalid search usage date")
+            elif used_today:
+                raise ValueError("Search usage has no date")
+            if os.name == "nt" and raw.get("api_key") and not raw["api_key"].startswith("dpapi:v1:"):
+                raw["api_key"] = protect_secret(settings.api_key.get_secret_value() if settings.api_key else None)
+                self._write(raw)
+            self.settings = settings
+            self.usage_date, self.used_today = usage_date, used_today
         except (OSError, ValueError, TypeError):
+            self.settings = SearchSettings()
+            self.usage_date, self.used_today = "", 0
             self.load_error = "无法读取本机联网搜索配置，请重新保存。"
 
     def snapshot(self) -> dict:
@@ -213,32 +240,33 @@ class WebSearchConfiguration:
     def _today(self) -> str:
         return self._now().isoformat()
 
-    async def _save(self) -> None:
+    async def _save(self, settings: SearchSettings | None = None) -> None:
+        settings = settings or self.settings
         payload = {
-            "enabled": self.settings.enabled,
-            "base_url": self.settings.base_url,
-            "api_key": self.settings.api_key.get_secret_value() if self.settings.api_key else None,
-            "result_count": self.settings.result_count,
-            "daily_limit": self.settings.daily_limit,
+            "enabled": settings.enabled,
+            "base_url": settings.base_url,
+            "api_key": protect_secret(settings.api_key.get_secret_value() if settings.api_key else None),
+            "result_count": settings.result_count,
+            "daily_limit": settings.daily_limit,
             "usage_date": self.usage_date,
             "used_today": self.used_today,
         }
 
-        def write():
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = None
-            try:
-                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent, delete=False) as file:
-                    temporary = Path(file.name)
-                    json.dump(payload, file, ensure_ascii=False, indent=2)
-                    file.flush()
-                    os.fsync(file.fileno())
-                os.replace(temporary, self.path)
-            finally:
-                if temporary and temporary.exists():
-                    temporary.unlink()
+        await asyncio.to_thread(self._write, payload)
 
-        await asyncio.to_thread(write)
+    def _write(self, payload):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent, delete=False) as file:
+                temporary = Path(file.name)
+                json.dump(payload, file, ensure_ascii=False, indent=2)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, self.path)
+        finally:
+            if temporary and temporary.exists():
+                temporary.unlink()
 
     async def save(self, requested: SearchSettings) -> dict:
         async with self._lock:
@@ -247,14 +275,16 @@ class WebSearchConfiguration:
                 if settings.base_url != self.settings.base_url:
                     raise SearchError("更换搜索 Base URL 时请重新填写 API Key。")
                 settings = settings.model_copy(update={"api_key": self.settings.api_key})
-            self.settings = settings
-            self.load_error = ""
-            await self._save()
-        self.last_error = ""
+            async def commit():
+                await self._save(settings)
+                self.settings = settings
+                self.load_error = ""
+                self.last_error = ""
+            await finish_before_cancel(commit())
         return {"saved": True, "settings": self.snapshot()}
 
     def _provider(self) -> DeepSeekSearchProvider | None:
-        if not self.settings.enabled or not self.settings.api_key:
+        if self.load_error or not self.settings.enabled or not self.settings.api_key:
             return None
         if self._provider_override is not None:
             return self._provider_override
@@ -266,33 +296,30 @@ class WebSearchConfiguration:
         )
 
     async def context(self, question: str) -> str | None:
-        provider = self._provider()
-        if provider is None:
-            return None
-        reserved_date = ""
         async with self._lock:
+            provider = self._provider()
+            if provider is None:
+                return None
             today = self._today()
             if self.usage_date != today:
                 self.usage_date, self.used_today = today, 0
             if self.used_today >= self.settings.daily_limit:
                 return None
             self.used_today += 1
-            reserved_date = today
-            await self._save()
+            try:
+                await finish_before_cancel(self._save())
+            except OSError:
+                self.last_error = "无法保存搜索额度，已跳过搜索并回退普通回答。"
+                return None
         try:
+            check_ai_permission()
             results = await provider.search(question)
         except SearchError as exc:
-            async with self._lock:
-                if self.usage_date == reserved_date and self.used_today > 0:
-                    self.used_today -= 1
-                    await self._save()
+            # A timeout or error does not prove the provider did not bill it.
+            # Keep the durable reservation for every outbound attempt.
             self.last_error = str(exc)
             return None
         except Exception:
-            async with self._lock:
-                if self.usage_date == reserved_date and self.used_today > 0:
-                    self.used_today -= 1
-                    await self._save()
             self.last_error = "联网搜索失败，已回退普通回答。"
             return None
         self.last_error = ""

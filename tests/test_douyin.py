@@ -17,6 +17,16 @@ from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, checked
 
 
 GROUP = "123456789@chatroom"
+
+
+def profile_transport():
+    """Media integration tests use a local synthetic Hook account."""
+    def respond(request):
+        assert request.url.path == "/GetSelfProfile"
+        return httpx.Response(200, json={"wxid": "wxid_robot", "nickname": "机器人"})
+    return httpx.MockTransport(respond)
+
+
 ITEM = "7360323126909095219"
 SHORT = "https://v.douyin.com/testshare/"
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aQ1cAAAAASUVORK5CYII=")
@@ -106,7 +116,7 @@ async def test_callback_ack_is_fast_while_image_album_downloads_in_background(tm
         return httpx.Response(200, content=PNG, headers={"Content-Type": "image/png"})
 
     service = DouyinService(options(tmp_path), transport=httpx.MockTransport(respond))
-    app = create_app(douyin_service=service)
+    app = create_app(douyin_service=service, hook_transport=profile_transport())
 
     async def observe(event):
         received.set()
@@ -176,7 +186,7 @@ async def test_video_save_and_size_limit_failure_cleanup(tmp_path):
 
 async def test_configuration_is_validated_persisted_and_effective_without_restart(tmp_path, monkeypatch):
     service = DouyinService(options(tmp_path, auto_download=False))
-    app = create_app(douyin_service=service)
+    app = create_app(douyin_service=service, hook_transport=profile_transport())
     async with LifespanManager(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         invalid = await client.post("/api/douyin/config", json={"enabled": True, "groups": ["群昵称"], "auto_download": True})
         assert invalid.status_code == 422

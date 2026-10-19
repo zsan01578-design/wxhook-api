@@ -35,6 +35,7 @@ class GroupPatch(BaseModel):
     douyin_enabled: bool = False
     auto_download: bool = True
     chat_enabled: bool = False
+    summary_enabled: bool = False
 
 
 class MemberPatch(BaseModel):

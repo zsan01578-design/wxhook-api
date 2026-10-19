@@ -6,7 +6,7 @@ import re
 from uuid import uuid4
 
 from wxhook_api.services.chat_summary import CHINA
-from wxhook_api.services.douyin_delivery import DeliveryError
+from wxhook_api.services.douyin_delivery import DeliveryBlocked, DeliveryError
 from wxhook_api.services.groups import now
 
 
@@ -155,7 +155,7 @@ class ReminderService:
             """SELECT r.* FROM member_reminders r JOIN group_tasks t ON t.reminder_id=r.id
                 WHERE r.status='pending' AND (t.status='open' OR (t.status='done' AND t.completion_reason='deadline'))
                 AND r.due_at<=? ORDER BY r.due_at LIMIT 100""", (timestamp,)).fetchall())
-        if not rows or not await self.chatbot._identify():
+        if not rows or not await self.chatbot.verify_account():
             return
         for row in rows:
             group, sender = row['group_id'], row['sender']
@@ -178,11 +178,19 @@ class ReminderService:
                 task_active = await self.tools.db(lambda db: db.execute("""SELECT 1 FROM group_tasks WHERE reminder_id=?
                     AND (status='open' OR (status='done' AND completion_reason='deadline'))""", (row['id'],)).fetchone())
                 if task_active and self.chatbot._accepting and self.chatbot.allowed(group, sender):
-                    await self.chatbot._messenger.text(group, f"@{name}\u2005提醒时间到了：{row['title']}", atlist=[sender])
+                    async def still_active():
+                        active = await self.tools.db(lambda db: db.execute("""SELECT 1 FROM group_tasks t
+                            JOIN member_reminders r ON r.id=t.reminder_id
+                            WHERE r.id=? AND r.status='sending'
+                            AND (t.status='open' OR (t.status='done' AND t.completion_reason='deadline'))""", (row['id'],)).fetchone())
+                        return bool(active and self.chatbot._accepting and self.chatbot.allowed(group, sender))
+                    await self.chatbot._messenger.text(group, f"@{name}\u2005提醒时间到了：{row['title']}", atlist=[sender], allowed=still_active)
                     status = "sent"
             except asyncio.CancelledError:
                 status = "unknown"
                 raise
+            except DeliveryBlocked:
+                status = "skipped"
             except DeliveryError as exc:
                 status = "unknown" if exc.uncertain else "failed"
                 self.tools.last_error = "成员提醒发送未确认或失败，同一提醒不会自动重发。"

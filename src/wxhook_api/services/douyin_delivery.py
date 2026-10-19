@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import warnings
+import inspect
+from typing import Awaitable, Callable
 
 from wxhook_api.clients.hook_client import HookClient, HookResponse
 from wxhook_api.core.errors import HookTransportError
@@ -13,6 +15,14 @@ class DeliveryError(Exception):
     def __init__(self, message: str, *, uncertain: bool = False):
         super().__init__(message)
         self.uncertain = uncertain
+
+
+class DeliveryBlocked(DeliveryError):
+    """A current policy stopped delivery before any Hook send attempt."""
+
+
+SendPolicy = Callable[[], bool | Awaitable[bool]]
+TextBuilder = Callable[[], str | None | Awaitable[str | None]]
 
 
 def _confirmed(response: HookResponse) -> None:
@@ -60,10 +70,37 @@ def prepare_image(path: Path) -> tuple[Path, str]:
 
 
 class DouyinMessenger:
-    def __init__(self, client: HookClient):
+    def __init__(self, client: HookClient, *, account_check: Callable[[], Awaitable[bool]] | None = None):
         self.client = client
+        self.account_check = account_check
 
-    async def text(self, group: str, message: str, *, atlist: list[str] | None = None) -> None:
+    async def _verify_account(self):
+        if self.account_check is not None and not await self.account_check():
+            raise DeliveryError("无法确认微信账号或账号已变化，已停止自动发送。")
+
+    async def _verify_send(self, allowed: SendPolicy | None):
+        await self._verify_account()
+        await self._verify_policy(allowed)
+
+    async def _verify_policy(self, allowed: SendPolicy | None):
+        if allowed is not None:
+            result = allowed()
+            if inspect.isawaitable(result):
+                result = await result
+            if not result:
+                raise DeliveryBlocked("发送前限制已变化，已停止自动发送。")
+
+    async def text(self, group: str, message: str, *, atlist: list[str] | None = None,
+                   allowed: SendPolicy | None = None, build_text: TextBuilder | None = None) -> None:
+        await self._verify_account()
+        if build_text is not None:
+            current = build_text()
+            if inspect.isawaitable(current):
+                current = await current
+            if not isinstance(current, str) or not current.strip():
+                raise DeliveryBlocked("当前没有符合条件的内容，已跳过自动发送。")
+            message = current
+        await self._verify_policy(allowed)
         try:
             response = await self.client.send_text(TextMessageRequest(wxidorgid=group, msg=message, atlist=atlist))
         except HookTransportError as exc:
@@ -76,7 +113,8 @@ class DouyinMessenger:
             raise DeliveryError("本地媒体文件不存在，未发送")
         return await asyncio.to_thread(prepare_image, path) if kind == "image" else (path, "file")
 
-    async def send(self, group: str, path: Path, mode: str) -> None:
+    async def send(self, group: str, path: Path, mode: str, *, allowed: SendPolicy | None = None) -> None:
+        await self._verify_send(allowed)
         try:
             if mode == "image":
                 response = await self.client.send_image(ImageMessageRequest(wxidorgid=group, path=str(path)))

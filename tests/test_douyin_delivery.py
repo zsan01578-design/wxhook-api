@@ -23,9 +23,12 @@ from wxhook_api.services.douyin_delivery import DouyinMessenger, prepare_image
 @asynccontextmanager
 async def scenario(tmp_path, monkeypatch, *, images=2, video=False, broken_page=False, hook=None, settings=None, media=PNG):
     monkeypatch.setenv("WXHOOK_DOUYIN_FEEDBACK_ENABLED", "true")
-    context = SimpleNamespace(hook_calls=[], order=[])
+    context = SimpleNamespace(hook_calls=[], profile_calls=[], order=[])
 
     async def hook_response(request):
+        if request.url.path == "/GetSelfProfile":
+            context.profile_calls.append(request.url.path)
+            return httpx.Response(200, json={"wxid": "wxid_robot", "nickname": "机器人"})
         payload = json.loads(request.content)
         context.hook_calls.append((request.url.path, payload))
         context.order.append(request.url.path)

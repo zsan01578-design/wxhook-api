@@ -5,7 +5,7 @@ import httpx
 from asgi_lifespan import LifespanManager
 
 from tests.test_manage import make_service
-from tests.test_douyin import GROUP
+from tests.test_douyin import GROUP, profile_transport
 from wxhook_api.main import create_app
 from wxhook_api.services.chat_summary import CHINA, ChatSummaryService, is_summary_request, local_date
 from wxhook_api.services.groups import GroupManager
@@ -30,7 +30,7 @@ def test_summary_request_variants():
 
 
 async def test_summary_refresh_saves_today_and_reuses_until_forced(tmp_path):
-    app = create_app(douyin_service=make_service(tmp_path))
+    app = create_app(douyin_service=make_service(tmp_path), hook_transport=profile_transport())
     app.state.chat_model.transport = httpx.MockTransport(completion)
     async with LifespanManager(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         await app.state.groups.import_history(GROUP, [
@@ -48,7 +48,7 @@ async def test_summary_refresh_saves_today_and_reuses_until_forced(tmp_path):
 
 
 async def test_summary_without_model_and_without_messages_are_safe(tmp_path):
-    app = create_app(douyin_service=make_service(tmp_path))
+    app = create_app(douyin_service=make_service(tmp_path), hook_transport=profile_transport())
     async with LifespanManager(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         empty = await client.post(f"/api/manage/groups/{GROUP}/summary")
         assert empty.status_code == 200 and empty.json()["summary"]["message_count"] == 0

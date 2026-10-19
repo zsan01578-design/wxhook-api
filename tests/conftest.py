@@ -15,3 +15,7 @@ def isolated_management_database(tmp_path, monkeypatch):
     monkeypatch.setenv("WXHOOK_CHATBOT_ENABLED", "false")
     monkeypatch.setenv("WXHOOK_CHAT_MODEL_CONFIG", str(tmp_path / "chat-model.local.json"))
     monkeypatch.setenv("WXHOOK_CHATBOT_CONFIG", str(tmp_path / "chatbot.local.yml"))
+    monkeypatch.setenv("WXHOOK_SEARCH_CONFIG", str(tmp_path / "search.local.json"))
+    monkeypatch.setenv("WXHOOK_AI_USAGE_DB", str(tmp_path / "ai-usage.sqlite3"))
+    monkeypatch.setenv("WXHOOK_ALLOWED_HOSTS", "test,testserver")
+    monkeypatch.delenv("WXHOOK_ADMIN_TOKEN", raising=False)

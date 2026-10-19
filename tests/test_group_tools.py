@@ -18,7 +18,7 @@ class Models:
     def __init__(self, result="本期讨论项目，确定周五完成测试。"):
         self.result, self.calls = result, []
 
-    async def answer(self, prompt):
+    async def answer(self, prompt, **kwargs):
         self.calls.append(prompt)
         return self.result
 

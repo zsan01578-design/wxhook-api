@@ -97,7 +97,7 @@ async def test_each_new_message_gets_one_answer_and_no_progress_messages(tmp_pat
         await state.submit(event("@机器人\u2005第二个问题", 2))
         assert provider.questions == ["你好", "第二个问题"]
         assert [body["msg"] for body in state.sends] == ["这是回答", "这是回答"]
-        assert state.hook_calls == ["/SendTextMsg", "/SendTextMsg"]
+        assert [path for path in state.hook_calls if path != "/GetSelfProfile"] == ["/SendTextMsg", "/SendTextMsg"]
 
 
 @pytest.mark.parametrize("payload", [event("普通聊天"), event("@其他人\u2005你好"), event(roomid="", wxid=MEMBER), event(sender=BOT), event(is_self=True), event(type=49)])
@@ -132,14 +132,14 @@ async def test_multiple_mentions_and_long_answer_still_emit_one_message(tmp_path
         assert state.sends[0]["msg"].endswith("…")
 
 
-async def test_profile_is_discovered_once_and_missing_roomid_uses_wxid(tmp_path):
+async def test_profile_is_rechecked_and_missing_roomid_uses_wxid(tmp_path):
     provider = Answers()
     async with context(tmp_path, provider=provider, bot_options=ChatbotOptions()) as state:
         payload = event()
         payload.pop("roomid")
         await state.submit(payload)
         await state.submit(event(msgid=2))
-        assert state.hook_calls.count("/GetSelfProfile") == 1
+        assert state.hook_calls.count("/GetSelfProfile") >= 2
         assert len(state.sends) == 2
 
 

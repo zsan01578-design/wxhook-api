@@ -106,7 +106,7 @@ def test_search_context_has_titles_and_snippets_but_no_links():
 
 
 @pytest.mark.asyncio
-async def test_daily_limit_counts_only_successes(tmp_path):
+async def test_daily_limit_counts_attempts(tmp_path):
     provider = FakeSearchProvider()
     config = search_config(tmp_path, provider)
     await config.save(SearchSettings(enabled=True, api_key="sk-test", daily_limit=2))
@@ -119,13 +119,15 @@ async def test_daily_limit_counts_only_successes(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_failed_search_does_not_consume_quota(tmp_path):
+async def test_failed_search_consumes_quota(tmp_path):
     provider = FakeSearchProvider(error=SearchError("failed"))
     config = search_config(tmp_path, provider)
     await config.save(SearchSettings(enabled=True, api_key="sk-test", daily_limit=1))
 
     assert await config.context("问题") is None
-    assert config.snapshot()["used_today"] == 0
+    assert await config.context("问题二") is None
+    assert config.snapshot()["used_today"] == 1
+    assert len(provider.queries) == 1
 
 
 @pytest.mark.asyncio

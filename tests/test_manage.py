@@ -4,7 +4,7 @@ from asgi_lifespan import LifespanManager
 import pytest
 
 from tests.test_callbacks import EVENT
-from tests.test_douyin import GROUP, ITEM, PNG, SHORT, image_item, page
+from tests.test_douyin import GROUP, ITEM, PNG, SHORT, image_item, page, profile_transport
 from wxhook_api.core.douyin_config import DouyinOptions, GroupSettings
 from wxhook_api.main import create_app
 from wxhook_api.schemas.events import CallbackEvent
@@ -41,7 +41,7 @@ async def test_management_pages_and_state_reuse_legacy_groups_without_hook_calls
 
 async def test_per_group_overrides_master_switch_and_legacy_defaults(tmp_path):
     service = make_service(tmp_path, enabled=False)
-    app = create_app(douyin_service=service)
+    app = create_app(douyin_service=service, hook_transport=profile_transport())
     async with LifespanManager(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         assert not service.allowed(GROUP)
         assert (await client.patch(f"/api/manage/groups/{GROUP}", json={"douyin_enabled": True, "auto_download": False})).status_code == 200
@@ -59,7 +59,7 @@ async def test_per_group_overrides_master_switch_and_legacy_defaults(tmp_path):
 
 async def test_member_blacklist_scoped_to_group_and_duplicate_add_preserves_policy(tmp_path):
     service = make_service(tmp_path)
-    app = create_app(douyin_service=service)
+    app = create_app(douyin_service=service, hook_transport=profile_transport())
     async with LifespanManager(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         for group in (GROUP, OTHER):
             await app.state.groups.receive(event(group))
@@ -105,7 +105,7 @@ async def test_group_and_member_policies_and_audit_survive_restart(tmp_path):
 ])
 async def test_invalid_writes_are_rejected_without_changing_policy(tmp_path, path, body, method, status):
     service = make_service(tmp_path)
-    app = create_app(douyin_service=service)
+    app = create_app(douyin_service=service, hook_transport=profile_transport())
     async with LifespanManager(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         result = await getattr(client, method)("/api/manage" + path, json=body)
         assert result.status_code == status
@@ -174,7 +174,7 @@ async def test_different_groups_really_use_independent_download_settings(tmp_pat
         return httpx.Response(200, content=PNG)
 
     service = make_service(tmp_path, httpx.MockTransport(respond))
-    app = create_app(douyin_service=service)
+    app = create_app(douyin_service=service, hook_transport=profile_transport())
     async with LifespanManager(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         await client.patch(f"/api/manage/groups/{GROUP}", json={"auto_download": False})
         await service.receive(event(GROUP))
@@ -207,7 +207,7 @@ async def test_blocking_member_mid_download_removes_partial_and_skips_mirrors(tm
         return httpx.Response(200, stream=SlowMedia())
 
     service = make_service(tmp_path, httpx.MockTransport(respond))
-    app = create_app(douyin_service=service)
+    app = create_app(douyin_service=service, hook_transport=profile_transport())
     async with LifespanManager(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         await app.state.groups.receive(event())
         await service.receive(event())

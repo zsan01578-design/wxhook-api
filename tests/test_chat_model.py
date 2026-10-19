@@ -7,6 +7,7 @@ from tests.test_chatbot import context, event
 from wxhook_api.core.chatbot_config import ChatbotOptions
 from wxhook_api.services.chatbot import MentionChatService
 from wxhook_api.services.chat_model import ChatModelConfiguration, ChatCompletionsProvider, ModelDefinition, ModelError, ModelSettings
+from wxhook_api.core.secrets import reveal_secret
 
 
 CONFIG = {"base_url": "https://model.test/v1/", "model": "example/chat", "api_key": "test-private-key"}
@@ -37,14 +38,17 @@ async def test_web_save_tests_once_activates_group_answer_and_survives_restart(t
         assert len(payload["messages"]) == 1 and "连接测试" in payload["messages"][0]["content"]
         await state.submit(event())
         assert len(calls) == 2 and state.sends[0]["msg"] == "这是模型的实际回复"
-        assert json.loads(calls[1].content)["messages"] == [{"role": "user", "content": "你好"}]
+        actual = json.loads(calls[1].content)["messages"]
+        assert actual[0]["role"] == "system"
+        frame = json.loads(actual[-1]["content"])
+        assert frame["question"] == "你好" and frame["participant"].startswith("member_")
         for endpoint in ("/api/manage/chat-model", "/api/manage/state"):
             result = await state.client.get(endpoint)
             assert "test-private-key" not in result.text
             assert result.headers["cache-control"] == "no-store"
         assert "test-private-key" not in response.text
         disk = json.loads(config.path.read_text(encoding="utf-8"))
-        assert disk["models"][0]["api_key"] == "test-private-key"
+        assert reveal_secret(disk["models"][0]["api_key"]) == "test-private-key"
         restarted_bot = MentionChatService(ChatbotOptions())
         restarted = ChatModelConfiguration(restarted_bot)
         assert restarted.snapshot()["has_api_key"]

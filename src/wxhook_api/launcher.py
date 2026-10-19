@@ -116,7 +116,8 @@ async def manage_wechat(app: Any, settings: Settings, options: LauncherSettings)
         update_status(app, "error", f"自动回调地址 {callback} 不在 WXHOOK_ALLOWED_CALLBACK_URLS 白名单中。")
         return
 
-    async with httpx.AsyncClient(base_url=url, trust_env=False, timeout=15) as client:
+    headers = {"Authorization": "Bearer " + os.environ["WXHOOK_ADMIN_TOKEN"]} if os.getenv("WXHOOK_ADMIN_TOKEN") else {}
+    async with httpx.AsyncClient(base_url=url, trust_env=False, timeout=15, headers=headers) as client:
         while True:
             hook_available = False
             try:
@@ -196,7 +197,8 @@ async def run_service(settings: Settings, options: LauncherSettings) -> None:
 def existing_service(settings: Settings) -> bool:
     """Reuse only an identifiable instance of this project's message service."""
     try:
-        with httpx.Client(base_url=service_url(settings), trust_env=False, timeout=2) as client:
+        headers = {"Authorization": "Bearer " + os.environ["WXHOOK_ADMIN_TOKEN"]} if os.getenv("WXHOOK_ADMIN_TOKEN") else {}
+        with httpx.Client(base_url=service_url(settings), trust_env=False, timeout=2, headers=headers) as client:
             health = client.get("/health")
             inbox = client.get("/ui/messages")
             data = inbox.json()

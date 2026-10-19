@@ -16,7 +16,7 @@ import httpx
 from wxhook_api.core.douyin_config import DouyinOptions, GroupSettings, save_group_settings
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links
-from wxhook_api.services.douyin_delivery import DeliveryError, DouyinMessenger
+from wxhook_api.services.douyin_delivery import DeliveryBlocked, DeliveryError, DouyinMessenger
 from wxhook_api.services.douyin_api import DouyinAPIParser
 from wxhook_api.services.parse_video import ParseVideoParser, REFERERS, source_platform
 from wxhook_api.services.groups import GroupManager, event_group
@@ -60,6 +60,7 @@ class DouyinService:
         self.revision = uuid4().hex
         self.group_manager: GroupManager | None = None
         self.messenger: DouyinMessenger | None = None
+        self.account_check = None
         self.cleanup_status = {"enabled": options.retention.enabled, "next_run_at": "", "last_run_at": "", "error": ""}
 
     def allowed(self, group: str, sender: str = "") -> bool:
@@ -152,7 +153,10 @@ class DouyinService:
             return
         # Recognize all supported platforms even when an older parser is selected.
         # A configuration mismatch must produce a visible job and failure notice.
-        for link in extract_links(event.content, multi_platform=True):
+        links = extract_links(event.content, multi_platform=True)
+        if links and self.account_check is not None and not await self.account_check():
+            return
+        for link in links:
             key = (group, str(event.msgid), link)
             deduplicate = str(event.msgid) not in {"", "0"}
             if deduplicate and key in self._seen:
@@ -198,7 +202,10 @@ class DouyinService:
             # Do not quote the original link/title: our own callbacks must not
             # create a new parsing task from an automatic notification.
             text = message if stage == "start" else f"[分享解析 {job['id'][:8]}] {message}"
-            await self.messenger.text(job["group_id"], text)
+            await self.messenger.text(job["group_id"], text, allowed=lambda: self._accepting
+                and self.options.settings.notify_group and self.allowed(job["group_id"], job["sender"]))
+        except DeliveryBlocked as exc:
+            notifications[stage] = {"status": "skipped", "error": str(exc)}
         except DeliveryError as exc:
             notifications[stage] = {"status": "unknown" if exc.uncertain else "failed", "error": str(exc)}
         except Exception:
@@ -264,10 +271,12 @@ class DouyinService:
                         except (DouyinError, DeliveryError):
                             file["send_status"] = "skipped"
                             raise
-                        await self.messenger.send(job["group_id"], path, mode)
+                        await self.messenger.send(job["group_id"], path, mode, allowed=lambda: self._accepting
+                            and self.allowed(job["group_id"], job["sender"]) and self.auto_download(job["group_id"])
+                            and self.options.settings.send_results)
                     except DeliveryError as exc:
                         if file.get("send_status") != "skipped":
-                            file["send_status"] = "unknown" if exc.uncertain else "failed"
+                            file["send_status"] = "skipped" if isinstance(exc, DeliveryBlocked) else "unknown" if exc.uncertain else "failed"
                         raise
                     file["send_status"] = "sent"
                     await asyncio.to_thread(self._save, job)
@@ -276,7 +285,7 @@ class DouyinService:
             uncertain = isinstance(exc, TimeoutError) or getattr(exc, "uncertain", False) or any(file.get("send_status") == "sending" for file in job["files"])
             sent = sum(file.get("send_status") == "sent" for file in job["files"])
             error = str(exc) if isinstance(exc, (DeliveryError, DouyinError)) else "回传中断，请先检查群消息与本地文件"
-            job.update(delivery_status="unknown" if uncertain else "partial" if sent else "failed", delivery_error=error)
+            job.update(delivery_status="unknown" if uncertain else "partial" if sent else "skipped" if isinstance(exc, DeliveryBlocked) else "failed", delivery_error=error)
             await self._notice(job, "delivery_failure", f"媒体回传未全部确认（已确认 {sent}/{len(job['files'])} 个）。{error}。已停止后续发送，文件仍保存在本机。")
         else:
             job["delivery_status"] = "sent"
@@ -292,6 +301,8 @@ class DouyinService:
             try:
                 if not self.allowed(job["group_id"], job["sender"]):
                     raise DouyinError("群聊或成员已被限制，或解析功能已停用")
+                if self.account_check is not None and not await self.account_check():
+                    raise DouyinError("微信账号无法确认或已变化，已停止解析")
                 job["status"] = "parsing"
                 self._changed()
                 await asyncio.to_thread(self._save, job)

@@ -14,6 +14,8 @@ from typing import Any
 from uuid import uuid4
 
 from wxhook_api.core.config import PROJECT_ROOT
+from wxhook_api.core.errors import AccountMismatchError
+from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.word_cloud import frequent_words
 
@@ -44,6 +46,7 @@ class GroupManager:
         self._policies: dict[str, dict] = {}
         self._blocked_members: set[tuple[str, str]] = set()
         self._word_cloud_cache: OrderedDict[str, tuple[str, dict]] = OrderedDict()
+        self.account_error = ""
 
     @contextmanager
     def _connect(self):
@@ -97,7 +100,7 @@ class GroupManager:
                     );
                 """)
                 migrations = {
-                    "groups": {"chat_enabled": "INTEGER", "wechat_name": "TEXT NOT NULL DEFAULT ''", "members_sync": "TEXT NOT NULL DEFAULT 'pending'",
+                    "groups": {"chat_enabled": "INTEGER", "summary_enabled": "INTEGER NOT NULL DEFAULT 0", "wechat_name": "TEXT NOT NULL DEFAULT ''", "members_sync": "TEXT NOT NULL DEFAULT 'pending'",
                                "members_synced_at": "TEXT NOT NULL DEFAULT ''", "history_complete": "INTEGER NOT NULL DEFAULT 0",
                                "history_next_page": "INTEGER NOT NULL DEFAULT 1", "history_error": "TEXT NOT NULL DEFAULT ''",
                                "history_synced_at": "TEXT NOT NULL DEFAULT ''"},
@@ -121,9 +124,24 @@ class GroupManager:
         self._policies = policies
         self._blocked_members = blocked
 
+    async def _write_policy(self, action):
+        async def commit():
+            result = await asyncio.to_thread(action)
+            await asyncio.to_thread(self._reload)
+            return result
+
+        # A cancelled request cannot stop a worker thread's database commit.
+        # Keep the lock until both disk and the hot-path cache have settled.
+        async with self._lock:
+            return await finish_before_cancel(commit())
+
     def allowed(self, group: str, sender: str = "") -> bool:
         policy = self._policies.get(group, {})
-        return bool(policy.get("enabled", True) and not policy.get("blocked") and (group, sender) not in self._blocked_members)
+        return bool(not self.account_error and policy.get("enabled", True) and not policy.get("blocked") and (group, sender) not in self._blocked_members)
+
+    def suspend_account(self, message: str) -> None:
+        # Latch until restart: queued work must not resume under another account.
+        self.account_error = message
 
     def feature(self, group: str, name: str, fallback: bool) -> bool:
         value = self._policies.get(group, {}).get(name)
@@ -133,6 +151,8 @@ class GroupManager:
         group = event_group(event)
         if not group:
             return
+        if self.account_error:
+            raise AccountMismatchError(self.account_error)
         def record():
             with self._connect() as db:
                 message_id = str(event.msgid)
@@ -161,12 +181,12 @@ class GroupManager:
             row["local_name"] = row["name"]
             row["name"] = row["name"] or row["wechat_name"]
             row["history_complete"] = bool(row["history_complete"])
-            for key in ("pinned", "enabled", "blocked"):
+            for key in ("pinned", "enabled", "blocked", "summary_enabled"):
                 row[key] = bool(row[key])
             row["douyin_enabled"] = self.feature(row["id"], "douyin_enabled", legacy.enabled and row["id"] in legacy.groups)
             row["chat_enabled"] = self.feature(row["id"], "chat_enabled", row["douyin_enabled"])
             row["auto_download"] = self.feature(row["id"], "auto_download", legacy.auto_download)
-            row["active"] = row["enabled"] and not row["blocked"]
+            row["active"] = not self.account_error and row["enabled"] and not row["blocked"]
         return rows
 
     async def add_group(self, group: str, name: str) -> bool:
@@ -176,10 +196,7 @@ class GroupManager:
                 if inserted:
                     self._audit(db, group, name or group, "添加群聊")
                 return bool(inserted)
-        async with self._lock:
-            added = await asyncio.to_thread(write)
-            await asyncio.to_thread(self._reload)
-            return added
+        return await self._write_policy(write)
 
     async def claim_chat_reply(self, group: str, key: str) -> bool:
         def claim():
@@ -196,7 +213,7 @@ class GroupManager:
             await asyncio.to_thread(finish)
 
     async def update_group(self, group: str, changes: dict) -> bool:
-        labels = {"name": "修改群名称", "note": "修改群备注", "pinned": "置顶群聊", "enabled": "群功能总开关", "blocked": "群聊黑名单", "douyin_enabled": "抖音解析", "auto_download": "自动保存媒体", "chat_enabled": "@机器人问答"}
+        labels = {"name": "修改群名称", "note": "修改群备注", "pinned": "置顶群聊", "enabled": "群功能总开关", "blocked": "群聊黑名单", "douyin_enabled": "抖音解析", "auto_download": "自动保存媒体", "chat_enabled": "@机器人问答", "summary_enabled": "自动 AI 日总结"}
         assert changes.keys() <= labels.keys()
 
         def write():
@@ -213,10 +230,7 @@ class GroupManager:
                         status = "已拉黑" if value else "已解除"
                     self._audit(db, group, row["name"] or group, f"{labels[key]} · {status}")
                 return True
-        async with self._lock:
-            updated = await asyncio.to_thread(write)
-            await asyncio.to_thread(self._reload)
-            return updated
+        return await self._write_policy(write)
 
     async def members(self, group: str | None = None, *, blocked_only: bool = False) -> list[dict]:
         def read():
@@ -255,10 +269,7 @@ class GroupManager:
                     action = ("拉黑群成员" if value else "解除成员黑名单") if key == "blocked" else "修改成员备注"
                     self._audit(db, group, changes.get("name") or (row["name"] if row else "") or member, action)
                 return True
-        async with self._lock:
-            updated = await asyncio.to_thread(write)
-            await asyncio.to_thread(self._reload)
-            return updated
+        return await self._write_policy(write)
 
     async def audit(self, group: str | None = None) -> list[dict]:
         def read():
@@ -331,14 +342,20 @@ class GroupManager:
             await asyncio.to_thread(write)
 
     async def claim_account(self, account: str) -> None:
+        if self.account_error:
+            raise AccountMismatchError(self.account_error)
         def write():
             with self._connect() as db:
                 row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
                 if row and row[0] != account:
-                    raise ValueError("微信账号与本地资料库不一致，请为新账号设置独立的 WXHOOK_MANAGEMENT_DB 后重启")
+                    raise AccountMismatchError("微信账号与本地资料库不一致，请为新账号设置独立的 WXHOOK_MANAGEMENT_DB 后重启")
                 db.execute("INSERT OR IGNORE INTO sync_metadata (key,value) VALUES ('account',?)", (account,))
         async with self._lock:
-            await asyncio.to_thread(write)
+            try:
+                await asyncio.to_thread(write)
+            except AccountMismatchError as exc:
+                self.suspend_account(str(exc))
+                raise
 
     async def history_checkpoint(self, group: str, *, next_page: int, complete: bool, error: str = "") -> None:
         def write():
@@ -506,10 +523,10 @@ class GroupManager:
             with self._connect() as db:
                 row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
                 account = row[0] if row else bot_wxid
-                rows = db.execute("""SELECT sender,timestamp,content,json_extract(raw_json,'$.is_self') AS is_self
+                rows = db.execute("""SELECT sender,timestamp,substr(content,1,1200) AS content,json_extract(raw_json,'$.is_self') AS is_self
                     FROM chat_messages WHERE group_id=? AND type=1
                     AND timestamp>=? AND timestamp<? AND (?='' OR sender<>?)
-                    ORDER BY timestamp,id""", (group, *_day_bounds(summary_date), account, account))
+                    ORDER BY timestamp DESC,id DESC LIMIT 800""", (group, *_day_bounds(summary_date), account, account))
                 result = []
                 for item in rows:
                     if item["is_self"] in (True, 1, "1", "true"):
@@ -517,7 +534,7 @@ class GroupManager:
                     if account and item["sender"] in ("", group) and item["content"].startswith((account + ":\n", account + ":\r\n")):
                         continue
                     result.append(dict(item))
-                return result
+                return list(reversed(result))
         async with self._lock:
             return await asyncio.to_thread(read)
 

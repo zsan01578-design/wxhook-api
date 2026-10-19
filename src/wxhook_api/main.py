@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from wxhook_api.clients.hook_client import HookClient
 from wxhook_api.core.body_limit import BodyLimitMiddleware
+from wxhook_api.core.access import AccessMiddleware
 from wxhook_api.core.config import Settings, load_settings
 from wxhook_api.core.chatbot_config import load_chatbot_options
 from wxhook_api.core.douyin_config import load_douyin_options
@@ -28,7 +29,7 @@ from wxhook_api.services.chat_model import ChatModelConfiguration
 from wxhook_api.services.chat_summary import ChatSummaryService
 from wxhook_api.services.douyin_delivery import DouyinMessenger
 from wxhook_api.services.events import EventDispatcher
-from wxhook_api.services.groups import GroupManager
+from wxhook_api.services.groups import GroupManager, event_group
 from wxhook_api.services.group_tools import GroupToolsService
 from wxhook_api.services.inbox import MessageInbox
 from wxhook_api.services.wechat_sync import SyncOptions, WeChatSync
@@ -40,20 +41,33 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     dispatcher = EventDispatcher(settings.callback_queue_size)
     groups = group_manager or GroupManager()
     synchronizer = WeChatSync(groups, sync_options or SyncOptions.from_environment())
-    dispatcher.register(synchronizer.receive if synchronizer.options.enabled else groups.receive)
     inbox = MessageInbox()
-    dispatcher.register(inbox.receive)
     douyin_worker = douyin_service or DouyinService(load_douyin_options())
     douyin_worker.group_manager = groups
     chatbot = chat_service or MentionChatService(load_chatbot_options())
     chatbot.groups = groups
     chatbot.default_group_enabled = douyin_worker.allowed
+    douyin_worker.account_check = chatbot.verify_account
     model_configuration = ChatModelConfiguration(chatbot)
     search_configuration = WebSearchConfiguration(chatbot=chatbot)
     summary_service = ChatSummaryService(groups, model_configuration, chatbot.identity)
     chatbot.summary_service = summary_service
     tools_service = GroupToolsService(groups, model_configuration, chatbot)
     chatbot.tools_service = tools_service
+
+    async def archive_event(event):
+        if synchronizer.options.enabled:
+            await synchronizer.receive(event)
+            return
+        group = event_group(event)
+        if group and (chatbot.options.enabled or douyin_worker.allowed(group, event.sender)
+                      or group in await tools_service.enabled_groups()):
+            if not await chatbot.verify_account():
+                raise ValueError("无法核验微信账号，已停止处理此回调")
+        await groups.receive(event)
+
+    dispatcher.register(archive_event, critical=True)
+    dispatcher.register(inbox.receive)
 
     async def automatic_message(event):
         if await chatbot.receive(event):
@@ -73,7 +87,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             app.state.hook_client = owned_client
         try:
             if os.getenv("WXHOOK_DOUYIN_FEEDBACK_ENABLED", "true").lower() not in {"false", "0", "off"}:
-                douyin_worker.messenger = DouyinMessenger(app.state.hook_client)
+                douyin_worker.messenger = DouyinMessenger(app.state.hook_client, account_check=chatbot.verify_account)
             await groups.start(douyin_worker.options.settings.groups)
             await douyin_worker.start()
             await chatbot.start(app.state.hook_client)
@@ -118,6 +132,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.group_tools = tools_service
     app.state.runtime_revision = source_revision()
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
+    app.add_middleware(AccessMiddleware)
     install_exception_handlers(app)
     app.add_exception_handler(sqlite3.Error, manage.storage_error)
     for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router, douyin.router, manage.router, group_tools.router):

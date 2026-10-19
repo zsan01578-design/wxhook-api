@@ -16,11 +16,14 @@ class EventDispatcher:
     def __init__(self, maxsize: int = 1000) -> None:
         self._queue: asyncio.Queue[CallbackEvent | None] = asyncio.Queue(maxsize=maxsize)
         self._handlers: list[EventHandler] = []
+        self._critical_handlers: set[EventHandler] = set()
         self._worker: asyncio.Task[None] | None = None
         self._accepting = False
 
-    def register(self, handler: EventHandler) -> None:
+    def register(self, handler: EventHandler, *, critical: bool = False) -> None:
         self._handlers.append(handler)
+        if critical:
+            self._critical_handlers.add(handler)
 
     async def start(self) -> None:
         if self._worker is None or self._worker.done():
@@ -49,6 +52,8 @@ class EventDispatcher:
                         await handler(event)
                     except Exception as exc:
                         logger.error("callback handler failed: %s", type(exc).__name__)
+                        if handler in self._critical_handlers:
+                            break
             finally:
                 self._queue.task_done()
 
