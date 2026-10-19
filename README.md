@@ -786,6 +786,34 @@ Hook 推送到 `/receiveChatBotMsg` 的事件至少包含：
 - 拒绝用户名、密码和 URL fragment
 - 不允许任意外部 URL，避免 SSRF
 
+## 联网搜索
+
+在管理页「AI 对话模型」中可以配置 DeepSeek 联网搜索。开启后，每个 @机器人 的文本问题会先调用：
+
+```text
+POST https://api.deepseek.com/v1/tools/search
+```
+
+搜索结果的标题和摘要会作为参考上下文交给当前聊天模型，回复本身不附来源链接。搜索失败、超时或额度用尽时会自动回退到普通模型回答。
+
+配置保存在本机 `data/search.local.json`，不会提交到 Git，也可以在模型弹窗中修改：
+
+| 配置 | 默认值 | 说明 |
+|---|---|---|
+| 开关 | 关闭 | 是否对每个 @ 问题执行搜索 |
+| Base URL | `https://api.deepseek.com/v1` | 实际请求 `/tools/search` |
+| API Key | 空 | DeepSeek 搜索密钥，页面不会回显 |
+| 每次结果数 | `5` | 范围 1–10，作为模型参考上下文 |
+| 每日搜索上限 | `1000` | 按本机日期统计，跨天自动归零 |
+
+计数规则：
+
+- 仅成功返回的搜索请求计数，连接失败、超时和非 200 不扣次数。
+- 达到当日上限后跳过搜索，直接使用普通模型回答，不会在群内额外提示。
+- 使用单进程异步锁预留次数，避免并发请求超过上限。
+
+DeepSeek 搜索按官方文档约 5 元/千次调用计费；每次 @ 问题还会产生原有的聊天模型费用。密钥可通过 `WXHOOK_SEARCH_CONFIG` 指向其他本机文件。
+
 ## 错误处理
 
 | 情况 | HTTP 状态 | 响应 |
@@ -864,14 +892,16 @@ wxhook-api/
 │       │   ├── requests.py
 │       │   └── responses.py
 │       └── services/
-│           └── events.py
+│           ├── events.py
+│           └── web_search.py
 └── tests/
     ├── test_callbacks.py
     ├── test_config.py
     ├── test_hook_client.py
     ├── test_lifecycle.py
     ├── test_regressions.py
-    └── test_routes.py
+    ├── test_routes.py
+    └── test_web_search.py
 ```
 
 ## 安全边界与限制

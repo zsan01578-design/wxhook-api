@@ -8,6 +8,7 @@ from wxhook_api.schemas.requests import ContactSearchRequest
 from wxhook_api.core.chatbot_config import MentionSettings
 from wxhook_api.services.groups import GROUP_PATTERN
 from wxhook_api.services.chat_model import ModelDefinition, ModelError, ModelSettings
+from wxhook_api.services.web_search import SearchError, SearchSettings
 from wxhook_api.services.wechat_sync import SyncError, records
 from wxhook_api.services.chat_summary import local_date
 
@@ -79,6 +80,26 @@ async def sync_now(request: Request):
 @router.get("/chat-model")
 async def get_chat_model(request: Request):
     return JSONResponse(request.app.state.chat_model.snapshot(), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/chat-search")
+async def get_chat_search(request: Request):
+    return JSONResponse(request.app.state.chat_search.snapshot(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/chat-search")
+async def configure_chat_search(body: SearchSettings, request: Request):
+    try:
+        result = await request.app.state.chat_search.save(body)
+    except SearchError as exc:
+        result = {
+            "saved": False,
+            "message": str(exc),
+            "settings": request.app.state.chat_search.snapshot(),
+        }
+    except OSError:
+        raise HTTPException(500, "联网搜索配置保存失败，请检查 data 目录写入权限和磁盘空间。") from None
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/chatbot/mentions")

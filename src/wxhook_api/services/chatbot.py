@@ -17,7 +17,7 @@ from wxhook_api.services.groups import GroupManager, event_group, now
 
 
 class AnswerProvider(Protocol):
-    async def answer(self, question: str) -> str: ...
+    async def answer(self, question: str, context: str | None = None) -> str: ...
 
 
 def mention_ids(event: CallbackEvent) -> tuple[set[str], bool]:
@@ -88,6 +88,7 @@ class MentionChatService:
         self._profile_names: tuple[str, ...] = ()
         self.summary_service = None
         self.tools_service = None
+        self.search_service = None
 
     @property
     def identity(self) -> str:
@@ -265,7 +266,13 @@ class MentionChatService:
             return "问答接口尚未配置，请联系管理员。"
         try:
             async with asyncio.timeout(60):
-                answer = await self.provider.answer(question)
+                context = None
+                if self.search_service is not None:
+                    context = await self.search_service.context(question)
+                if context:
+                    answer = await self.provider.answer(question, context=context)
+                else:
+                    answer = await self.provider.answer(question)
             if not isinstance(answer, str) or not answer.strip():
                 raise ValueError
             return answer.strip()

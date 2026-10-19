@@ -32,6 +32,7 @@ from wxhook_api.services.groups import GroupManager
 from wxhook_api.services.group_tools import GroupToolsService
 from wxhook_api.services.inbox import MessageInbox
 from wxhook_api.services.wechat_sync import SyncOptions, WeChatSync
+from wxhook_api.services.web_search import WebSearchConfiguration
 
 
 def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncBaseTransport | None = None, hook_client: HookClient | None = None, douyin_service: DouyinService | None = None, group_manager: GroupManager | None = None, sync_options: SyncOptions | None = None, chat_service: MentionChatService | None = None) -> FastAPI:
@@ -48,6 +49,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     chatbot.groups = groups
     chatbot.default_group_enabled = douyin_worker.allowed
     model_configuration = ChatModelConfiguration(chatbot)
+    search_configuration = WebSearchConfiguration(chatbot=chatbot)
     summary_service = ChatSummaryService(groups, model_configuration, chatbot.identity)
     chatbot.summary_service = summary_service
     tools_service = GroupToolsService(groups, model_configuration, chatbot)
@@ -111,6 +113,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.wechat_sync = synchronizer
     app.state.chatbot = chatbot
     app.state.chat_model = model_configuration
+    app.state.chat_search = search_configuration
     app.state.chat_summary = summary_service
     app.state.group_tools = tools_service
     app.state.runtime_revision = source_revision()

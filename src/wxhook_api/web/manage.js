@@ -664,12 +664,24 @@ function mentionSettingsDialog() {
 async function modelSettingsDialog() {
   const body = showDialog("AI 对话模型", "机器人 · 全部群共用");
   body.append(el("p", "form-note", "正在读取模型配置…"));
-  let settings;
-  try { settings = await api("/api/manage/chat-model"); }
+  let settings, search;
+  try { [settings, search] = await Promise.all([api("/api/manage/chat-model"), api("/api/manage/chat-search")]); }
   catch (error) { if (body.isConnected) body.replaceChildren(el("p", "form-error", error.message)); return; }
   if (!$("modal").open || $("modal-title").textContent !== "AI 对话模型") return;
   body.replaceChildren();
   body.append(el("p", "modal-copy", "可保存多个模型配置，同时只启用一个。新增和修改时自动测试；启用其他模型后，后续群内问答使用新模型。"));
+  const searchCard = el("section", "model-card"), searchCopy = el("div", "model-card-copy");
+  searchCopy.append(
+    el("h3", "", "联网搜索"),
+    el("p", "", search.base_url || "https://api.deepseek.com/v1"),
+    el("p", "form-note", `${search.enabled ? "已开启" : "未开启"} · 今日已用 ${search.used_today} / ${search.daily_limit} 次 · ${search.has_api_key ? "已保存 API Key" : "未配置 API Key"}`),
+  );
+  const searchHeading = el("div", "model-card-heading");
+  searchHeading.append(searchCopy, el("span", search.enabled ? "badge" : "badge gray", search.enabled ? "已开启" : "未开启"));
+  const searchActions = el("div", "model-card-actions");
+  searchActions.append(button("配置联网搜索", "button small", () => searchSettingsDialog(search)));
+  searchCard.append(searchHeading, searchActions);
+  body.append(searchCard);
   const toolbar = el("div", "model-list-toolbar");
   toolbar.append(el("span", "form-note", `已保存 ${settings.models.length} 个模型`), button("添加模型", "button primary", () => modelEditorDialog()));
   body.append(toolbar);
@@ -713,6 +725,56 @@ async function modelSettingsDialog() {
   }
 }
 
+function searchSettingsDialog(settings = {}) {
+  const body = showDialog("联网搜索", "机器人 · 全部群共用");
+  body.append(button("返回模型列表", "text-link", modelSettingsDialog));
+  const form = el("form");
+  form.append(el("p", "modal-copy", "开启后，每个 @机器人 的文本问题会先调用 DeepSeek 联网搜索，再交给当前 AI 模型回答。回复不附来源链接；搜索失败时自动回退普通回答。"));
+  const enabledLabel = el("label", "form-label", "联网搜索开关"), enabled = el("select", "form-input");
+  enabled.id = "search-enabled"; enabledLabel.htmlFor = enabled.id;
+  [["true", "开启"], ["false", "关闭"]].forEach(([value, text]) => {
+    const option = el("option", "", text); option.value = value; enabled.append(option);
+  });
+  enabled.value = settings.enabled ? "true" : "false";
+  enabled.selectedIndex = settings.enabled ? 0 : 1;
+  form.append(enabledLabel, enabled);
+  const base = formField(form, "搜索 Base URL", "https://api.deepseek.com/v1", settings.base_url || "https://api.deepseek.com/v1", false, 2048);
+  base.required = true; base.type = "url";
+  form.append(el("p", "form-note", "使用 DeepSeek 搜索接口，系统会调用该地址下的 /tools/search。"));
+  const key = formField(form, "搜索 API Key", settings.has_api_key ? "已保存密钥；留空沿用，更换地址时请重新填写" : "填写 DeepSeek API Key", "", false, 4096);
+  key.type = "password"; key.spellcheck = false;
+  form.append(el("p", "form-note", "密钥仅保存在运行服务的电脑上，页面不会回显。"));
+  const count = formField(form, "每次搜索结果数", "1–10", String(settings.result_count ?? 5), false, 2);
+  count.type = "number"; count.min = "1"; count.max = "10"; count.required = true;
+  const limit = formField(form, "每日搜索上限", "默认 1000 次", String(settings.daily_limit ?? 1000), false, 7);
+  limit.type = "number"; limit.min = "1"; limit.max = "100000"; limit.required = true;
+  form.append(el("p", "form-note", `按本机日期统计，仅成功搜索计数，跨天自动归零。今日已用 ${settings.used_today ?? 0} 次，剩余 ${settings.remaining_today ?? 0} 次。`));
+  const result = el("div", "model-test-result"); result.setAttribute("role", "status"); result.setAttribute("aria-live", "polite"); result.hidden = true;
+  form.append(result);
+  const footer = formFooter(form, "保存搜索配置");
+  footer.error.setAttribute("role", "alert");
+  body.append(form);
+  form.addEventListener("submit", async event => {
+    event.preventDefault(); if (footer.submit.disabled || mutating) return;
+    mutating = true; footer.submit.disabled = true; footer.error.textContent = "";
+    result.hidden = false; result.className = "model-test-result"; result.textContent = "正在保存…";
+    try {
+      const data = await api("/api/manage/chat-search", {
+        enabled: enabled.value === "true",
+        base_url: base.value.trim(),
+        api_key: key.value.trim() || null,
+        result_count: Number(count.value),
+        daily_limit: Number(limit.value),
+      }, "POST");
+      if (!data.saved) throw new Error(data.message || "保存失败，请检查搜索配置。");
+      $("modal").close(); toast("联网搜索配置已保存"); await refreshState(true);
+    } catch (error) {
+      result.classList.add("failed"); result.textContent = error.message;
+    } finally {
+      mutating = false; footer.submit.disabled = false;
+    }
+  });
+}
 function modelEditorDialog(settings = {}) {
   const body = showDialog(settings.id ? "修改 AI 模型" : "添加 AI 模型", "机器人 · 全部群共用");
   body.append(button("返回模型列表", "text-link", modelSettingsDialog));
