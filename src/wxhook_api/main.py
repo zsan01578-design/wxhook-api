@@ -48,6 +48,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     chatbot.groups = groups
     chatbot.default_group_enabled = douyin_worker.allowed
     douyin_worker.account_check = chatbot.verify_account
+    douyin_worker.own_message_check = chatbot.own_message
     model_configuration = ChatModelConfiguration(chatbot)
     search_configuration = WebSearchConfiguration(chatbot=chatbot)
     summary_service = ChatSummaryService(groups, model_configuration, chatbot.identity)

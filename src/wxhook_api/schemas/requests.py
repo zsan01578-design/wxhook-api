@@ -67,7 +67,7 @@ class HistoryRequest(BaseModel):
     def normalize_size(cls, value: object) -> int:
         try:
             size = int(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 500
         if size < 1:
             return 500
@@ -78,7 +78,7 @@ class HistoryRequest(BaseModel):
     def validate_page(cls, value: object) -> int:
         try:
             page = int(value)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("page must be a positive integer") from exc
         if page < 1:
             raise ValueError("page must be a positive integer")

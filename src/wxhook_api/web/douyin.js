@@ -4,6 +4,7 @@ const element = (id) => document.getElementById(id);
 let revision = "";
 let timer;
 let polling = false;
+let configReady = false;
 
 function updateProvider() {
   element("api-settings").hidden = element("parser-provider").value !== "api";
@@ -42,6 +43,8 @@ function node(tag, className, text) {
 }
 
 async function loadConfig() {
+  configReady = false;
+  element("save-settings").disabled = true;
   try {
     const data = await request("/api/douyin/config");
     element("parser-provider").value = data.settings.parser_provider || "parse_video";
@@ -60,8 +63,10 @@ async function loadConfig() {
     if (element("parser-provider").value === "api" && !element("parser-api-url").value) message("config-status", "请填写完整解析接口地址并保存。", true);
     if (data.feedback_available === false) message("config-status", "群内发送总开关已关闭；如需提示和回传，请检查 WXHOOK_DOUYIN_FEEDBACK_ENABLED 后重启。", true);
     if (!data.supported_parsers?.includes("parse_video")) {
-      element("save-settings").disabled = true;
       message("config-status", "检测到页面与后台版本不一致。请停止原 PyCharm 任务或原终端服务，重新运行根目录 main.py 后刷新页面。", true);
+    } else {
+      configReady = true;
+      element("save-settings").disabled = false;
     }
   } catch (error) {
     message("config-status", `读取配置失败：${error.message}`, true);
@@ -71,6 +76,7 @@ async function loadConfig() {
 element("group-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = element("save-settings");
+  if (!configReady || button.disabled) return;
   button.disabled = true;
   message("config-status", "正在保存…");
   try {
@@ -85,7 +91,7 @@ element("group-form").addEventListener("submit", async (event) => {
   } catch (error) {
     message("config-status", `保存失败：${error.message}`, true);
   } finally {
-    button.disabled = false;
+    button.disabled = !configReady;
   }
 });
 
@@ -128,6 +134,17 @@ function safeLink(url, label, className = "text-button") {
   }
 }
 
+function syncChildren(parent, children) {
+  const wanted = new Set(children);
+  for (const child of [...parent.children]) if (!wanted.has(child)) child.remove();
+  let cursor = parent.firstElementChild;
+  for (const child of children) {
+    if (child === cursor) cursor = cursor.nextElementSibling;
+    else if (parent.moveBefore && child.parentNode === parent) parent.moveBefore(child, cursor);
+    else parent.insertBefore(child, cursor);
+  }
+}
+
 function renderJobs(data) {
   if (data.revision === revision) return;
   revision = data.revision;
@@ -139,66 +156,89 @@ function renderJobs(data) {
     return;
   }
   const openJobs = new Set([...element("jobs").querySelectorAll("details[open]")].map((item) => item.dataset.job));
-  const fragment = document.createDocumentFragment();
+  const cards = new Map([...element("jobs").querySelectorAll(".media-job")].map(card => [card.dataset.job, card]));
+  const orderedCards = [];
   for (const job of data.jobs) {
-    const card = node("article", "message-card media-job");
+    const card = cards.get(job.id) || node("article", "message-card media-job");
+    card.dataset.job = job.id;
+    const info = node("div", "media-job-info");
     const header = node("div", "message-header");
     const label = job.status === "failed" || job.status === "interrupted" ? states[job.status] : deliveries[job.delivery_status] || states[job.status] || job.status;
     const hasError = job.status === "failed" || ["partial", "failed", "unknown"].includes(job.delivery_status);
     header.append(node("strong", "message-peer", job.title || "群聊分享"), node("span", hasError ? "count error" : "count", label));
-    card.append(header, node("p", "message-meta", `${job.group_id} · ${job.sender}`));
-    if (job.author) card.append(node("p", "message-meta", `作者：${job.author} · ${job.kind === "images" ? "图集" : "视频"}`));
-    if (job.parser_provider) card.append(node("p", "message-meta", `解析来源：${{parse_video: "parse-video-py", api: "指定接口", builtin: "公开分享页"}[job.parser_provider] || job.parser_provider}${job.platform ? ` · ${{douyin: "抖音", xiaohongshu: "小红书", bilibili: "B站"}[job.platform] || job.platform}` : ""}`));
-    if (job.error) card.append(node("p", "feedback error", job.error));
-    if (job.delivery_error) card.append(node("p", "feedback error", `回传：${job.delivery_error}`));
-    if (job.storage_error) card.append(node("p", "feedback error", job.storage_error));
-    if (job.cleanup_error) card.append(node("p", "feedback error", job.cleanup_error));
-    if (job.files_cleaned_at) card.append(node("p", "message-meta", `文件已清理 · ${new Date(job.files_cleaned_at).toLocaleString("zh-CN", {hour12: false})} · 解析记录仍保留`));
-    else if (job.files?.some(file => file.cleaned)) card.append(node("p", "message-meta", "部分文件已按保留规则清理。"));
+    info.append(header, node("p", "message-meta", `${job.group_id} · ${job.sender}`));
+    if (job.author) info.append(node("p", "message-meta", `作者：${job.author} · ${job.kind === "images" ? "图集" : "视频"}`));
+    if (job.parser_provider) info.append(node("p", "message-meta", `解析来源：${{parse_video: "parse-video-py", api: "指定接口", builtin: "公开分享页"}[job.parser_provider] || job.parser_provider}${job.platform ? ` · ${{douyin: "抖音", xiaohongshu: "小红书", bilibili: "B站"}[job.platform] || job.platform}` : ""}`));
+    if (job.error) info.append(node("p", "feedback error", job.error));
+    if (job.delivery_error) info.append(node("p", "feedback error", `回传：${job.delivery_error}`));
+    if (job.storage_error) info.append(node("p", "feedback error", job.storage_error));
+    if (job.cleanup_error) info.append(node("p", "feedback error", job.cleanup_error));
+    if (job.files_cleaned_at) info.append(node("p", "message-meta", `文件已清理 · ${new Date(job.files_cleaned_at).toLocaleString("zh-CN", {hour12: false})} · 解析记录仍保留`));
+    else if (job.files?.some(file => file.cleaned)) info.append(node("p", "message-meta", "部分文件已按保留规则清理。"));
     const noticeNames = { start: "开始提示", failure: "失败提示", delivery_failure: "回传失败提示", complete: "完成提示" };
     for (const [stage, result] of Object.entries(job.notifications || {})) {
-      if (["failed", "unknown"].includes(result.status)) card.append(node("p", "feedback error", `${noticeNames[stage] || "群提示"}未确认：${result.error || "请检查 Hook"}`));
+      if (["failed", "unknown"].includes(result.status)) info.append(node("p", "feedback error", `${noticeNames[stage] || "群提示"}未确认：${result.error || "请检查 Hook"}`));
     }
-    card.append(safeLink(job.source_url, "原始分享 ↗"));
+    info.append(safeLink(job.source_url, "原始分享 ↗"));
+    const oldInfo = card.querySelector(".media-job-info");
+    if (oldInfo) oldInfo.replaceWith(info); else card.prepend(info);
+    card.querySelector(".asset-links")?.remove();
     const files = job.files_cleaned_at ? [] : (job.files || []).filter(file => !file.cleaned);
     if (files.length) {
-      const details = node("details", "media-details");
+      let details = card.querySelector(".media-details");
+      if (!details) {
+        details = node("details", "media-details");
+        details.append(node("summary"), node("div", "media-grid"));
+        details.open = openJobs.has(job.id);
+        card.append(details);
+      }
       details.dataset.job = job.id;
-      details.open = openJobs.has(job.id);
-      details.append(node("summary", "", `查看已保存文件（${files.length} 个）`));
-      const grid = node("div", "media-grid");
+      details.querySelector("summary").textContent = `查看已保存文件（${files.length} 个）`;
+      const grid = details.querySelector(".media-grid");
+      const tiles = new Map([...grid.children].map(tile => [tile.dataset.file, tile]));
+      const orderedTiles = [];
       for (const file of files) {
         const url = `/api/douyin/files/${encodeURIComponent(job.id)}/${encodeURIComponent(file.name)}`;
-        const tile = node("div", "media-tile");
-        if (file.kind === "image") {
-          const image = node("img", "media-preview");
-          image.loading = "lazy";
-          image.alt = `${job.title || "图集"} ${file.name}`;
-          image.src = url;
-          tile.append(image);
-        } else {
-          const video = node("video", "media-preview");
-          video.controls = true;
-          video.preload = "none";
-          video.src = url;
-          tile.append(video);
+        const key = JSON.stringify([file.name, file.kind]);
+        let tile = tiles.get(key);
+        if (!tile) {
+          tile = node("div", "media-tile");
+          tile.dataset.file = key;
+          if (file.kind === "image") {
+            const image = node("img", "media-preview");
+            image.loading = "lazy";
+            image.alt = `${job.title || "图集"} ${file.name}`;
+            image.src = url;
+            tile.append(image);
+          } else {
+            const video = node("video", "media-preview");
+            video.controls = true;
+            video.preload = "none";
+            video.src = url;
+            tile.append(video);
+          }
+          tile.append(safeLink(`${url}?download=true`, ""));
         }
-        tile.append(safeLink(`${url}?download=true`, `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB ↓`));
-        if (file.send_status) tile.append(node("p", "message-meta", {sent: "Hook 已确认发送", sending: "正在发送", failed: "发送失败", unknown: "发送结果待确认", skipped: "已停止回传"}[file.send_status] || file.send_status));
-        grid.append(tile);
+        if (file.kind === "image") tile.querySelector("img").alt = `${job.title || "图集"} ${file.name}`;
+        tile.querySelector("a").textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB ↓`;
+        tile.querySelector(".file-send-status")?.remove();
+        if (file.send_status) tile.append(node("p", "message-meta file-send-status", {sent: "Hook 已确认发送", sending: "正在发送", failed: "发送失败", unknown: "发送结果待确认", skipped: "已停止回传"}[file.send_status] || file.send_status));
+        orderedTiles.push(tile);
       }
-      details.append(grid);
-      card.append(details);
-    } else if (job.status === "parsed" && !job.files_cleaned_at) {
-      const links = node("div", "asset-links");
-      (job.assets || []).forEach((asset, index) => {
-        if (asset.urls?.[0]) links.append(safeLink(asset.urls[0], `${asset.kind === "image" ? "图片" : "视频"} ${index + 1} ↗`));
-      });
-      card.append(links);
+      syncChildren(grid, orderedTiles);
+    } else {
+      card.querySelector(".media-details")?.remove();
+      if (job.status === "parsed" && !job.files_cleaned_at) {
+        const links = node("div", "asset-links");
+        (job.assets || []).forEach((asset, index) => {
+          if (asset.urls?.[0]) links.append(safeLink(asset.urls[0], `${asset.kind === "image" ? "图片" : "视频"} ${index + 1} ↗`));
+        });
+        card.append(links);
+      }
     }
-    fragment.append(card);
+    orderedCards.push(card);
   }
-  element("jobs").replaceChildren(fragment);
+  syncChildren(element("jobs"), orderedCards);
 }
 
 async function poll() {

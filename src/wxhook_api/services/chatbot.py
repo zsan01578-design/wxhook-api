@@ -13,8 +13,9 @@ from wxhook_api.clients.hook_client import HookClient
 from wxhook_api.core.chatbot_config import ChatbotOptions, save_mention_names
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.douyin_delivery import DeliveryBlocked, DeliveryError, DouyinMessenger
-from wxhook_api.services.groups import GroupManager, event_group, now
+from wxhook_api.services.groups import GroupManager, event_group, event_text, normalize_group_sender, now
 from wxhook_api.core.ai_safety import ai_scope, ai_permission
+from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.services.chat_context import ConversationTurn, GroupConversations
 
 
@@ -81,10 +82,7 @@ def addressed_question(event: CallbackEvent, identity: str, names: tuple[str, ..
     ids, structured = mention_ids(event)
     if structured and identity not in ids:
         return None
-    text = event.content
-    prefix = event.sender + ":\n"
-    if text.startswith(prefix):
-        text = text[len(prefix):]
+    text = event_text(event)
     labels = tuple(dict.fromkeys((*names, identity)))
     pattern = re.compile(r"@(?:" + "|".join(re.escape(name) for name in sorted(labels, key=len, reverse=True) if name) + r")(?=[\s\u2005]|$)")
     matched = pattern.search(text) if any(labels) else None
@@ -148,10 +146,13 @@ class MentionChatService:
         return report
 
     async def configure_mentions(self, names: list[str]) -> None:
-        async with self._names_lock:
+        async def commit():
             self.options = await save_mention_names(self.options, names)
             self._names = tuple(dict.fromkeys((*self.options.mention_names, *self._profile_names)))
             self._profile_checked = 0.0
+
+        async with self._names_lock:
+            await finish_before_cancel(commit())
 
     async def _group_names(self, group: str) -> tuple[str, ...]:
         # The Hook can return a valid wxid but an empty nickname. Use only the
@@ -169,7 +170,13 @@ class MentionChatService:
 
     def own_message(self, event: CallbackEvent) -> bool:
         flag = event.extra.get("is_self")
-        return bool(self._identity and event.sender == self._identity) or flag is True or flag == 1 or flag in ("1", "true")
+        if bool(self._identity and event.sender == self._identity) or flag is True or flag == 1 or flag in ("1", "true"):
+            return True
+        # Some Hook builds put the room in sender and retain the actual sender
+        # in the wire-format prefix. Only trust it when no member is identified.
+        group = event_group(event)
+        return bool(self._identity and group and event.sender in ("", group)
+                    and event.content.startswith((self._identity + ":\n", self._identity + ":\r\n")))
 
     async def start(self, client: HookClient) -> None:
         self._client = client
@@ -243,6 +250,7 @@ class MentionChatService:
     async def receive(self, event: CallbackEvent) -> bool:
         # Returning True also prevents our own model answer (which may contain
         # URLs) or an @ question from triggering a second automatic feature.
+        event = normalize_group_sender(event)
         group = event_group(event)
         report = self._report(event) if group else {}
         if self.own_message(event):
@@ -427,8 +435,9 @@ class MentionChatService:
                         await self.groups.finish_chat_reply(job["group"], job["key"], status)
                 except Exception:
                     self.last_error = "无法保存问答状态，请检查资料库；不会补发第二条消息"
-                self._queue.finish(job["group"])
-                for counts, scope in ((self._pending_groups, job["group"]), (self._pending_members, (job["group"], job["sender"]))):
-                    counts[scope] -= 1
-                    if counts[scope] <= 0:
-                        del counts[scope]
+                finally:
+                    self._queue.finish(job["group"])
+                    for counts, scope in ((self._pending_groups, job["group"]), (self._pending_members, (job["group"], job["sender"]))):
+                        counts[scope] -= 1
+                        if counts[scope] <= 0:
+                            del counts[scope]

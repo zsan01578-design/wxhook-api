@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from wxhook_api.services.chat_model import ModelError
 from wxhook_api.services.chat_summary import CHINA
-from wxhook_api.services.groups import event_group, now
+from wxhook_api.services.groups import event_group, event_text, normalize_group_sender, now
 from wxhook_api.services.reminders import ReminderService
 from wxhook_api.core.ai_safety import DATA_SYSTEM, bounded_records, ai_permission
 from wxhook_api.core.persistence import finish_before_cancel
@@ -26,14 +26,26 @@ def report_period(kind: str, today: date | None = None) -> tuple[date, date]:
 
 
 def task_deadline(body):
-    if body.get("due_at"):
-        due = datetime.fromisoformat(body["due_at"])
-        due = due.replace(tzinfo=CHINA) if due.tzinfo is None else due.astimezone(CHINA)
-        return due.date().isoformat(), due.timestamp()
-    if body.get("due_date"):
-        due = datetime.combine(date.fromisoformat(body["due_date"]), datetime.max.time().replace(microsecond=0), CHINA)
-        return due.date().isoformat(), due.timestamp()
-    return "", None
+    try:
+        if body.get("due_at"):
+            due = datetime.fromisoformat(body["due_at"])
+            due = due.replace(tzinfo=CHINA) if due.tzinfo is None else due.astimezone(CHINA)
+        elif body.get("due_date"):
+            due = datetime.combine(date.fromisoformat(body["due_date"]), datetime.max.time().replace(microsecond=0), CHINA)
+        else:
+            return "", None
+        timestamp = due.timestamp()
+        # Chat queries and reminders must be able to format the stored value
+        # on this platform as well as parse the supplied ISO representation.
+        datetime.fromtimestamp(timestamp, CHINA)
+        return due.date().isoformat(), timestamp
+    except (OverflowError, OSError):
+        raise ValueError("截止时间超出支持范围，请调整日期或时区。") from None
+
+
+def rule_matches(rule, text):
+    keyword = rule["keyword"].casefold()
+    return text.casefold() == keyword if rule["match_mode"] == "exact" else keyword in text.casefold()
 
 
 class GroupToolsService:
@@ -51,7 +63,9 @@ class GroupToolsService:
             with self.groups._connect() as connection:
                 return action(connection)
         async with self.groups._lock:
-            return await asyncio.to_thread(execute)
+            # A cancelled await cannot stop SQLite work in the worker thread.
+            # Keep capacity checks and updates serialized through its commit.
+            return await finish_before_cancel(asyncio.to_thread(execute))
 
     async def start(self):
         def initialize(db):
@@ -103,6 +117,15 @@ class GroupToolsService:
                 db.execute("UPDATE group_tasks SET due_at=? WHERE id=?", (deadline, row["id"]))
             db.execute("UPDATE group_tasks SET completed_at=updated_at WHERE status='done' AND completed_at=''")
             db.execute("UPDATE group_tasks SET source_kind='ai' WHERE source_id IS NOT NULL AND reminder_id IS NULL")
+            # Keep claims from deleted rules too: old hit logs may already have
+            # been pruned, but their callbacks must never trigger a new rule.
+            db.execute("""INSERT OR IGNORE INTO chat_reply_claims
+                (group_id,message_key,status,created_at,updated_at)
+                SELECT group_id,'keyword-message:'||substr(message_key,42),status,created_at,updated_at
+                FROM chat_reply_claims WHERE status='keyword'
+                AND substr(message_key,1,8)='keyword:' AND length(message_key)>41
+                AND substr(message_key,41,1)=':'
+                AND substr(message_key,9,32) NOT GLOB '*[^0-9a-f]*'""")
         await self.db(initialize)
         self._auto_report_groups = set(await self.db(lambda db: [row[0] for row in db.execute(
             "SELECT group_id FROM group_tool_preferences WHERE auto_reports=1")]))
@@ -183,9 +206,11 @@ class GroupToolsService:
             if not self.groups.allowed(group) or (automatic and not self.automatic_report_allowed(group)):
                 raise ModelError("此群的 AI 报表已暂停。")
             cached = await self.db(lambda db: db.execute("SELECT * FROM group_reports WHERE group_id=? AND kind=? AND start_date=?", (group, kind, str(start))).fetchone())
-            if cached and not force:
+            if cached and not force and cached["message_count"] > 0:
                 return dict(cached)
             count, messages = await self.text_window(group, start, end)
+            if cached and not force and not count:
+                return dict(cached)
             label = "周报" if kind == "week" else "月报"
             prompt, sampled_count = bounded_records(messages)
             if not count:
@@ -281,18 +306,24 @@ class GroupToolsService:
             await asyncio.sleep(60)
 
     async def save_rule(self, group, body, rule_id=None):
+        updating = rule_id is not None
         rule_id = rule_id or uuid4().hex
         def save(db):
-            existing = db.execute("SELECT 1 FROM keyword_rules WHERE group_id=? AND id=?", (group, rule_id)).fetchone()
-            if not existing and db.execute("SELECT count(*) FROM keyword_rules WHERE group_id=?", (group,)).fetchone()[0] >= 50:
-                raise ValueError("每群最多保存 50 条规则。")
-            db.execute("""INSERT INTO keyword_rules(id,group_id,name,keyword,match_mode,action,reply,enabled,cooldown)
-                VALUES (:id,:group_id,:name,:keyword,:match_mode,:action,:reply,:enabled,:cooldown)
-                ON CONFLICT(id) DO UPDATE SET name=excluded.name,keyword=excluded.keyword,match_mode=excluded.match_mode,
-                action=excluded.action,reply=excluded.reply,enabled=excluded.enabled,cooldown=excluded.cooldown""", {**body, "id": rule_id, "group_id": group})
+            values = {**body, "id": rule_id, "group_id": group}
+            if updating:
+                changed = db.execute("""UPDATE keyword_rules SET name=:name,keyword=:keyword,match_mode=:match_mode,
+                    action=:action,reply=:reply,enabled=:enabled,cooldown=:cooldown
+                    WHERE group_id=:group_id AND id=:id""", values).rowcount
+                if not changed:
+                    return None
+            else:
+                if db.execute("SELECT count(*) FROM keyword_rules WHERE group_id=?", (group,)).fetchone()[0] >= 50:
+                    raise ValueError("每群最多保存 50 条规则。")
+                db.execute("""INSERT INTO keyword_rules(id,group_id,name,keyword,match_mode,action,reply,enabled,cooldown)
+                    VALUES (:id,:group_id,:name,:keyword,:match_mode,:action,:reply,:enabled,:cooldown)""", values)
             self.groups._audit(db, group, body["name"], "保存关键词规则")
-        await self.db(save)
-        return rule_id
+            return rule_id
+        return await self.db(save)
 
     async def delete_rule(self, group, rule_id):
         def delete(db):
@@ -301,6 +332,7 @@ class GroupToolsService:
         await self.db(delete)
 
     async def receive(self, event):
+        event = normalize_group_sender(event)
         group = event_group(event)
         if not group or event.type != 1 or self.chatbot.own_message(event) or not self.groups.allowed(group, event.sender):
             return
@@ -314,13 +346,12 @@ class GroupToolsService:
         if identity and event.sender in ("", group) and event.content.startswith((identity + ":\n", identity + ":\r\n")):
             return
         for rule in rules:
-            text = event.content.removeprefix(event.sender + ":\n").strip()
-            keyword = rule["keyword"].casefold()
-            if not (text.casefold() == keyword if rule["match_mode"] == "exact" else keyword in text.casefold()):
+            text = event_text(event).strip()
+            if not rule_matches(rule, text):
                 continue
             key = str(event.msgid) if str(event.msgid) not in ("", "0") else hashlib.sha256(f"{event.sender}:{event.timestamp}:{text}".encode()).hexdigest()
             try:
-                self._queue.put_nowait((group, rule["id"], key, event.sender, text[:1000]))
+                self._queue.put_nowait((group, rule["id"], key, event.sender, text))
             except asyncio.QueueFull:
                 self.last_error = "关键词处理队列已满。"
             return True  # A message triggers at most one rule.
@@ -334,12 +365,14 @@ class GroupToolsService:
             if not row:
                 return None
             rule = dict(row)
+            if not rule_matches(rule, text):
+                return None
             if rule["last_triggered"] and (datetime.now(CHINA) - datetime.fromisoformat(rule["last_triggered"])).total_seconds() < rule["cooldown"]:
                 return None
-            claim_key = "keyword:" + rule_id + ":" + key
+            claim_key = "keyword-message:" + key
             if not db.execute("INSERT OR IGNORE INTO chat_reply_claims VALUES (?,?,'keyword',?,?)", (group, claim_key, now(), now())).rowcount:
                 return None
-            inserted = db.execute("INSERT OR IGNORE INTO keyword_hits(group_id,rule_id,rule_name,message_key,sender,content,status,created_at) VALUES (?,?,?,?,?,?,?,?)", (group, rule_id, rule["name"], key, sender, text, "recorded" if rule["action"] == "record" else "sending", now())).rowcount
+            inserted = db.execute("INSERT OR IGNORE INTO keyword_hits(group_id,rule_id,rule_name,message_key,sender,content,status,created_at) VALUES (?,?,?,?,?,?,?,?)", (group, rule_id, rule["name"], key, sender, text[:1000], "recorded" if rule["action"] == "record" else "sending", now())).rowcount
             if not inserted:
                 return None
             db.execute("UPDATE keyword_rules SET last_triggered=? WHERE id=?", (now(), rule_id))
@@ -349,15 +382,15 @@ class GroupToolsService:
         if not rule or rule["action"] == "record":
             return
         status = "skipped"
-        live = await self.db(lambda db: db.execute("SELECT enabled,reply FROM keyword_rules WHERE group_id=? AND id=?", (group, rule_id)).fetchone())
-        if live and live["enabled"] and self.groups.allowed(group, sender):
+        if self.groups.allowed(group, sender):
             async def still_enabled():
                 current = await self.db(lambda db: db.execute(
-                    "SELECT enabled,reply,action FROM keyword_rules WHERE group_id=? AND id=?", (group, rule_id)).fetchone())
+                    "SELECT enabled,reply,action,keyword,match_mode FROM keyword_rules WHERE group_id=? AND id=?", (group, rule_id)).fetchone())
                 return bool(current and current["enabled"] and current["action"] == "reply"
-                            and current["reply"] == live["reply"] and self.groups.allowed(group, sender))
+                            and all(current[field] == rule[field] for field in ("reply", "keyword", "match_mode"))
+                            and rule_matches(current, text) and self.groups.allowed(group, sender))
             try:
-                await self.chatbot._messenger.text(group, live["reply"], allowed=still_enabled)
+                await self.chatbot._messenger.text(group, rule["reply"], allowed=still_enabled)
                 status = "sent"
             except DeliveryBlocked:
                 status = "skipped"
@@ -392,6 +425,10 @@ class GroupToolsService:
         if count[0] >= 200 or (count[1] or 0) >= 50:
             raise ValueError("本群待提醒事项已达上限（每人50条、每群200条），请先取消部分提醒。")
 
+    def check_task_capacity(self, db, group):
+        if db.execute("SELECT count(*) FROM group_tasks WHERE group_id=? AND status='open'", (group,)).fetchone()[0] >= 1000:
+            raise ValueError("每群最多保留 1000 条未完成待办，请先完成或取消部分事项。")
+
     async def save_task(self, group, body, task_id=None):
         due_date, due_at = task_deadline(body)
         def save(db):
@@ -399,9 +436,16 @@ class GroupToolsService:
                 task = db.execute("SELECT * FROM group_tasks WHERE group_id=? AND id=?", (group, task_id)).fetchone()
                 if not task:
                     return None
+                if task["source_id"] is not None and db.execute(
+                    "SELECT 1 FROM group_tasks WHERE group_id=? AND source_id=? AND title=? AND id<>?",
+                    (group, task["source_id"], body["title"], task_id),
+                ).fetchone():
+                    raise ValueError("同一来源消息已存在相同标题的待办，请修改标题。")
                 if task["reminder_id"] and due_at is None:
                     raise ValueError("群提醒待办必须保留截止时间。")
                 reopen = task["status"] == "done" and task["completion_reason"] == "deadline" and due_at is not None and due_at > datetime.now(CHINA).timestamp()
+                if reopen:
+                    self.check_task_capacity(db, group)
                 if task["reminder_id"]:
                     reminder = db.execute("SELECT * FROM member_reminders WHERE id=?", (task["reminder_id"],)).fetchone()
                     status = reminder["status"]
@@ -430,8 +474,7 @@ class GroupToolsService:
                 existing = db.execute("SELECT id FROM group_tasks WHERE group_id=? AND source_id=? AND title=?", (group, source, body["title"])).fetchone()
                 if existing:
                     return existing[0]
-            if db.execute("SELECT count(*) FROM group_tasks WHERE group_id=?", (group,)).fetchone()[0] >= 1000:
-                raise ValueError("每群最多保存 1000 条待办。")
+            self.check_task_capacity(db, group)
             new_id, created = uuid4().hex, now()
             db.execute("""INSERT INTO group_tasks
                 (id,group_id,title,owner,due_date,status,source_id,created_at,updated_at,due_at,creator_id,creator_name,source_kind)
@@ -455,6 +498,8 @@ class GroupToolsService:
                 return False
             if task["status"] == status and not (status == "done" and task["completion_reason"] == "deadline"):
                 return True
+            if status == "open" and task["status"] != "open":
+                self.check_task_capacity(db, group)
             timestamp = now()
             if task["reminder_id"]:
                 reminder = db.execute("SELECT * FROM member_reminders WHERE id=?", (task["reminder_id"],)).fetchone()
@@ -517,6 +562,13 @@ class GroupToolsService:
             return f"{command}（{report['start_date']} 至 {report['end_date']}）\n{report['content']}"
         if command in ("待办", "本群待办", "到期待办"):
             data = await self.snapshot(group)
-            tasks = [task for task in data["tasks"] if task["status"] == "open" and (command != "到期待办" or (task["due_at"] is not None and task["due_at"] <= datetime.now(CHINA).timestamp()))]
-            return "本群待办：\n" + "\n".join(f"{i+1}. {task['title']}（{task['owner'] or '未分配'} / {datetime.fromtimestamp(task['due_at'], CHINA).strftime('%m-%d %H:%M:%S') if task['due_at'] is not None else '无截止日'}）" for i, task in enumerate(tasks[:20])) if tasks else "本群暂无符合条件的待办。"
+            if command == "到期待办":
+                timestamp = datetime.now(CHINA).timestamp()
+                tasks = [task for task in data["tasks"] if task["due_at"] is not None and task["due_at"] <= timestamp
+                         and (task["status"] == "open" or (task["status"] == "done" and task["completion_reason"] == "deadline"))]
+                tasks.sort(key=lambda task: task["due_at"], reverse=True)
+            else:
+                tasks = [task for task in data["tasks"] if task["status"] == "open"]
+            label = "本群到期待办（含到期自动完成）" if command == "到期待办" else "本群待办"
+            return label + "：\n" + "\n".join(f"{i+1}. {task['title']}（{task['owner'] or '未分配'} / {datetime.fromtimestamp(task['due_at'], CHINA).strftime('%m-%d %H:%M:%S') if task['due_at'] is not None else '无截止日'}）" for i, task in enumerate(tasks[:20])) if tasks else "本群暂无符合条件的待办。"
         return None

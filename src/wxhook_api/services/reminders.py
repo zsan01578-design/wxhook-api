@@ -130,8 +130,7 @@ class ReminderService:
                 if existing:
                     return dict(existing)
                 self.tools.check_reminder_capacity(db, group, sender)
-                if db.execute("SELECT count(*) FROM group_tasks WHERE group_id=?", (group,)).fetchone()[0] >= 1000:
-                    raise ValueError("每群最多保存 1000 条待办。")
+                self.tools.check_task_capacity(db, group)
                 # Queue and database waits must not consume the requested countdown.
                 created_at = now()
                 due, title = parse_reminder(command, datetime.fromisoformat(created_at).astimezone(CHINA))

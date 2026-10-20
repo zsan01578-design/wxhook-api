@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints
 
 from wxhook_api.routes.manage import GroupId
 from wxhook_api.services.chat_model import ModelError
+from wxhook_api.services.group_tools import task_deadline
 
 router = APIRouter(prefix="/api/manage/groups/{group}/tools", tags=["群工具"])
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
@@ -50,6 +51,7 @@ class Task(ToolBody):
         if value:
             if date.fromisoformat(value).isoformat() != value:
                 raise ValueError("日期格式必须为 YYYY-MM-DD")
+            task_deadline({"due_date": value})
         return value
 
     @field_validator("due_at")
@@ -58,7 +60,7 @@ class Task(ToolBody):
         if value:
             if "T" not in value and " " not in value:
                 raise ValueError("截止时间必须包含日期和时间")
-            datetime.fromisoformat(value)
+            task_deadline({"due_at": value})
         return value
 
 
@@ -103,9 +105,8 @@ async def add_rule(group: GroupId, body: Rule, request: Request):
 @router.put("/rules/{rule_id}")
 async def update_rule(group: GroupId, rule_id: str, body: Rule, request: Request):
     tools = await service(request, group)
-    if not any(rule["id"] == rule_id for rule in (await tools.snapshot(group))["rules"]):
+    if not await tools.save_rule(group, body.model_dump(), rule_id):
         raise HTTPException(404, "规则不存在")
-    await tools.save_rule(group, body.model_dump(), rule_id)
     return {"saved": True}
 
 

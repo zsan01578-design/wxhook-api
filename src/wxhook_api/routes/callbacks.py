@@ -16,8 +16,12 @@ router = APIRouter()
 
 
 def _allowed_callback(url: str, settings: Settings) -> bool:
-    parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.fragment:
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.fragment:
+            return False
+        parsed.port
+    except ValueError:
         return False
     return url.rstrip("/") in {allowed.rstrip("/") for allowed in settings.allowed_callback_urls}
 

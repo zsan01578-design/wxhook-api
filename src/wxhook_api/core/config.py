@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "version.yml"
 def _parse_port(value: Any, name: str) -> int:
     try:
         port = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{name} must be an integer port") from exc
     if not 1 <= port <= 65535:
         raise ValueError(f"{name} must be between 1 and 65535")
@@ -28,8 +29,8 @@ def _parse_float(value: Any, name: str, minimum: float = 0.01) -> float:
         number = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{name} must be a number") from exc
-    if number < minimum:
-        raise ValueError(f"{name} must be at least {minimum}")
+    if not math.isfinite(number) or number < minimum:
+        raise ValueError(f"{name} must be finite and at least {minimum}")
     return number
 
 

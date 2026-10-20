@@ -14,12 +14,13 @@ from uuid import uuid4
 import httpx
 
 from wxhook_api.core.douyin_config import DouyinOptions, GroupSettings, save_group_settings
+from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links
 from wxhook_api.services.douyin_delivery import DeliveryBlocked, DeliveryError, DouyinMessenger
 from wxhook_api.services.douyin_api import DouyinAPIParser
 from wxhook_api.services.parse_video import ParseVideoParser, REFERERS, source_platform
-from wxhook_api.services.groups import GroupManager, event_group
+from wxhook_api.services.groups import GroupManager, event_group, normalize_group_sender
 from wxhook_api.services.media_cleanup import ACTIVE_STATES, cleanup_media, next_cleanup_at, safe_child, timestamp, utcnow
 
 
@@ -61,6 +62,7 @@ class DouyinService:
         self.group_manager: GroupManager | None = None
         self.messenger: DouyinMessenger | None = None
         self.account_check = None
+        self.own_message_check = None
         self.cleanup_status = {"enabled": options.retention.enabled, "next_run_at": "", "last_run_at": "", "error": ""}
 
     def allowed(self, group: str, sender: str = "") -> bool:
@@ -74,8 +76,11 @@ class DouyinService:
         return self.group_manager.feature(group, "auto_download", fallback) if self.group_manager else fallback
 
     async def configure(self, settings: GroupSettings) -> None:
-        async with self._config_lock:
+        async def commit():
             self.options = await asyncio.to_thread(save_group_settings, self.options, settings)
+
+        async with self._config_lock:
+            await finish_before_cancel(commit())
 
     def _changed(self) -> None:
         self.revision = uuid4().hex
@@ -148,6 +153,7 @@ class DouyinService:
             self._client = None
 
     async def receive(self, event: CallbackEvent) -> None:
+        event = normalize_group_sender(event)
         group = event_group(event)
         if not self._accepting or not self.allowed(group, event.sender):
             return
@@ -155,6 +161,10 @@ class DouyinService:
         # A configuration mismatch must produce a visible job and failure notice.
         links = extract_links(event.content, multi_platform=True)
         if links and self.account_check is not None and not await self.account_check():
+            return
+        # Account verification may have discovered our identity for the first
+        # time; exclude self messages again before creating any parsing jobs.
+        if self.own_message_check is not None and self.own_message_check(event):
             return
         for link in links:
             key = (group, str(event.msgid), link)
@@ -192,6 +202,18 @@ class DouyinService:
         temporary.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(folder / "result.json")
 
+    async def _persist(self, job: dict[str, Any]) -> None:
+        # A cancelled await cannot stop the writer thread. Settle this write
+        # before finalization starts another one or releases cleanup protection.
+        async def write():
+            try:
+                await asyncio.to_thread(self._save, job)
+            except OSError:
+                # Record failures even when cancellation wins at the boundary.
+                job["storage_error"] = "无法保存解析记录，请检查下载目录权限和剩余磁盘空间"
+                raise
+        await finish_before_cancel(write())
+
     async def _notice(self, job: dict, stage: str, message: str) -> None:
         notifications = job.setdefault("notifications", {})
         if not self.messenger or not self.options.settings.notify_group or not self.allowed(job["group_id"], job["sender"]):
@@ -217,12 +239,12 @@ class DouyinService:
     async def _run_notices(self) -> None:
         while True:
             job, stage, message = await self._notices.get()
-            async with self._maintenance_lock:
-                self._active_jobs.add(job["id"])
             try:
+                async with self._maintenance_lock:
+                    self._active_jobs.add(job["id"])
                 await self._notice(job, stage, message)
                 job["finished_at"] = utcnow().isoformat()
-                await asyncio.to_thread(self._save, job)
+                await self._persist(job)
             except OSError:
                 job["storage_error"] = "无法保存群提示记录，请检查下载目录"
             finally:
@@ -259,7 +281,7 @@ class DouyinService:
                     if not self.options.settings.send_results:
                         raise DeliveryError("自动回传已关闭，已停止后续发送")
                     file.update(send_status="sending", send_mode=mode)
-                    await asyncio.to_thread(self._save, job)
+                    await self._persist(job)
                     self._changed()
                     try:
                         # Writing the durable record yields to policy updates.
@@ -279,7 +301,7 @@ class DouyinService:
                             file["send_status"] = "skipped" if isinstance(exc, DeliveryBlocked) else "unknown" if exc.uncertain else "failed"
                         raise
                     file["send_status"] = "sent"
-                    await asyncio.to_thread(self._save, job)
+                    await self._persist(job)
                     self._changed()
         except Exception as exc:
             uncertain = isinstance(exc, TimeoutError) or getattr(exc, "uncertain", False) or any(file.get("send_status") == "sending" for file in job["files"])
@@ -296,16 +318,16 @@ class DouyinService:
     async def _run(self) -> None:
         while True:
             job = await self._queue.get()
-            async with self._maintenance_lock:
-                self._active_jobs.add(job["id"])
             try:
+                async with self._maintenance_lock:
+                    self._active_jobs.add(job["id"])
                 if not self.allowed(job["group_id"], job["sender"]):
                     raise DouyinError("群聊或成员已被限制，或解析功能已停用")
                 if self.account_check is not None and not await self.account_check():
                     raise DouyinError("微信账号无法确认或已变化，已停止解析")
                 job["status"] = "parsing"
                 self._changed()
-                await asyncio.to_thread(self._save, job)
+                await self._persist(job)
                 await self._notice(job, "start", "开始解析")
                 async with asyncio.timeout(240):
                     config = self.options.settings
@@ -351,16 +373,18 @@ class DouyinService:
             except Exception:
                 job.update(status="failed", error="分享数据格式不受支持，请提供原始分享链接以排查")
             finally:
-                if job["status"] == "failed":
-                    await self._notice(job, "failure", f"解析失败：{job['error']}")
                 try:
-                    job["finished_at"] = utcnow().isoformat()
-                    await asyncio.to_thread(self._save, job)
-                except OSError:
-                    job["storage_error"] = "无法保存解析记录，请检查下载目录权限和剩余磁盘空间"
-                self._active_jobs.discard(job["id"])
-                self._queue.task_done()
-                self._changed()
+                    if job["status"] == "failed":
+                        await self._notice(job, "failure", f"解析失败：{job['error']}")
+                    try:
+                        job["finished_at"] = utcnow().isoformat()
+                        await self._persist(job)
+                    except OSError:
+                        job["storage_error"] = "无法保存解析记录，请检查下载目录权限和剩余磁盘空间"
+                finally:
+                    self._active_jobs.discard(job["id"])
+                    self._queue.task_done()
+                    self._changed()
 
     async def cleanup_expired(self, *, now: datetime | None = None):
         policy = self.options.retention
@@ -371,27 +395,22 @@ class DouyinService:
             active = self._active_jobs | self._file_leases.keys() | {
                 job_id for job_id, job in self._jobs.items() if job.get("status") in ACTIVE_STATES
             }
-            work = asyncio.create_task(asyncio.to_thread(cleanup_media, self.options.output_dir, policy, active, checked))
-            cancelled = False
-            try:
-                report = await asyncio.shield(work)
-            except asyncio.CancelledError:
-                # Finish the bounded filesystem pass before shutdown; do not leave
-                # an untracked deletion thread running after service.stop().
-                cancelled = True
-                report = await work
-            for job_id, job in report.updated.items():
-                if job_id in self._jobs:
-                    self._jobs[job_id].clear()
-                    self._jobs[job_id].update(job)
-            for job_id in report.removed:
-                self._jobs.pop(job_id, None)
-            self.cleanup_status.update(report.summary(), last_run_at=checked.isoformat(),
-                error="部分文件无法清理，将在下次清理时重试" if report.errors else "")
-            self._changed()
-            if cancelled:
-                raise asyncio.CancelledError
-            return report
+            async def sweep():
+                report = await asyncio.to_thread(cleanup_media, self.options.output_dir, policy, active, checked)
+                for job_id, job in report.updated.items():
+                    if job_id in self._jobs:
+                        self._jobs[job_id].clear()
+                        self._jobs[job_id].update(job)
+                for job_id in report.removed:
+                    self._jobs.pop(job_id, None)
+                self.cleanup_status.update(report.summary(), last_run_at=checked.isoformat(),
+                    error="部分文件无法清理，将在下次清理时重试" if report.errors else "")
+                self._changed()
+                return report
+
+            # Repeated cancellation must not release file protection while the
+            # deletion thread or its in-memory status update is still running.
+            return await finish_before_cancel(sweep())
 
     async def _run_cleanup(self) -> None:
         # Catch up expired files when the computer was off at the scheduled time.

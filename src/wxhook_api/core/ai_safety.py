@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import os
@@ -76,7 +76,7 @@ class ModelBudget:
 
         def write():
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with sqlite3.connect(self.path, timeout=5) as db:
+            with closing(sqlite3.connect(self.path, timeout=5)) as db, db:
                 db.execute("CREATE TABLE IF NOT EXISTS ai_usage(day TEXT,kind TEXT,group_id TEXT,sender TEXT,used INTEGER NOT NULL,PRIMARY KEY(day,kind,group_id,sender))")
                 db.execute("BEGIN IMMEDIATE")
                 for kind, gid, sid, limit in scopes:

@@ -28,6 +28,28 @@ def event_group(event: CallbackEvent) -> str:
     return group if re.fullmatch(GROUP_PATTERN, group) else ""
 
 
+def event_sender(event: CallbackEvent) -> str:
+    group = event_group(event)
+    if group and event.sender in ("", group):
+        prefix = re.match(r"^([A-Za-z0-9_.-]{1,256}):\r?\n", event.content)
+        if prefix:
+            return prefix[1]
+    return event.sender
+
+
+def normalize_group_sender(event: CallbackEvent) -> CallbackEvent:
+    sender = event_sender(event)
+    return event.model_copy(update={"sender": sender}) if sender != event.sender else event
+
+
+def event_text(event: CallbackEvent) -> str:
+    for newline in ("\r\n", "\n"):
+        prefix = event.sender + ":" + newline
+        if event.content.startswith(prefix):
+            return event.content[len(prefix):]
+    return event.content
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -113,9 +135,15 @@ class GroupManager:
                             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
                 for group in legacy_groups:
                     db.execute("INSERT OR IGNORE INTO groups (id, created_at) VALUES (?, ?)", (group, now()))
-        async with self._lock:
-            await asyncio.to_thread(initialize)
-            await asyncio.to_thread(self._reload)
+                if not db.execute("SELECT 1 FROM sync_metadata WHERE key='member_message_counts_v1'").fetchone():
+                    # Repair counts left by earlier sender enrichment without
+                    # changing member names, membership or blacklist policies.
+                    db.execute("UPDATE members SET message_count=0")
+                    db.executemany("UPDATE members SET message_count=? WHERE group_id=? AND id=?",
+                        ((row["total"], row["group_id"], row["sender"]) for row in db.execute(
+                            "SELECT group_id,sender,count(*) AS total FROM chat_messages GROUP BY group_id,sender")))
+                    db.execute("INSERT INTO sync_metadata(key,value) VALUES ('member_message_counts_v1',?)", (now(),))
+        await self._write_policy(initialize)
 
     def _reload(self):
         with self._connect() as db:
@@ -157,10 +185,10 @@ class GroupManager:
             with self._connect() as db:
                 message_id = str(event.msgid)
                 self._save_messages(db, group, [{"key": f"server:{message_id}" if message_id not in {"", "0"} else f"callback:{uuid4().hex}",
-                    "msgid": message_id, "sender": event.sender, "type": event.type,
+                    "msgid": message_id, "sender": event_sender(event), "type": event.type,
                     "timestamp": event.timestamp, "content": event.content, "source": "callback", "raw": event.model_dump()}])
         async with self._lock:
-            await asyncio.to_thread(record)
+            await finish_before_cancel(asyncio.to_thread(record))
 
     @staticmethod
     def _audit(db, group: str, target: str, action: str):
@@ -203,14 +231,14 @@ class GroupManager:
             with self._connect() as db:
                 return bool(db.execute("INSERT OR IGNORE INTO chat_reply_claims (group_id,message_key,status,created_at,updated_at) VALUES (?,?,'claimed',?,?)", (group, key, now(), now())).rowcount)
         async with self._lock:
-            return await asyncio.to_thread(claim)
+            return await finish_before_cancel(asyncio.to_thread(claim))
 
     async def finish_chat_reply(self, group: str, key: str, status: str) -> None:
         def finish():
             with self._connect() as db:
                 db.execute("UPDATE chat_reply_claims SET status=?,updated_at=? WHERE group_id=? AND message_key=?", (status, now(), group, key))
         async with self._lock:
-            await asyncio.to_thread(finish)
+            await finish_before_cancel(asyncio.to_thread(finish))
 
     async def update_group(self, group: str, changes: dict) -> bool:
         labels = {"name": "修改群名称", "note": "修改群备注", "pinned": "置顶群聊", "enabled": "群功能总开关", "blocked": "群聊黑名单", "douyin_enabled": "抖音解析", "auto_download": "自动保存媒体", "chat_enabled": "@机器人问答", "summary_enabled": "自动 AI 日总结"}
@@ -285,7 +313,7 @@ class GroupManager:
         added, unseen_history = 0, 0
         for message in messages:
             if message["source"] == "history":
-                existing = db.execute("SELECT source FROM chat_messages WHERE group_id=? AND msg_key=?", (group, message["key"])).fetchone()
+                existing = db.execute("SELECT source,sender FROM chat_messages WHERE group_id=? AND msg_key=?", (group, message["key"])).fetchone()
                 if not existing or existing["source"] != "history":
                     unseen_history += 1
             timestamp = int(message["timestamp"]) or int(datetime.now(timezone.utc).timestamp())
@@ -303,9 +331,14 @@ class GroupManager:
                         content=CASE WHEN ?<>'' THEN ? ELSE content END WHERE group_id=? AND msg_key=?""",
                         (values[-1], message["type"], timestamp, message["sender"], message["sender"], message["content"], message["content"], group, message["key"]))
                     sender = message["sender"]
+                    sender_changed = bool(sender and sender != existing["sender"])
+                    if sender_changed:
+                        db.execute("UPDATE members SET message_count=MAX(0,message_count-1) WHERE group_id=? AND id=?",
+                                   (group, existing["sender"]))
                     if sender and sender != group and len(sender) <= 256:
-                        db.execute("""INSERT INTO members (group_id,id,last_seen) VALUES (?,?,?)
-                            ON CONFLICT(group_id,id) DO UPDATE SET last_seen=MAX(last_seen,excluded.last_seen)""", (group, sender, seen_at))
+                        db.execute("""INSERT INTO members (group_id,id,last_seen,message_count) VALUES (?,?,?,?)
+                            ON CONFLICT(group_id,id) DO UPDATE SET last_seen=MAX(last_seen,excluded.last_seen),
+                            message_count=message_count+excluded.message_count""", (group, sender, seen_at, int(sender_changed)))
                         if message.get("sender_name"):
                             db.execute("UPDATE members SET wechat_name=? WHERE group_id=? AND id=?", (message["sender_name"], group, sender))
                 continue
@@ -339,7 +372,7 @@ class GroupManager:
                         db.execute("""INSERT INTO members (group_id,id,wechat_name,membership) VALUES (?,?,?,'current')
                             ON CONFLICT(group_id,id) DO UPDATE SET wechat_name=excluded.wechat_name,membership='current'""", (group, member["id"], member["name"]))
         async with self._lock:
-            await asyncio.to_thread(write)
+            await finish_before_cancel(asyncio.to_thread(write))
 
     async def claim_account(self, account: str) -> None:
         if self.account_error:
@@ -350,12 +383,19 @@ class GroupManager:
                 if row and row[0] != account:
                     raise AccountMismatchError("微信账号与本地资料库不一致，请为新账号设置独立的 WXHOOK_MANAGEMENT_DB 后重启")
                 db.execute("INSERT OR IGNORE INTO sync_metadata (key,value) VALUES ('account',?)", (account,))
-        async with self._lock:
+        async def verify():
+            if self.account_error:
+                raise AccountMismatchError(self.account_error)
             try:
                 await asyncio.to_thread(write)
             except AccountMismatchError as exc:
                 self.suspend_account(str(exc))
                 raise
+
+        async with self._lock:
+            # Preserve a mismatch discovered by the database thread even if
+            # its caller was cancelled while waiting for account verification.
+            await finish_before_cancel(verify())
 
     async def history_checkpoint(self, group: str, *, next_page: int, complete: bool, error: str = "") -> None:
         def write():
@@ -363,14 +403,14 @@ class GroupManager:
                 db.execute("UPDATE groups SET history_next_page=?,history_complete=?,history_error=?,history_synced_at=? WHERE id=?",
                            (next_page, complete, error, now() if not error else "", group))
         async with self._lock:
-            await asyncio.to_thread(write)
+            await finish_before_cancel(asyncio.to_thread(write))
 
     async def history_failure(self, group: str, error: str) -> None:
         def write():
             with self._connect() as db:
                 db.execute("UPDATE groups SET history_error=? WHERE id=?", (error, group))
         async with self._lock:
-            await asyncio.to_thread(write)
+            await finish_before_cancel(asyncio.to_thread(write))
 
     async def import_history(self, group: str, rows: list[dict]) -> tuple[int, int]:
         normalized = []
@@ -390,8 +430,8 @@ class GroupManager:
             sender = str(row.get("real_sender") or row.get("sender") or "")
             if sender == "0":
                 sender = ""
-            if not sender:
-                prefix = re.match(r"^([A-Za-z0-9_.-]{1,256}):\n", content)
+            if sender in ("", group):
+                prefix = re.match(r"^([A-Za-z0-9_.-]{1,256}):\r?\n", content)
                 if prefix:
                     sender = prefix[1]
             normalized.append({"key": key, "msgid": server, "sender": sender, "sender_name": str(row.get("sender_nickname") or "")[:256],
@@ -401,7 +441,7 @@ class GroupManager:
             with self._connect() as db:
                 return self._save_messages(db, group, normalized)
         async with self._lock:
-            return await asyncio.to_thread(write)
+            return await finish_before_cancel(asyncio.to_thread(write))
 
     async def word_cloud(self, group: str, *, bot_wxid: str = "") -> dict:
         def read():
@@ -556,7 +596,7 @@ class GroupManager:
                 row = db.execute("SELECT group_id,summary_date,summary,message_count,created_at,updated_at FROM chat_summaries WHERE group_id=? AND summary_date=?", (group, summary_date)).fetchone()
                 return dict(row)
         async with self._lock:
-            return await asyncio.to_thread(write)
+            return await finish_before_cancel(asyncio.to_thread(write))
 
     async def summary_group_ids(self) -> list[str]:
         def read():

@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import os
 import re
 from typing import Any
@@ -30,8 +31,11 @@ class SyncOptions:
 
     @classmethod
     def from_environment(cls):
+        interval = float(os.getenv("WXHOOK_SYNC_INTERVAL", "60"))
+        if not math.isfinite(interval):
+            raise ValueError("WXHOOK_SYNC_INTERVAL 必须为有限数值")
         return cls(enabled=os.getenv("WXHOOK_SYNC_ENABLED", "true").lower() not in {"0", "false", "off"},
-                   interval=max(5, float(os.getenv("WXHOOK_SYNC_INTERVAL", "60"))))
+                   interval=max(5, interval))
 
 
 def quoted(identifier: str) -> str:

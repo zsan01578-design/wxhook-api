@@ -142,19 +142,20 @@ function renderMessages(data) {
   }
   const fragment = document.createDocumentFragment();
   for (const message of data.messages) {
+    const group = message.roomid || (message.wxid?.endsWith("@chatroom") ? message.wxid : "");
     const card = node("article", "message-card");
     const header = node("div", "message-header");
-    header.append(node("span", "message-peer", message.roomid || message.sender || message.wxid || "未知来源"));
+    header.append(node("span", "message-peer", group || message.sender || message.wxid || "未知来源"));
     const date = new Date(message.received_at);
     header.append(node("time", "message-time", date.toLocaleTimeString("zh-CN", { hour12: false })));
     const type = message.type === 1 ? "文本" : `消息类型 ${message.type}`;
-    const meta = message.roomid ? `群消息 · ${type} · 发送人 ${message.sender || "未知"}` : `私聊 · ${type}`;
+    const meta = group ? `群消息 · ${type} · 发送人 ${message.sender || "未知"}` : `私聊 · ${type}`;
     const content = node("p", "message-content", message.content || "（内容为空）");
     const bottom = node("div", "message-bottom");
     bottom.append(node("span", "message-id", `ID ${message.msgid}`));
-    const target = message.roomid || message.sender || message.wxid;
+    const target = group || message.sender || message.wxid;
     if (target) {
-      const reply = node("button", "reply-button", message.roomid ? "回复到群聊 ↗" : "回复 ↗");
+      const reply = node("button", "reply-button", group ? "回复到群聊 ↗" : "回复 ↗");
       reply.type = "button";
       reply.addEventListener("click", () => {
         $("recipient").value = target;

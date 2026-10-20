@@ -12,6 +12,7 @@ let wordCloud = null, chatSummary = null, chatRadar = null;
 let groupTools = null, radarDays = 14;
 let taskView = "open", taskPage = 1;
 const chatSignatures = new WeakMap();
+const taskCandidates = new Map();
 
 function el(tag, className = "", text) {
   const node = document.createElement(tag);
@@ -354,7 +355,7 @@ function updateTaskCountdowns() {
 function taskSection(group, data) {
   const section = el("section", "task-section"), heading = el("div", "task-heading"), actions = el("div", "tool-actions");
   heading.append(el("h3", "", "群待办"));
-  actions.append(button("新增", "button small", () => taskDialog(group.id), "plus"), button("AI 提取待办", "button small primary", event => extractTaskDialog(event.currentTarget, group.id), "search"));
+  actions.append(button("新增", "button small", () => taskDialog(group.id), "plus"), button(taskCandidates.get(group.id)?.length ? "继续核对待办" : "AI 提取待办", "button small primary", event => extractTaskDialog(event.currentTarget, group.id), "search"));
   heading.append(actions); section.append(heading);
   const remindLabel = el("label", "tool-check"), remind = el("input"); remind.type = "checkbox"; remind.checked = data.task_reminders;
   remind.addEventListener("change", event => toolsAction(event.currentTarget, group.id, "/preferences", {task_reminders: remind.checked}, "PATCH"));
@@ -400,12 +401,14 @@ function taskSection(group, data) {
 function renderTools(group) {
   const root = $("tab-content"), data = groupTools;
   if (!data || data.group_id !== group.id || data.error) { root.replaceChildren(empty("群工具暂时无法加载", data?.error || "请刷新后重试。")); return; }
+  const expanded = new Set([...root.querySelectorAll(".tool-report[open]")].map(node => node.dataset.reportKey));
+  const oldScroll = root.scrollTop;
   const reports = toolCard("周报 / 月报", "总结上一完整自然周（周一至周日）或自然月；开启自动生成后会在本机保存，群里可 @机器人发送“周报”或“月报”。");
   const reportActions = el("div", "tool-actions");
   [["week", "生成上周周报"], ["month", "生成上月月报"]].forEach(([kind, label]) => reportActions.append(button(label, "button small", event => toolsAction(event.currentTarget, group.id, `/reports/${kind}`, {}, "POST", "报表已生成"))));
   const auto = el("label", "tool-check"), checkbox = el("input"); checkbox.type = "checkbox"; checkbox.checked = data.auto_reports;
   checkbox.addEventListener("change", event => toolsAction(event.currentTarget, group.id, "/preferences", {auto_reports: checkbox.checked,task_reminders:data.task_reminders}, "PATCH")); auto.append(checkbox, document.createTextNode("自动生成周报 / 月报")); reportActions.append(auto); reports.append(reportActions);
-  data.reports.slice(0, 6).forEach(report => { const details = el("details", "tool-report"), summary = el("summary", "", `${report.kind === "week" ? "周报" : "月报"} · ${report.start_date} 至 ${report.end_date}`); details.append(summary, el("p", "tool-report-content", report.content), el("p", "tool-description", `${report.message_count} 条成员文本 · 选取 ${report.sampled_count} 条生成 · ${dateText(report.updated_at, true)}`)); reports.append(details); });
+  data.reports.slice(0, 6).forEach(report => { const details = el("details", "tool-report"), summary = el("summary", "", `${report.kind === "week" ? "周报" : "月报"} · ${report.start_date} 至 ${report.end_date}`); details.dataset.reportKey = JSON.stringify([group.id, report.kind, report.start_date]); details.open = expanded.has(details.dataset.reportKey); details.append(summary, el("p", "tool-report-content", report.content), el("p", "tool-description", `${report.message_count} 条成员文本 · 选取 ${report.sampled_count} 条生成 · ${dateText(report.updated_at, true)}`)); reports.append(details); });
   if (!data.reports.length) reports.append(el("p", "tool-description", "还没有报表，可点击生成。"));
   const rules = toolCard("关键词规则", "实时文字消息按关键词匹配，可记录命中或回复固定内容。每条消息最多触发一条规则，支持冷却时间，并遵循群总开关和黑名单。");
   rules.append(button("添加规则", "button small", () => ruleDialog(group.id)));
@@ -415,6 +418,7 @@ function renderTools(group) {
   data.hits.forEach(hit => { const row = el("div", "tool-hit"); row.append(el("strong", "", `${hit.rule_name} · ${{recorded:"已记录",sending:"发送中 / 未确认",sent:"已发送",unknown:"发送未确认",skipped:"已停止"}[hit.status] || hit.status}`), el("p", "", hit.content), el("small", "", `${hit.sender} · ${dateText(hit.created_at, true)}`)); hits.append(row); });
   if (!data.hits.length) hits.append(el("p", "tool-description", "暂无命中记录。"));
   root.replaceChildren(tasks, reports, rules, hits);
+  root.scrollTop = oldScroll;
   updateTaskCountdowns();
 }
 function selectField(form, label, values, value) {
@@ -431,22 +435,41 @@ function ruleDialog(group, rule = {}) {
   name.required = keyword.required = true; const footer = formFooter(form); body.append(form);
   bindForm(form, footer, async () => { if (action.value === "reply" && !reply.value.trim()) throw new Error("请填写固定回复内容"); await api(`${toolsPath(group)}/rules${rule.id ? `/${rule.id}` : ""}`, {name:name.value,keyword:keyword.value,match_mode:mode.value,action:action.value,reply:reply.value,cooldown:Number(cooldown.value),enabled:enabled.value === "true"}, rule.id ? "PUT" : "POST"); await reloadTools(group); });
 }
-function taskDialog(group, candidate = {}) {
+function taskDialog(group, candidate = {}, fromBatch = false) {
   const deadline = candidate.due_at == null ? (candidate.due_date ? `${candidate.due_date}T23:59:59` : "") : new Date(candidate.due_at * 1000 + 8 * 3600000).toISOString().slice(0, 19);
   const body = showDialog(candidate.id ? "编辑群待办" : "新增群待办"), form = el("form"), title = formField(form, "待办事项", "需要完成什么", candidate.title || "", false, 200), owner = formField(form, "负责人", "可留空", candidate.owner || "", false, 80), due = formField(form, "截止时间（北京时间）", "", deadline); due.type = "datetime-local"; due.step = "1"; due.required = Boolean(candidate.reminder_id); title.required = true;
   if (candidate.source_content) form.append(el("p", "tool-source", `来源消息：${candidate.source_content}`));
+  if (fromBatch) body.append(button("返回候选列表", "text-link", () => showTaskCandidates(group)));
   const footer = formFooter(form, "保存待办"); body.append(form);
-  bindForm(form, footer, async () => { await api(`${toolsPath(group)}/tasks${candidate.id ? `/${candidate.id}` : ""}`, {title:title.value,owner:owner.value,due_at:due.value ? `${due.value}+08:00` : "",source_id:candidate.source_id || null}, candidate.id ? "PUT" : "POST"); await reloadTools(group); });
+  bindForm(form, footer, async () => {
+    await api(`${toolsPath(group)}/tasks${candidate.id ? `/${candidate.id}` : ""}`, {title:title.value,owner:owner.value,due_at:due.value ? `${due.value}+08:00` : "",source_id:candidate.source_id || null}, candidate.id ? "PUT" : "POST");
+    if (fromBatch) {
+      const remaining = (taskCandidates.get(group) || []).filter(item => item !== candidate);
+      if (remaining.length) taskCandidates.set(group, remaining); else taskCandidates.delete(group);
+    }
+  }, fromBatch ? () => showTaskCandidates(group, "本批候选已全部保存。") : undefined);
 }
-async function extractTaskDialog(source, group) {
+function showTaskCandidates(group, emptyText = "没有发现明确的待办。") {
+  const candidates = taskCandidates.get(group) || [];
+  const body = showDialog("待办候选项");
+  body.append(el("p", "modal-copy", "逐条核对并保存，未保存的候选可在本次页面中继续核对。"));
+  candidates.forEach(candidate => {
+    const row = el("div", "tool-row"), copy = el("div", "tool-row-copy");
+    copy.append(el("strong", "", candidate.title), el("p", "", `${candidate.owner || "未分配"} · ${candidate.due_date || "无截止日"}`), el("p", "tool-source", candidate.source_content));
+    row.append(copy, button("核对并保存", "button small", () => taskDialog(group, candidate, true))); body.append(row);
+  });
+  if (!candidates.length) body.append(el("p", "modal-copy", emptyText));
+  body.append(button("重新提取", "button small", event => extractTaskDialog(event.currentTarget, group, true)));
+}
+async function extractTaskDialog(source, group, force = false) {
+  if (!force && taskCandidates.get(group)?.length) { showTaskCandidates(group); return; }
   source.disabled = true; source.textContent = "提取中…";
   try {
     const result = await api(`${toolsPath(group)}/tasks/extract`, {}, "POST", 65000);
-    const body = showDialog("待办候选项"); body.append(el("p", "modal-copy", "核对原始消息后，点击保存并补充负责人或日期。"));
-    result.candidates.forEach(candidate => { const row = el("div", "tool-row"), copy = el("div", "tool-row-copy"); copy.append(el("strong", "", candidate.title), el("p", "", `${candidate.owner || "未分配"} · ${candidate.due_date || "无截止日"}`), el("p", "tool-source", candidate.source_content)); row.append(copy, button("核对并保存", "button small", () => taskDialog(group, candidate))); body.append(row); });
-    if (!result.candidates.length) body.append(el("p", "modal-copy", "没有发现明确的待办。"));
+    taskCandidates.set(group, result.candidates);
+    showTaskCandidates(group);
   } catch (error) { toast(error.message, true); }
-  finally { if (source.isConnected) { source.disabled = false; source.textContent = "AI 提取待办"; } }
+  finally { if (source.isConnected) { source.disabled = false; source.textContent = taskCandidates.get(group)?.length ? "继续核对待办" : "AI 提取待办"; } }
 }
 function renderWordCloud(words) {
   const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
@@ -487,13 +510,22 @@ function renderWordCloud(words) {
   return svg;
 }
 function renderMembers(group) {
+  const description = group.members_sync === "complete" ? "已同步微信成员名单，保留历史成员与本地添加记录；黑名单仅在当前群生效。" : "暂未取得完整微信成员关系，展示已发现与手动添加的成员。";
+  const existing = $("member-table-container");
+  if (existing?.dataset.group === group.id) {
+    $("member-description").textContent = description;
+    renderMemberTable(group);
+    return;
+  }
   const heading = el("div", "section-heading"), copy = el("div");
-  copy.append(el("h3", "", "群成员管理"), el("p", "", group.members_sync === "complete" ? "已同步微信成员名单，保留历史成员与本地添加记录；黑名单仅在当前群生效。" : "暂未取得完整微信成员关系，展示已发现与手动添加的成员。")); heading.append(copy);
+  const hint = el("p", "", description); hint.id = "member-description";
+  copy.append(el("h3", "", "群成员管理"), hint); heading.append(copy);
   const tools = el("div", "member-toolbar"), search = el("div", "search-field"), input = el("input");
   input.type = "search"; input.placeholder = "搜索名称或 wxid"; input.setAttribute("aria-label", "搜索群成员"); input.value = memberQuery;
   input.addEventListener("input", () => { memberQuery = input.value; renderMemberTable(group); });
   search.append(icon("search"), input); tools.append(search, button("添加成员", "button small", () => addMemberDialog(group), "plus"));
   const container = el("div"); container.id = "member-table-container";
+  container.dataset.group = group.id;
   $("tab-content").replaceChildren(heading, tools, container); renderMemberTable(group);
 }
 function renderMemberTable(group) {
@@ -528,7 +560,7 @@ function renderMessages() {
     const viewport = el("div", "chat-viewport");
     log = el("div", "chat-log"); log.id = "chat-log"; log.dataset.group = group.id; log.setAttribute("role", "log"); log.setAttribute("aria-label", "群聊消息");
     const jump = button("回到最新消息", "chat-jump", latestMessages, "chat"); jump.id = "chat-jump"; jump.hidden = true;
-    log.addEventListener("scroll", () => { jump.hidden = messagePage === 1 && !messageQuery && log.scrollHeight - log.clientHeight - log.scrollTop < 80; });
+    log.addEventListener("scroll", () => { jump.hidden = log.dataset.stale !== "true" && messagePage === 1 && !messageQuery && log.scrollHeight - log.clientHeight - log.scrollTop < 80; });
     viewport.append(log, jump); $("tab-content").replaceChildren(toolbar, notice, viewport);
     resetChatScroll = true;
   }
@@ -542,8 +574,19 @@ function renderMessages() {
   notice.classList.toggle("chat-error", Boolean(group.history_error));
   const signature = JSON.stringify([messages, members.map(person => [person.id, person.name, person.blocked]), messagePage, messageQuery, ownWxid]);
   if (chatSignatures.get(log) === signature && !resetChatScroll) return;
-  const oldTop = log.scrollTop, oldHeight = log.scrollHeight, follow = resetChatScroll || oldHeight - log.clientHeight - oldTop < 80;
+  const oldTop = log.scrollTop, oldHeight = log.scrollHeight, follow = resetChatScroll || (messagePage === 1 && !messageQuery && oldHeight - log.clientHeight - oldTop < 80);
+  const logTop = log.getBoundingClientRect().top;
+  const anchor = follow ? null : [...log.querySelectorAll("[data-message-id]")].find(row => row.getBoundingClientRect().bottom > logTop);
+  const anchorOffset = anchor ? anchor.getBoundingClientRect().top - logTop : 0;
+  // A busy group can push the entire reading position outside the latest page.
+  // Keep that page visible until navigation, instead of replacing it with unrelated messages.
+  if (anchor && !messages.some(message => String(message.id) === anchor.dataset.messageId)) {
+    log.dataset.stale = "true";
+    $("chat-jump").hidden = false;
+    return;
+  }
   chatSignatures.set(log, signature);
+  delete log.dataset.stale;
   const stack = el("div", "message-stack");
   let lastTimestamp = 0;
   [...messages].reverse().forEach((message, i) => {
@@ -552,6 +595,7 @@ function renderMessages() {
     const person = members.find(member => member.id === message.sender) || { id: message.sender || "未知成员" };
     const self = Boolean(ownWxid) && message.sender === ownWxid;
     const row = el("div", `chat-message${self ? " is-self" : ""}`), body = el("div", "chat-message-body"), meta = el("div", "chat-meta");
+    row.dataset.messageId = String(message.id);
     meta.append(el("span", "", self ? "我" : person.name || person.id), el("time", "", new Date(message.timestamp * 1000).toLocaleTimeString("zh-CN", {hour: "2-digit", minute: "2-digit", hour12: false})));
     if (person.blocked) meta.append(badge("已拉黑", "red"));
     body.append(meta, el("div", "chat-bubble", message.content || "（空消息）"));
@@ -560,11 +604,11 @@ function renderMessages() {
   });
   log.replaceChildren(messages.length ? stack : empty(messageQuery ? "没有匹配的聊天记录" : "还没有聊天消息", messageQuery ? "换个关键词试试。" : "群消息同步后会显示在这里。"));
   resetChatScroll = false;
-  requestAnimationFrame(() => {
-    if (!log.isConnected || log.dataset.group !== selectedId) return;
-    log.scrollTop = follow ? log.scrollHeight : Math.max(0, oldTop + log.scrollHeight - oldHeight);
-    $("chat-jump").hidden = messagePage === 1 && !messageQuery && follow;
-  });
+  const replacement = anchor && [...log.querySelectorAll("[data-message-id]")].find(row => row.dataset.messageId === anchor.dataset.messageId);
+  if (follow) log.scrollTop = log.scrollHeight;
+  else if (replacement) log.scrollTop += replacement.getBoundingClientRect().top - log.getBoundingClientRect().top - anchorOffset;
+  else log.scrollTop = oldTop;
+  $("chat-jump").hidden = messagePage === 1 && !messageQuery && follow;
 }
 function turnMessagePage(delta) { messagePage += delta; detailVersion = ""; resetChatScroll = true; loadDetail().catch(error => toast(error.message, true)); }
 function latestMessages() { messagePage = 1; messageQuery = ""; detailVersion = ""; resetChatScroll = true; const input = document.querySelector(".message-search input"); if (input) input.value = ""; loadDetail().catch(error => toast(error.message, true)); }
@@ -639,12 +683,12 @@ function formFooter(form, label = "保存") {
   const actions = el("div", "form-actions"), submit = button(label, "button primary"); submit.type = "submit";
   actions.append(button("取消", "button", () => $("modal").close()), submit); form.append(error, actions); return { error, submit };
 }
-function bindForm(form, footer, save) {
+function bindForm(form, footer, save, onSaved) {
   form.addEventListener("submit", async event => {
     event.preventDefault(); if (footer.submit.disabled || mutating) return;
     mutating = true; footer.submit.disabled = true; footer.error.textContent = "";
     let saved = false;
-    try { await save(); saved = true; $("modal").close(); await refreshState(true); toast("已保存，配置立即生效"); }
+    try { await save(); saved = true; $("modal").close(); await refreshState(true); toast("已保存，配置立即生效"); if (onSaved) onSaved(); }
     catch (error) { if (saved) toast(`配置已保存，刷新失败：${error.message}`, true); else footer.error.textContent = error.message; }
     finally { mutating = false; footer.submit.disabled = false; }
   });
