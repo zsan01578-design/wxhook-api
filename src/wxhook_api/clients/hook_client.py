@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import math
 from typing import Any
 
 import httpx
@@ -25,6 +26,13 @@ from wxhook_api.schemas.requests import (
 class HookResponse:
     data: Any
     status_code: int
+
+
+def _finite_json_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("Hook JSON contains a non-finite number")
+    return number
 
 
 class HookClient:
@@ -62,7 +70,9 @@ class HookClient:
         except httpx.HTTPError as exc:
             raise HookTransportError("Hook request failed") from exc
         try:
-            data = response.json()
+            # Reject both nonstandard constants and exponent overflow before
+            # the response reaches JSON serialization or history persistence.
+            data = response.json(parse_float=_finite_json_float, parse_constant=_finite_json_float)
         except (UnicodeDecodeError, ValueError) as exc:
             raise HookTransportError("Hook response is not valid JSON") from exc
         return HookResponse(data=data, status_code=response.status_code)

@@ -10,7 +10,8 @@ class CallbackEvent(BaseModel):
 
     event_type: int
     msgid: int | str
-    type: int
+    # Message IDs are stored as text, but the message type is a SQLite INTEGER.
+    type: int = Field(ge=-(2**63), le=2**63 - 1)
     timestamp: int
     wxid: str
     sender: str

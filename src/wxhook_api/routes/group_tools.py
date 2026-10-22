@@ -43,7 +43,7 @@ class Task(ToolBody):
     owner: Annotated[str, StringConstraints(strip_whitespace=True, max_length=80)] = ""
     due_date: str = Field("", max_length=10)
     due_at: str = Field("", max_length=40)
-    source_id: int | None = Field(None, ge=1)
+    source_id: int | None = Field(None, ge=1, le=2**63 - 1)
 
     @field_validator("due_date")
     @classmethod

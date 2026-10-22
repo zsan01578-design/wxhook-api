@@ -117,6 +117,10 @@ class GroupToolsService:
                 db.execute("UPDATE group_tasks SET due_at=? WHERE id=?", (deadline, row["id"]))
             db.execute("UPDATE group_tasks SET completed_at=updated_at WHERE status='done' AND completed_at=''")
             db.execute("UPDATE group_tasks SET source_kind='ai' WHERE source_id IS NOT NULL AND reminder_id IS NULL")
+            # A previous process may have exited after claiming an outbound
+            # attempt. Its result is uncertain; retain the claim without retry.
+            db.execute("UPDATE keyword_hits SET status='unknown' WHERE status='sending'")
+            db.execute("UPDATE group_tool_reminders SET status='unknown' WHERE status='sending'")
             # Keep claims from deleted rules too: old hit logs may already have
             # been pruned, but their callbacks must never trigger a new rule.
             db.execute("""INSERT OR IGNORE INTO chat_reply_claims
@@ -134,12 +138,20 @@ class GroupToolsService:
         self._scheduler = asyncio.create_task(self._run_schedule())
 
     async def stop(self):
-        await self.reminders.stop()
-        tasks = [task for task in (self._worker, self._scheduler) if task]
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self._worker = self._scheduler = None
+        await finish_before_cancel(self._stop())
+
+    async def _stop(self):
+        try:
+            await self.reminders.stop()
+        finally:
+            tasks = [task for task in (self._worker, self._scheduler) if task]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._worker = self._scheduler = None
+            while not self._queue.empty():
+                self._queue.get_nowait()
+                self._queue.task_done()
 
     async def snapshot(self, group):
         def read(db):
@@ -263,37 +275,60 @@ class GroupToolsService:
                 if result:
                     db.executemany("UPDATE group_tasks SET digest_attempted_at=? WHERE id=?", [(now(), task["id"]) for task in tasks])
                 return tasks if result else []
-            tasks = await self.db(claim)
-            if not tasks:
-                continue
-            status = "skipped"
-            if self.groups.allowed(group):
-                claimed_ids = tuple(item["id"] for item in tasks)
-                async def current_text():
-                    def read(db):
-                        pref = db.execute("SELECT task_reminders FROM group_tool_preferences WHERE group_id=?", (group,)).fetchone()
-                        if not pref or not pref[0]:
-                            return []
-                        return [dict(row) for row in db.execute("""SELECT title,owner,due_date FROM group_tasks
-                            WHERE group_id=? AND id IN (""" + ",".join("?" for _ in claimed_ids) + """)
-                            AND reminder_id IS NULL AND due_at<=?
-                            AND (status='open' OR (status='done' AND completion_reason='deadline'))
-                            ORDER BY due_at,id""", (group, *claimed_ids, datetime.now(CHINA).timestamp()))]
-                    current = await self.db(read)
-                    if not current:
-                        return None
-                    return ("待办到期提醒（已自动完成）：\n" + "\n".join(
-                        f"{item['title']}（{item['owner'] or '未分配'} / {item['due_date']}）" for item in current))[:3500]
-                try:
+            tasks = []
+            status = "unknown"
+            cancelled = False
+
+            async def claim_tasks():
+                nonlocal tasks
+                tasks = await self.db(claim)
+
+            try:
+                await finish_before_cancel(claim_tasks())
+                if not tasks:
+                    continue
+                status = "skipped"
+                if self.groups.allowed(group):
+                    claimed_ids = tuple(item["id"] for item in tasks)
+                    async def current_text():
+                        def read(db):
+                            pref = db.execute("SELECT task_reminders FROM group_tool_preferences WHERE group_id=?", (group,)).fetchone()
+                            if not pref or not pref[0]:
+                                return []
+                            return [dict(row) for row in db.execute("""SELECT title,owner,due_date FROM group_tasks
+                                WHERE group_id=? AND id IN (""" + ",".join("?" for _ in claimed_ids) + """)
+                                AND reminder_id IS NULL AND due_at<=?
+                                AND (status='open' OR (status='done' AND completion_reason='deadline'))
+                                ORDER BY due_at,id""", (group, *claimed_ids, datetime.now(CHINA).timestamp()))]
+                        current = await self.db(read)
+                        if not current:
+                            return None
+                        return ("待办到期提醒（已自动完成）：\n" + "\n".join(
+                            f"{item['title']}（{item['owner'] or '未分配'} / {item['due_date']}）" for item in current))[:3500]
                     await self.chatbot._messenger.text(group, "", build_text=current_text,
                         allowed=lambda: self.groups.allowed(group))
                     status = "sent"
-                except DeliveryBlocked:
-                    status = "skipped"
-                except Exception:
-                    status = "unknown"
-                    self.last_error = "待办提醒发送未确认，今日不会自动重发。"
-            await self.db(lambda db: db.execute("UPDATE group_tool_reminders SET status=? WHERE group_id=? AND reminder_date=?", (status, group, today)))
+            except asyncio.CancelledError:
+                cancelled = True
+                status = "unknown"
+                raise
+            except DeliveryBlocked:
+                status = "skipped"
+            except Exception:
+                if not tasks:
+                    raise
+                status = "unknown"
+                self.last_error = "待办提醒发送未确认，今日不会自动重发。"
+            finally:
+                if tasks:
+                    try:
+                        await finish_before_cancel(self.db(lambda db: db.execute(
+                            "UPDATE group_tool_reminders SET status=? WHERE group_id=? AND reminder_date=? AND status='sending'",
+                            (status, group, today))))
+                    except Exception:
+                        if not cancelled:
+                            raise
+                        self.last_error = "无法保存待办提醒状态；不会自动补发，请检查资料库。"
 
     async def _run_schedule(self):
         while True:
@@ -378,26 +413,51 @@ class GroupToolsService:
             db.execute("UPDATE keyword_rules SET last_triggered=? WHERE id=?", (now(), rule_id))
             db.execute("DELETE FROM keyword_hits WHERE group_id=? AND id NOT IN (SELECT id FROM keyword_hits WHERE group_id=? ORDER BY id DESC LIMIT 500)", (group, group))
             return rule
-        rule = await self.db(claim)
-        if not rule or rule["action"] == "record":
-            return
-        status = "skipped"
-        if self.groups.allowed(group, sender):
-            async def still_enabled():
-                current = await self.db(lambda db: db.execute(
-                    "SELECT enabled,reply,action,keyword,match_mode FROM keyword_rules WHERE group_id=? AND id=?", (group, rule_id)).fetchone())
-                return bool(current and current["enabled"] and current["action"] == "reply"
-                            and all(current[field] == rule[field] for field in ("reply", "keyword", "match_mode"))
-                            and rule_matches(current, text) and self.groups.allowed(group, sender))
-            try:
+        rule = None
+        status = "unknown"
+        cancelled = False
+
+        async def claim_rule():
+            nonlocal rule
+            # Observe the committed claim even if this worker is cancelled
+            # while SQLite is writing, so finally can settle its status.
+            rule = await self.db(claim)
+
+        try:
+            await finish_before_cancel(claim_rule())
+            if not rule or rule["action"] == "record":
+                return
+            status = "skipped"
+            if self.groups.allowed(group, sender):
+                async def still_enabled():
+                    current = await self.db(lambda db: db.execute(
+                        "SELECT enabled,reply,action,keyword,match_mode FROM keyword_rules WHERE group_id=? AND id=?", (group, rule_id)).fetchone())
+                    return bool(current and current["enabled"] and current["action"] == "reply"
+                                and all(current[field] == rule[field] for field in ("reply", "keyword", "match_mode"))
+                                and rule_matches(current, text) and self.groups.allowed(group, sender))
                 await self.chatbot._messenger.text(group, rule["reply"], allowed=still_enabled)
                 status = "sent"
-            except DeliveryBlocked:
-                status = "skipped"
-            except Exception:
-                status = "unknown"
-                self.last_error = "关键词回复发送未确认，同一消息不会重发。"
-        await self.db(lambda db: db.execute("UPDATE keyword_hits SET status=? WHERE group_id=? AND rule_id=? AND message_key=?", (status, group, rule_id, key)))
+        except asyncio.CancelledError:
+            cancelled = True
+            status = "unknown"
+            raise
+        except DeliveryBlocked:
+            status = "skipped"
+        except Exception:
+            if rule is None:
+                raise
+            status = "unknown"
+            self.last_error = "关键词回复发送未确认，同一消息不会重发。"
+        finally:
+            if rule and rule["action"] != "record":
+                try:
+                    await finish_before_cancel(self.db(lambda db: db.execute(
+                        "UPDATE keyword_hits SET status=? WHERE group_id=? AND rule_id=? AND message_key=? AND status='sending'",
+                        (status, group, rule_id, key))))
+                except Exception:
+                    if not cancelled:
+                        raise
+                    self.last_error = "无法保存关键词回复状态；不会自动补发，请检查资料库。"
 
     async def _run_rules(self):
         while True:

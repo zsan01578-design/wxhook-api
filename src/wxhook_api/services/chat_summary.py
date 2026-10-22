@@ -78,20 +78,25 @@ class ChatSummaryService:
 
     async def _run(self) -> None:
         while True:
-            current = datetime.now(CHINA)
-            if current.hour >= 18:
-                day = current.date().isoformat()
-                self.last_error = ""
-                complete = True
-                for group in await self.groups.summary_group_ids():
-                    if not self.automatic_allowed(group) or current.timestamp() < self._retry_after.get(group, 0):
-                        continue
-                    try:
-                        await self.get(group, summary_date=day, automatic=True)
-                    except Exception as exc:
-                        complete = False
-                        self._retry_after[group] = current.timestamp() + 900
-                        self.last_error = str(exc) if isinstance(exc, ModelError) else "自动总结失败，请检查模型配置和存储。"
-                if complete:
-                    self.last_run_date = day
+            try:
+                current = datetime.now(CHINA)
+                if current.hour >= 18:
+                    day = current.date().isoformat()
+                    self.last_error = ""
+                    complete = True
+                    for group in await self.groups.summary_group_ids():
+                        if not self.automatic_allowed(group) or current.timestamp() < self._retry_after.get(group, 0):
+                            continue
+                        try:
+                            await self.get(group, summary_date=day, automatic=True)
+                        except Exception as exc:
+                            complete = False
+                            self._retry_after[group] = current.timestamp() + 900
+                            self.last_error = str(exc) if isinstance(exc, ModelError) else "自动总结失败，请检查模型配置和存储。"
+                    if complete:
+                        self.last_run_date = day
+            except Exception:
+                # Listing groups can fail before the per-group retry handler.
+                # Keep the scheduler alive through temporary storage errors.
+                self.last_error = "自动总结暂时无法读取群配置，将稍后重试。"
             await asyncio.sleep(30)

@@ -613,7 +613,10 @@ class GroupManager:
                 args.append(query)
             with self._connect() as db:
                 total = db.execute(f"SELECT count(*) FROM chat_messages WHERE {where}", args).fetchone()[0]
-                rows = db.execute(f"SELECT id,msgid,sender,type,timestamp,content,received_at,source FROM chat_messages WHERE {where} ORDER BY timestamp DESC,id DESC LIMIT ? OFFSET ?", (*args,size,(page-1)*size))
+                offset = (page - 1) * size
+                # Out-of-range pages are empty; never bind an unbounded Python
+                # integer as SQLite's signed 64-bit OFFSET.
+                rows = [] if offset >= total else db.execute(f"SELECT id,msgid,sender,type,timestamp,content,received_at,source FROM chat_messages WHERE {where} ORDER BY timestamp DESC,id DESC LIMIT ? OFFSET ?", (*args,size,offset))
                 return {"messages": [dict(row) for row in rows], "total": total, "page": page, "size": size, "has_more": total > page*size}
         async with self._lock:
             return await asyncio.to_thread(read)

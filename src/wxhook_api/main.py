@@ -6,7 +6,7 @@ if __name__ == "__main__" and not __package__:
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 import os
 import sqlite3
 
@@ -21,6 +21,7 @@ from wxhook_api.core.config import Settings, load_settings
 from wxhook_api.core.chatbot_config import load_chatbot_options
 from wxhook_api.core.douyin_config import load_douyin_options
 from wxhook_api.core.errors import install_exception_handlers
+from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.core.runtime import source_revision
 from wxhook_api.routes import account, callbacks, contacts, douyin, group_tools, health, history, manage, media, messages, querydb, ui
 from wxhook_api.services.douyin import DouyinService
@@ -80,6 +81,25 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     dispatcher.register(automatic_message)
     owned_client: HookClient | None = None
 
+    async def shutdown():
+        async def close_owned_client():
+            nonlocal owned_client
+            if owned_client is not None:
+                await owned_client.aclose()
+                owned_client = None
+
+        # Callbacks run in reverse order and each still runs if an earlier
+        # service fails to stop. Keep the shared Hook open until all workers exit.
+        async with AsyncExitStack() as cleanup:
+            cleanup.push_async_callback(close_owned_client)
+            cleanup.callback(setattr, douyin_worker, "messenger", None)
+            cleanup.push_async_callback(douyin_worker.stop)
+            cleanup.push_async_callback(chatbot.stop)
+            cleanup.push_async_callback(summary_service.stop)
+            cleanup.push_async_callback(tools_service.stop)
+            cleanup.push_async_callback(dispatcher.stop, settings.shutdown_timeout)
+            cleanup.push_async_callback(synchronizer.stop)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         nonlocal owned_client
@@ -99,22 +119,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             synchronizer.start(app.state.hook_client)
             yield
         finally:
-            await synchronizer.stop()
-            try:
-                await dispatcher.stop(settings.shutdown_timeout)
-            finally:
-                try:
-                    await tools_service.stop()
-                    await summary_service.stop()
-                    try:
-                        await chatbot.stop()
-                    finally:
-                        await douyin_worker.stop()
-                        douyin_worker.messenger = None
-                finally:
-                    if owned_client is not None:
-                        await owned_client.aclose()
-                        owned_client = None
+            await finish_before_cancel(shutdown())
 
     app = FastAPI(title="wxhook-api", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings

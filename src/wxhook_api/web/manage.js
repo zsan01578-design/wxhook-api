@@ -8,6 +8,7 @@ let refreshJob, pollTimer, toastTimer, detailToken = 0, mutating = false, connec
 let messagePage = 1, messageQuery = "", messageMeta = {total: 0, has_more: false};
 let ownWxid = "", resetChatScroll = true;
 let modelSaving = false;
+let dialogVersion = 0;
 let wordCloud = null, chatSummary = null, chatRadar = null;
 let groupTools = null, radarDays = 14;
 let taskView = "open", taskPage = 1;
@@ -407,7 +408,7 @@ function renderTools(group) {
   const reportActions = el("div", "tool-actions");
   [["week", "生成上周周报"], ["month", "生成上月月报"]].forEach(([kind, label]) => reportActions.append(button(label, "button small", event => toolsAction(event.currentTarget, group.id, `/reports/${kind}`, {}, "POST", "报表已生成"))));
   const auto = el("label", "tool-check"), checkbox = el("input"); checkbox.type = "checkbox"; checkbox.checked = data.auto_reports;
-  checkbox.addEventListener("change", event => toolsAction(event.currentTarget, group.id, "/preferences", {auto_reports: checkbox.checked,task_reminders:data.task_reminders}, "PATCH")); auto.append(checkbox, document.createTextNode("自动生成周报 / 月报")); reportActions.append(auto); reports.append(reportActions);
+  checkbox.addEventListener("change", event => toolsAction(event.currentTarget, group.id, "/preferences", {auto_reports: checkbox.checked}, "PATCH")); auto.append(checkbox, document.createTextNode("自动生成周报 / 月报")); reportActions.append(auto); reports.append(reportActions);
   data.reports.slice(0, 6).forEach(report => { const details = el("details", "tool-report"), summary = el("summary", "", `${report.kind === "week" ? "周报" : "月报"} · ${report.start_date} 至 ${report.end_date}`); details.dataset.reportKey = JSON.stringify([group.id, report.kind, report.start_date]); details.open = expanded.has(details.dataset.reportKey); details.append(summary, el("p", "tool-report-content", report.content), el("p", "tool-description", `${report.message_count} 条成员文本 · 选取 ${report.sampled_count} 条生成 · ${dateText(report.updated_at, true)}`)); reports.append(details); });
   if (!data.reports.length) reports.append(el("p", "tool-description", "还没有报表，可点击生成。"));
   const rules = toolCard("关键词规则", "实时文字消息按关键词匹配，可记录命中或回复固定内容。每条消息最多触发一条规则，支持冷却时间，并遵循群总开关和黑名单。");
@@ -668,6 +669,7 @@ function renderBlacklist() {
 }
 
 function showDialog(title, eyebrow = "群聊管理") {
+  dialogVersion++;
   $("modal-title").textContent = title; $("modal-eyebrow").textContent = eyebrow; $("modal-body").replaceChildren();
   if (!$("modal").open) $("modal").showModal();
   return $("modal-body");
@@ -684,11 +686,18 @@ function formFooter(form, label = "保存") {
   actions.append(button("取消", "button", () => $("modal").close()), submit); form.append(error, actions); return { error, submit };
 }
 function bindForm(form, footer, save, onSaved) {
+  const version = dialogVersion;
   form.addEventListener("submit", async event => {
     event.preventDefault(); if (footer.submit.disabled || mutating) return;
     mutating = true; footer.submit.disabled = true; footer.error.textContent = "";
     let saved = false;
-    try { await save(); saved = true; $("modal").close(); await refreshState(true); toast("已保存，配置立即生效"); if (onSaved) onSaved(); }
+    try {
+      await save(); saved = true;
+      const active = dialogVersion === version && $("modal").open;
+      if (active) $("modal").close();
+      await refreshState(true); toast("已保存，配置立即生效");
+      if (onSaved && active && dialogVersion === version) onSaved();
+    }
     catch (error) { if (saved) toast(`配置已保存，刷新失败：${error.message}`, true); else footer.error.textContent = error.message; }
     finally { mutating = false; footer.submit.disabled = false; }
   });
@@ -708,11 +717,13 @@ function mentionSettingsDialog() {
 
 async function modelSettingsDialog() {
   const body = showDialog("AI 对话模型", "机器人 · 全部群共用");
+  const version = dialogVersion;
+  const active = () => $("modal").open && dialogVersion === version;
   body.append(el("p", "form-note", "正在读取模型配置…"));
   let settings, search;
   try { [settings, search] = await Promise.all([api("/api/manage/chat-model"), api("/api/manage/chat-search")]); }
-  catch (error) { if (body.isConnected) body.replaceChildren(el("p", "form-error", error.message)); return; }
-  if (!$("modal").open || $("modal-title").textContent !== "AI 对话模型") return;
+  catch (error) { if (active()) body.replaceChildren(el("p", "form-error", error.message)); return; }
+  if (!active()) return;
   body.replaceChildren();
   body.append(el("p", "modal-copy", "可保存多个模型配置，同时只启用一个。新增和修改时自动测试；启用其他模型后，后续群内问答使用新模型。"));
   const searchCard = el("section", "model-card"), searchCopy = el("div", "model-card-copy");

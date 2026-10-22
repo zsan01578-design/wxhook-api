@@ -228,7 +228,9 @@ class WeChatSync:
                     for row in rows:
                         group = row.get("group_id")
                         value = row.get("members")
-                        if group not in groups or not isinstance(value, str):
+                        # Delimited lists are a fallback. A stale/empty legacy
+                        # field must not erase a verified join or its names.
+                        if group not in groups or group in rosters or not isinstance(value, str):
                             continue
                         ids = re.split(r"\x07|\^G|[;,\n]", value)
                         if all(not item or re.fullmatch(r"[A-Za-z0-9_.-]{1,256}", item) for item in ids):

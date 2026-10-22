@@ -31,8 +31,30 @@ def timestamp(value) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value)
         return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
+
+
+def valid_job_record(job, job_id: str) -> bool:
+    """Validate persisted shapes before restoring jobs or deleting their files.
+
+    Missing optional fields remain compatible with older records. Malformed
+    collections are not safe to render, index for deduplication, or clean.
+    """
+    if not isinstance(job, dict) or job.get("id") != job_id or not JOB_ID.fullmatch(job_id):
+        return False
+    if any(key in job and not isinstance(job[key], str) for key in ("status", "group_id", "source_url")):
+        return False
+    if "msgid" in job and type(job["msgid"]) not in (str, int):
+        return False
+    files, assets, notifications = (job.get("files", []), job.get("assets", []), job.get("notifications", {}))
+    if not isinstance(files, list) or any(not isinstance(file, dict) or not isinstance(file.get("name"), str)
+                                         or not MEDIA_NAME.fullmatch(file["name"]) for file in files):
+        return False
+    if not isinstance(assets, list) or any(not isinstance(asset, dict) or not isinstance(asset.get("urls", []), list)
+                                          or any(not isinstance(url, str) for url in asset.get("urls", [])) for asset in assets):
+        return False
+    return isinstance(notifications, dict) and all(isinstance(value, dict) for value in notifications.values())
 
 
 def regular(path: Path, *, directory: bool = False) -> bool:
@@ -86,7 +108,7 @@ def cleanup_media(output: Path, policy: MediaRetention, active: set[str], now: d
                 report.skipped_unsafe += 1
                 continue
             job = json.loads(record.read_text(encoding="utf-8"))
-            if not isinstance(job, dict) or job.get("id") != folder.name or not isinstance(job.get("files", []), list):
+            if not valid_job_record(job, folder.name):
                 report.skipped_unsafe += 1
                 continue
             files = [path for path in folder.iterdir() if MEDIA_NAME.fullmatch(path.name)]

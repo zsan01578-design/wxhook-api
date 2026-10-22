@@ -21,7 +21,7 @@ from wxhook_api.services.douyin_delivery import DeliveryBlocked, DeliveryError, 
 from wxhook_api.services.douyin_api import DouyinAPIParser
 from wxhook_api.services.parse_video import ParseVideoParser, REFERERS, source_platform
 from wxhook_api.services.groups import GroupManager, event_group, normalize_group_sender
-from wxhook_api.services.media_cleanup import ACTIVE_STATES, cleanup_media, next_cleanup_at, safe_child, timestamp, utcnow
+from wxhook_api.services.media_cleanup import ACTIVE_STATES, cleanup_media, next_cleanup_at, safe_child, timestamp, utcnow, valid_job_record
 
 
 def media_extension(prefix: bytes, kind: str) -> str:
@@ -100,7 +100,7 @@ class DouyinService:
                 if path.stat().st_size > 3 * 1024 * 1024:
                     continue
                 job = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(job, dict) or not re.fullmatch(r"[a-f0-9]{32}", str(job.get("id", ""))) or path.parent.name != job["id"]:
+                if not valid_job_record(job, path.parent.name):
                     continue
                 if job.get("status") in {"queued", "parsing", "downloading", "sending"}:
                     job.update(status="interrupted", error="上次服务已停止，请重新发送链接")

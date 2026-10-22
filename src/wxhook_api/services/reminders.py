@@ -8,6 +8,7 @@ from uuid import uuid4
 from wxhook_api.services.chat_summary import CHINA
 from wxhook_api.services.douyin_delivery import DeliveryBlocked, DeliveryError
 from wxhook_api.services.groups import now
+from wxhook_api.core.persistence import finish_before_cancel
 
 
 HELP = "请这样设置提醒：提醒我一分钟后喝水、10分钟后提醒我开会、提醒我明天09:30交报告。时间按北京时间，支持1秒至365天后的单次提醒。"
@@ -168,12 +169,20 @@ class ReminderService:
                         AND (status='open' OR (status='done' AND completion_reason='deadline')))""",
                     (now(), row['id'], timestamp)).rowcount
                 return db.execute("SELECT * FROM member_reminders WHERE id=?", (row['id'],)).fetchone() if changed else None
-            claimed = await self.tools.db(claim)
-            if claimed is None:
-                continue
-            row = claimed
-            status = "skipped"
+            claimed = None
+            status = "unknown"
+            cancelled = False
+
+            async def claim_reminder():
+                nonlocal claimed
+                claimed = await self.tools.db(claim)
+
             try:
+                await finish_before_cancel(claim_reminder())
+                if claimed is None:
+                    continue
+                row = claimed
+                status = "skipped"
                 task_active = await self.tools.db(lambda db: db.execute("""SELECT 1 FROM group_tasks WHERE reminder_id=?
                     AND (status='open' OR (status='done' AND completion_reason='deadline'))""", (row['id'],)).fetchone())
                 if task_active and self.chatbot._accepting and self.chatbot.allowed(group, sender):
@@ -186,6 +195,7 @@ class ReminderService:
                     await self.chatbot._messenger.text(group, f"@{name}\u2005提醒时间到了：{row['title']}", atlist=[sender], allowed=still_active)
                     status = "sent"
             except asyncio.CancelledError:
+                cancelled = True
                 status = "unknown"
                 raise
             except DeliveryBlocked:
@@ -194,11 +204,20 @@ class ReminderService:
                 status = "unknown" if exc.uncertain else "failed"
                 self.tools.last_error = "成员提醒发送未确认或失败，同一提醒不会自动重发。"
             except Exception:
+                if claimed is None:
+                    raise
                 status = "unknown"
                 self.tools.last_error = "成员提醒发送未确认，同一提醒不会自动重发。"
             finally:
-                await self.tools.db(lambda db: db.execute(
-                    "UPDATE member_reminders SET status=?,updated_at=? WHERE id=?", (status, now(), row['id'])))
+                if claimed is not None:
+                    try:
+                        await finish_before_cancel(self.tools.db(lambda db: db.execute(
+                            "UPDATE member_reminders SET status=?,updated_at=? WHERE id=? AND status='sending'",
+                            (status, now(), claimed['id']))))
+                    except Exception:
+                        if not cancelled:
+                            raise
+                        self.tools.last_error = "无法保存成员提醒状态；不会自动补发，请检查资料库。"
 
     async def _run(self):
         while True:

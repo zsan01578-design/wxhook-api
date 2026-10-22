@@ -4,6 +4,7 @@ async page => {
   const assert = (value, message) => { if (!value) throw new Error(message); };
   const group = {id:"review@chatroom",name:"模拟群",active:true,enabled:true,chat_enabled:true,douyin_enabled:false,blocked:false,member_count:1,message_count:200,history_complete:true};
   let revision=0, extractCalls=0, failSave=false, failExtract=false;
+  const preferences={auto_reports:false,task_reminders:false}, preferenceWrites=[];
   const tasks=[];
   await page.route("**/ui/assets/**", route=>route.continue({url:route.request().url().replace("/ui/assets/","/web/")}));
   await page.route("**/api/**",async route=>{
@@ -24,7 +25,9 @@ async page => {
       const body=route.request().postDataJSON();
       tasks.push({...body,id:`saved${tasks.length}`,status:"open",due_at:null,created_at:"2026-10-20T10:00:00+08:00",source_kind:"ai"});
       data={saved:true,id:tasks.at(-1).id};
-    } else if(url.pathname.endsWith("/tools")) data={group_id:group.id,tasks,rules:[],hits:[],reports:[]};
+    } else if(url.pathname.endsWith("/preferences")) {
+      const body=route.request().postDataJSON(); preferenceWrites.push(body); Object.assign(preferences,body); data={saved:true};
+    } else if(url.pathname.endsWith("/tools")) data={group_id:group.id,tasks,rules:[],hits:[],reports:[],...preferences};
     else if(url.pathname.endsWith("/config")) data={settings:{groups:[],enabled:false},supported_parsers:["parse_video"]};
     else if(url.pathname.endsWith("/jobs")) data={revision:"initial",jobs:[],pending:0};
     await route.fulfill({json:data});
@@ -48,6 +51,22 @@ async page => {
   assert(await search.inputValue()==="成员","Could not continue typing after refresh");
   await search.evaluate(node=>node.dispatchEvent(new CompositionEvent("compositionend")));
   await page.locator('[data-tab="tools"]').click();
+  const autoReports=page.getByRole("checkbox",{name:"自动生成周报 / 月报",exact:true});
+  const taskReminders=page.getByRole("checkbox",{name:"每日汇总到期的手动 / AI 待办",exact:true});
+  await autoReports.waitFor();
+  // Another page changes reminders after this page loaded its snapshot.
+  preferences.task_reminders=true;
+  await autoReports.check();
+  await page.waitForFunction(()=>groupTools?.auto_reports===true);
+  assert(preferences.task_reminders===true,"Changing reports overwrote newer task reminder settings");
+  assert(JSON.stringify(preferenceWrites[0])===JSON.stringify({auto_reports:true}),"Report toggle submitted unrelated preferences");
+  assert(await taskReminders.isChecked(),"Reload did not reflect the latest reminder preference");
+  // Exercise the inverse direction with a stale report preference too.
+  preferences.auto_reports=false;
+  await taskReminders.uncheck();
+  await page.waitForFunction(()=>groupTools?.task_reminders===false);
+  assert(preferences.auto_reports===false,"Changing reminders overwrote newer report settings");
+  assert(JSON.stringify(preferenceWrites[1])===JSON.stringify({task_reminders:false}),"Reminder toggle submitted unrelated preferences");
   await page.getByRole("button",{name:"AI 提取待办",exact:true}).click();
   const candidates=()=>page.getByRole("button",{name:"核对并保存",exact:true});
   await candidates().first().waitFor();
@@ -95,5 +114,5 @@ async page => {
     return {same,updated,cleaned};
   });
   assert(video.same && video.updated && video.cleaned,`Video state regression: ${JSON.stringify(video)}`);
-  return {memberSearch:true,candidateBatch:true,failedSave:true,failedExtraction:true,videoContinuity:true,mediaStatus:true,mediaCleanup:true};
+  return {independentPreferences:true,memberSearch:true,candidateBatch:true,failedSave:true,failedExtraction:true,videoContinuity:true,mediaStatus:true,mediaCleanup:true};
 }

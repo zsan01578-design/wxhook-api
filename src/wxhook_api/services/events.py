@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from wxhook_api.schemas.events import CallbackEvent
+from wxhook_api.core.persistence import finish_before_cancel
 
 
 EventHandler = Callable[[CallbackEvent], Awaitable[None]]
@@ -58,20 +59,29 @@ class EventDispatcher:
                 self._queue.task_done()
 
     async def stop(self, timeout: float = 5.0) -> None:
+        self._accepting = False
+        # Do not orphan the worker if lifespan shutdown itself is cancelled.
+        await finish_before_cancel(self._stop(timeout))
+
+    async def _stop(self, timeout: float) -> None:
         worker = self._worker
         if worker is None:
-            self._accepting = False
             return
-        self._accepting = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         try:
             remaining = max(0.0, deadline - loop.time())
             await asyncio.wait_for(self._queue.put(None), timeout=remaining)
             remaining = max(0.0, deadline - loop.time())
-            await asyncio.wait_for(worker, timeout=remaining)
+            await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), timeout=remaining)
         except asyncio.TimeoutError:
+            pass
+        finally:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
-        finally:
+            # A timeout may leave both callbacks and the stop sentinel queued.
+            # They must not keep join() pending or replay on a later start().
+            while not self._queue.empty():
+                self._queue.get_nowait()
+                self._queue.task_done()
             self._worker = None

@@ -240,16 +240,18 @@ class WebSearchConfiguration:
     def _today(self) -> str:
         return self._now().isoformat()
 
-    async def _save(self, settings: SearchSettings | None = None) -> None:
+    async def _save(self, settings: SearchSettings | None = None,
+                    usage: tuple[str, int] | None = None) -> None:
         settings = settings or self.settings
+        usage_date, used_today = usage if usage is not None else (self.usage_date, self.used_today)
         payload = {
             "enabled": settings.enabled,
             "base_url": settings.base_url,
             "api_key": protect_secret(settings.api_key.get_secret_value() if settings.api_key else None),
             "result_count": settings.result_count,
             "daily_limit": settings.daily_limit,
-            "usage_date": self.usage_date,
-            "used_today": self.used_today,
+            "usage_date": usage_date,
+            "used_today": used_today,
         }
 
         await asyncio.to_thread(self._write, payload)
@@ -301,13 +303,19 @@ class WebSearchConfiguration:
             if provider is None:
                 return None
             today = self._today()
-            if self.usage_date != today:
-                self.usage_date, self.used_today = today, 0
-            if self.used_today >= self.settings.daily_limit:
+            used = self.used_today if self.usage_date == today else 0
+            if used >= self.settings.daily_limit:
                 return None
-            self.used_today += 1
+
+            async def reserve():
+                usage = (today, used + 1)
+                await self._save(None, usage)
+                # Publish the reservation only after its durable write. A
+                # storage failure must not consume quota for a skipped search.
+                self.usage_date, self.used_today = usage
+
             try:
-                await finish_before_cancel(self._save())
+                await finish_before_cancel(reserve())
             except OSError:
                 self.last_error = "无法保存搜索额度，已跳过搜索并回退普通回答。"
                 return None
