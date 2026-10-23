@@ -39,7 +39,7 @@ from wxhook_api.services.web_search import WebSearchConfiguration
 
 def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncBaseTransport | None = None, hook_client: HookClient | None = None, douyin_service: DouyinService | None = None, group_manager: GroupManager | None = None, sync_options: SyncOptions | None = None, chat_service: MentionChatService | None = None) -> FastAPI:
     settings = settings or load_settings()
-    dispatcher = EventDispatcher(settings.callback_queue_size)
+    dispatcher = EventDispatcher(settings.callback_queue_size, workers=settings.callback_workers)
     groups = group_manager or GroupManager()
     synchronizer = WeChatSync(groups, sync_options or SyncOptions.from_environment())
     inbox = MessageInbox()

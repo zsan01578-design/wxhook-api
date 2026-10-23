@@ -7,15 +7,55 @@ from typing import Any
 
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.core.persistence import finish_before_cancel
+from wxhook_api.services.groups import event_group
 
 
 EventHandler = Callable[[CallbackEvent], Awaitable[None]]
 logger = logging.getLogger(__name__)
 
 
+def conversation(event: CallbackEvent) -> str:
+    return event_group(event) or event.wxid or event.sender
+
+
+class ConversationQueue(asyncio.Queue):
+    """Dispatch the oldest available conversation without blocking other groups."""
+
+    def __init__(self, maxsize: int):
+        super().__init__(maxsize)
+        self._busy: set[str] = set()
+        self._changed = asyncio.Event()
+
+    def put_nowait(self, item):
+        super().put_nowait(item)
+        self._changed.set()
+
+    async def get(self):
+        while True:
+            self._changed.clear()
+            for index, event in enumerate(self._queue):
+                key = conversation(event) if event is not None else None
+                if key is None or key not in self._busy:
+                    del self._queue[index]
+                    if key is not None:
+                        self._busy.add(key)
+                    self._wakeup_next(self._putters)
+                    return event
+            await self._changed.wait()
+
+    def finish(self, key: str | None):
+        if key is not None:
+            self._busy.discard(key)
+        self.task_done()
+        self._changed.set()
+
+
 class EventDispatcher:
-    def __init__(self, maxsize: int = 1000) -> None:
-        self._queue: asyncio.Queue[CallbackEvent | None] = asyncio.Queue(maxsize=maxsize)
+    def __init__(self, maxsize: int = 1000, *, workers: int = 4) -> None:
+        if type(workers) is not int or not 1 <= workers <= 4:
+            raise ValueError("callback workers must be between 1 and 4")
+        self.workers = workers
+        self._queue = ConversationQueue(maxsize=maxsize)
         self._handlers: list[EventHandler] = []
         self._critical_handlers: set[EventHandler] = set()
         self._worker: asyncio.Task[None] | None = None
@@ -43,8 +83,20 @@ class EventDispatcher:
         return True
 
     async def _run(self) -> None:
+        workers = [asyncio.create_task(self._consume()) for _ in range(self.workers)]
+        try:
+            await asyncio.gather(*workers)
+        finally:
+            # Own every consumer so cancelling the supervisor cannot leak
+            # callbacks or release their conversation before cleanup finishes.
+            for worker in workers:
+                worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+
+    async def _consume(self) -> None:
         while True:
             event = await self._queue.get()
+            key = conversation(event) if event is not None else None
             try:
                 if event is None:
                     return
@@ -56,7 +108,7 @@ class EventDispatcher:
                         if handler in self._critical_handlers:
                             break
             finally:
-                self._queue.task_done()
+                self._queue.finish(key)
 
     async def stop(self, timeout: float = 5.0) -> None:
         self._accepting = False
@@ -70,8 +122,9 @@ class EventDispatcher:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         try:
-            remaining = max(0.0, deadline - loop.time())
-            await asyncio.wait_for(self._queue.put(None), timeout=remaining)
+            for _ in range(self.workers):
+                remaining = max(0.0, deadline - loop.time())
+                await asyncio.wait_for(self._queue.put(None), timeout=remaining)
             remaining = max(0.0, deadline - loop.time())
             await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), timeout=remaining)
         except asyncio.TimeoutError:

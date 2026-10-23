@@ -63,6 +63,7 @@ class Settings:
     shutdown_timeout: float = 5.0
     log_level: str = "INFO"
     allowed_callback_urls: tuple[str, ...] = ()
+    callback_workers: int = 4
 
     @classmethod
     def from_environment(cls, config_path: str | Path | None = None) -> "Settings":
@@ -90,6 +91,9 @@ class Settings:
 
         max_body_bytes = int(os.getenv("WXHOOK_MAX_BODY_BYTES", "1048576"))
         callback_queue_size = int(os.getenv("WXHOOK_CALLBACK_QUEUE_SIZE", "1000"))
+        callback_workers = int(os.getenv("WXHOOK_CALLBACK_WORKERS", "4"))
+        if not 1 <= callback_workers <= 4:
+            raise ValueError("WXHOOK_CALLBACK_WORKERS must be between 1 and 4")
         if max_body_bytes < 1 or callback_queue_size < 1:
             raise ValueError("body and queue limits must be positive")
         return cls(
@@ -102,6 +106,7 @@ class Settings:
             read_timeout=_parse_float(os.getenv("WXHOOK_READ_TIMEOUT", "10"), "read timeout"),
             max_body_bytes=max_body_bytes,
             callback_queue_size=callback_queue_size,
+            callback_workers=callback_workers,
             shutdown_timeout=_parse_float(os.getenv("WXHOOK_SHUTDOWN_TIMEOUT", "5"), "shutdown timeout"),
             log_level=os.getenv("WXHOOK_LOG_LEVEL", "INFO").upper(),
             allowed_callback_urls=allowed,

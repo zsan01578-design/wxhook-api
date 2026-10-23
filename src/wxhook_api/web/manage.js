@@ -10,6 +10,7 @@ let ownWxid = "", resetChatScroll = true;
 let modelSaving = false;
 let dialogVersion = 0;
 let wordCloud = null, chatSummary = null, chatRadar = null;
+let insightRequest = null;
 let groupTools = null, radarDays = 14;
 let taskView = "open", taskPage = 1;
 const chatSignatures = new WeakMap();
@@ -259,7 +260,7 @@ function renderInspector(group) {
   const rows = lines.map(([label, value]) => { const row = el("div", "info-line"); row.append(el("span", "", label), el("strong", "", value)); return row; });
   const noteLabel = el("div", "note-label"); noteLabel.append(el("span", "", "群备注"), button("编辑", "text-link", () => editGroupDialog(group)));
   const cloudSection = el("section", "inspector-word-cloud"), cloudHeading = el("div", "inspector-heading");
-  cloudHeading.append(el("h3", "", "群聊词云")); cloudSection.append(cloudHeading);
+  cloudHeading.append(el("h3", "", "群聊词云")); cloudSection.append(cloudHeading, el("p", "inspector-hint", "约每 30 秒更新，可点击页面顶部刷新。"));
   if (wordCloud?.group_id !== group.id || wordCloud.error) {
     cloudSection.append(el("p", "inspector-hint", wordCloud?.error || "正在生成词云…"));
   } else if (!wordCloud.words.length) {
@@ -291,7 +292,7 @@ function renderInspector(group) {
 }
 function renderRadar(radar, group) {
   const section = el("section", "inspector-radar"), heading = el("div", "inspector-heading");
-  heading.append(el("h3", "", "群聊雷达")); section.append(heading);
+  heading.append(el("h3", "", "群聊雷达")); section.append(heading, el("p", "inspector-hint", "约每 30 秒更新，可点击页面顶部刷新。"));
   if (!radar || radar.group_id !== group.id || radar.error) {
     section.append(el("p", "inspector-hint", radar?.error || "正在统计群聊活动…"));
     return section;
@@ -619,19 +620,38 @@ function renderAudit() {
   $("tab-content").replaceChildren(heading, ...(rows.length ? rows : [empty("还没有操作记录", "修改功能或管理黑名单后，操作会记录在这里。", "clock")]));
 }
 function setTab(value) { if (tab !== value) resetChatScroll = true; tab = value; detailVersion = ""; updateChatMode(); loadDetail().catch(error => toast(error.message, true)); }
-async function loadDetail() {
+function loadInsights(group, force = false) {
+  // Keep only the current view's statistics. Poll messages independently of
+  // these history scans; share an in-flight request across tab changes.
+  const day = new Date().toLocaleDateString("en-CA", {timeZone: "Asia/Shanghai"});
+  const key = JSON.stringify([group.id, radarDays, ownWxid, day]);
+  if (!force && insightRequest?.key === key && performance.now() < insightRequest.expires) return insightRequest.promise;
+  const request = {key, expires: Infinity, promise: null};
+  request.promise = Promise.all([
+    api(`${groupPath(group.id)}/word-cloud`).catch(error => ({group_id: group.id, error: error.message || "词云暂时无法加载，稍后自动重试。"})),
+    api(`${groupPath(group.id)}/radar?days=${radarDays}`).catch(error => ({group_id: group.id, error: error.message}))
+  ]).then(results => {
+    // Errors retry on the next poll. Old requests only update their own entry.
+    request.expires = performance.now() + (results.some(result => !result || result.error) ? 0 : 30000);
+    return results;
+  });
+  insightRequest = request;
+  return request.promise;
+}
+
+async function loadDetail(force = false) {
   const group = current();
   if (!group || view !== "groups") return;
   const token = ++detailToken, requestedTab = tab, requestedPage = messagePage, requestedQuery = messageQuery;
-  const [people, inbox, history, cloud, summaryResponse, radarResponse, toolsResponse] = await Promise.all([
+  const [people, inbox, history, insights, summaryResponse, toolsResponse] = await Promise.all([
     api(`${groupPath(group.id)}/members`),
     requestedTab === "messages" ? api(`${groupPath(group.id)}/messages?page=${requestedPage}&q=${encodeURIComponent(requestedQuery)}`) : Promise.resolve(null),
     requestedTab === "audit" ? api(`/api/manage/audit?group=${encodeURIComponent(group.id)}`) : Promise.resolve(null),
-    api(`${groupPath(group.id)}/word-cloud`).catch(error => ({group_id: group.id, error: error.message || "词云暂时无法加载，稍后自动重试。"})),
+    loadInsights(group, force),
     api(`${groupPath(group.id)}/summary`).catch(() => ({summary: null})),
-    api(`${groupPath(group.id)}/radar?days=${radarDays}`).catch(error => ({group_id: group.id, error: error.message})),
     requestedTab === "tools" ? api(toolsPath(group.id)).catch(error => ({group_id: group.id, error: error.message})) : Promise.resolve(null)
   ]);
+  const [cloud, radarResponse] = insights;
   if (token !== detailToken || group.id !== selectedId || requestedTab !== tab || view !== "groups") return;
   members = people.members;
   wordCloud = cloud;
@@ -991,7 +1011,7 @@ async function refreshState(force = false) {
       $("sync-status").title = (sync?.warnings || []).join("\n");
       $("sync-phase").className = `live-dot${sync?.phase === "error" || sync?.phase === "partial" ? " error" : sync?.phase === "idle" ? "" : " muted"}`;
       $("sync-now").disabled = sync?.enabled === false;
-      renderOverview(); updateView(); await loadDetail();
+      renderOverview(); updateView(); await loadDetail(force);
     } catch (error) {
       if (!listVersion) { $("welcome").hidden = false; $("group-workspace").hidden = true; renderWelcome(error.message); const retry = el("div", "list-empty", "群聊载入失败"); retry.append(document.createElement("br"), button("重新加载", "button small", () => refreshState(true))); $("group-list").replaceChildren(retry); }
       else if (force) toast(`刷新失败：${error.message}`, true);

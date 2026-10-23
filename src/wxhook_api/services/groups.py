@@ -133,6 +133,10 @@ class GroupManager:
                     for column, definition in fields.items():
                         if column not in columns:
                             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                # Keep the existing count/policy queries covered by small
+                # subsets, rather than reading every member's full row.
+                db.execute("CREATE INDEX IF NOT EXISTS members_blocked ON members(id) WHERE blocked=1")
+                db.execute("CREATE INDEX IF NOT EXISTS members_current ON members(group_id,id) WHERE membership='current'")
                 for group in legacy_groups:
                     db.execute("INSERT OR IGNORE INTO groups (id, created_at) VALUES (?, ?)", (group, now()))
                 if not db.execute("SELECT 1 FROM sync_metadata WHERE key='member_message_counts_v1'").fetchone():
@@ -188,6 +192,10 @@ class GroupManager:
                     "msgid": message_id, "sender": event_sender(event), "type": event.type,
                     "timestamp": event.timestamp, "content": event.content, "source": "callback", "raw": event.model_dump()}])
         async with self._lock:
+            # Another callback can detect an account change while this one
+            # waits for a database writer. Do not archive after suspension.
+            if self.account_error:
+                raise AccountMismatchError(self.account_error)
             await finish_before_cancel(asyncio.to_thread(record))
 
     @staticmethod
@@ -367,10 +375,15 @@ class GroupManager:
                     status = "complete" if group["id"] in rosters else "unsupported"
                     db.execute("UPDATE groups SET members_sync=?, members_synced_at=? WHERE id=?", (status, timestamp if status == "complete" else "", group["id"]))
                 for group, people in rosters.items():
-                    db.execute("UPDATE members SET membership='left' WHERE group_id=? AND membership='current'", (group,))
-                    for member in people:
-                        db.execute("""INSERT INTO members (group_id,id,wechat_name,membership) VALUES (?,?,?,'current')
-                            ON CONFLICT(group_id,id) DO UPDATE SET wechat_name=excluded.wechat_name,membership='current'""", (group, member["id"], member["name"]))
+                    incoming = {member["id"] for member in people}
+                    current = {row[0] for row in db.execute(
+                        "SELECT id FROM members WHERE group_id=? AND membership='current'", (group,))}
+                    db.executemany("UPDATE members SET membership='left' WHERE group_id=? AND id=?",
+                                   ((group, member) for member in current - incoming))
+                    db.executemany("""INSERT INTO members (group_id,id,wechat_name,membership) VALUES (?,?,?,'current')
+                        ON CONFLICT(group_id,id) DO UPDATE SET wechat_name=excluded.wechat_name,membership='current'
+                        WHERE members.wechat_name<>excluded.wechat_name OR members.membership<>'current'""",
+                        ((group, member["id"], member["name"]) for member in people))
         async with self._lock:
             await finish_before_cancel(asyncio.to_thread(write))
 
@@ -496,8 +509,8 @@ class GroupManager:
                     ORDER BY timestamp ASC,id ASC""", (group, start_timestamp, end_timestamp))
                 member_names = {row["id"]: (row["name"] or row["wechat_name"] or row["id"])
                                 for row in db.execute("SELECT id,name,wechat_name FROM members WHERE group_id=?", (group,))}
-                daily = {str(today - timedelta(days=offset)): {"date": str(today - timedelta(days=offset)), "count": 0, "text_count": 0, "active_members": set()}
-                         for offset in range(days - 1, -1, -1)}
+                daily = [{"date": str(today - timedelta(days=offset)), "count": 0, "text_count": 0, "active_members": set()}
+                         for offset in range(days - 1, -1, -1)]
                 hourly = [0] * 24
                 members = {}
                 texts = deque(maxlen=1000)
@@ -509,26 +522,28 @@ class GroupManager:
                     if identity and sender in ("", group) and str(row["content"] or "").startswith((identity + ":\n", identity + ":\r\n")):
                         continue
                     timestamp = int(row["timestamp"] or 0)
-                    local = datetime.fromtimestamp(timestamp, china)
-                    day = str(local.date())
-                    if day not in daily:
+                    # The window starts at Beijing midnight (fixed UTC+8).
+                    # Bucket integers instead of formatting a date per message.
+                    day, within_day = divmod(timestamp - start_timestamp, 86400)
+                    if not 0 <= day < days:
                         continue
                     total += 1
                     daily[day]["count"] += 1
-                    hourly[local.hour] += 1
+                    hourly[within_day // 3600] += 1
                     if sender and sender != group:
-                        entry = members.setdefault(sender, {"id": sender, "name": member_names.get(sender, sender), "count": 0, "last_seen": ""})
+                        entry = members.setdefault(sender, {"id": sender, "name": member_names.get(sender, sender), "count": 0, "last_seen": 0})
                         entry["count"] += 1
-                        entry["last_seen"] = max(entry["last_seen"], datetime.fromtimestamp(timestamp, timezone.utc).isoformat())
+                        entry["last_seen"] = timestamp  # Rows arrive oldest first.
                         daily[day]["active_members"].add(sender)
                     if int(row["type"] or 0) == 1:
                         text_total += 1
                         texts.append(str(row["content"] or "")[:2000])
                         daily[day]["text_count"] += 1
                 return {
-                    "daily": [{**item, "active_members": len(item["active_members"])} for item in daily.values()],
+                    "daily": [{**item, "active_members": len(item["active_members"])} for item in daily],
                     "hourly": [{"hour": hour, "count": count} for hour, count in enumerate(hourly)],
-                    "members": sorted(members.values(), key=lambda item: (-item["count"], item["name"]))[:10],
+                    "members": [{**item, "last_seen": datetime.fromtimestamp(item["last_seen"], timezone.utc).isoformat()}
+                                for item in sorted(members.values(), key=lambda item: (-item["count"], item["name"]))[:10]],
                     "active_member_count": len(members),
                     "texts": list(texts),
                     "total": total,
