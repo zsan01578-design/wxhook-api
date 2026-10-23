@@ -147,7 +147,7 @@ async def test_dispatcher_stop_cleans_up_an_already_cancelled_worker():
     await dispatcher.start()
     dispatcher._worker.cancel()
     await asyncio.gather(dispatcher._worker, return_exceptions=True)
-    assert await dispatcher.enqueue(EVENT)
+    assert not await dispatcher.enqueue(EVENT)
     await dispatcher.stop(timeout=1)
     assert dispatcher._worker is None and dispatcher._queue.empty()
     await asyncio.wait_for(dispatcher._queue.join(), 1)

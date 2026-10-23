@@ -36,7 +36,8 @@ async def set_callback(body: CallbackRequest, settings: Settings = Depends(get_s
 @router.post("/receiveChatBotMsg", responses={200: {"model": RetResponse}})
 async def receive_callback(event: CallbackEvent, request: Request, dispatcher: EventDispatcher = Depends(get_dispatcher)):
     if not await dispatcher.enqueue(event):
-        return JSONResponse(status_code=503, content={"error": {"code": "callback_queue_full", "message": "callback queue is full"}})
+        return JSONResponse(status_code=503, content={"error": {"code": dispatcher.rejection_code,
+            "message": "callback temporarily unavailable; retry later"}})
     request.app.state.callback_status["accepted"] += 1
     request.app.state.callback_status["last_accepted_at"] = utc_now()
     return {"ret": 0, "retmsg": "accepted"}
@@ -44,4 +45,4 @@ async def receive_callback(event: CallbackEvent, request: Request, dispatcher: E
 
 @router.get("/api/callback/status", tags=["消息回调"])
 async def callback_status(request: Request):
-    return JSONResponse(request.app.state.callback_status, headers={"Cache-Control": "no-store"})
+    return JSONResponse({**request.app.state.callback_status, "processing": request.app.state.event_dispatcher.snapshot()}, headers={"Cache-Control": "no-store"})

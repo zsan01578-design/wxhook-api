@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 
 class CallbackEvent(BaseModel):
     model_config = ConfigDict(extra="allow")
+    _receipt_key: str = PrivateAttr(default="")
 
     event_type: int
     msgid: int | str

@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from wxhook_api.services.douyin_parser import DouyinError, LINK_PATTERN, ParsedMedia, checked_url, item_identity
+from wxhook_api.services.douyin_parser import DouyinError, LINK_PATTERN, ParsedMedia, checked_url, item_identity, read_response_bytes
 
 
 def _media_urls(values: list[Any]) -> list[str]:
@@ -90,15 +90,13 @@ class DouyinAPIParser:
         # The endpoint is validated local configuration, not a URL from a group.
         try:
             async with self.client.stream("GET", self.endpoint, params={"url": source},
-                                          headers={"Accept": "application/json", "Referer": "https://jk.y-l.cc/"},
+                                          headers={"Accept": "application/json", "Referer": "https://jk.y-l.cc/", "Accept-Encoding": "gzip, deflate"},
                                           timeout=httpx.Timeout(60, connect=8)) as response:
                 if response.status_code != 200:
                     raise DouyinError(f"解析接口返回 HTTP {response.status_code}，请检查接口状态")
                 raw = bytearray()
-                async for chunk in response.aiter_bytes():
+                async for chunk in read_response_bytes(response, 3 * 1024 * 1024, size_error="解析接口响应过大，已停止处理"):
                     raw.extend(chunk)
-                    if len(raw) > 3 * 1024 * 1024:
-                        raise DouyinError("解析接口响应过大，已停止处理")
         except httpx.HTTPError as exc:
             raise DouyinError("解析接口连接失败或超时，请检查接口地址及服务状态") from exc
         try:

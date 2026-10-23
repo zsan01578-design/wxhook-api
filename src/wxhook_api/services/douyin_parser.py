@@ -10,6 +10,8 @@ from urllib.parse import parse_qs, unquote, urljoin, urlsplit, urlunsplit
 
 import httpx
 
+from wxhook_api.core.bounded_http import ResponseReadError, response_bytes
+
 
 SHARE_HOSTS = {"douyin.com", "www.douyin.com", "v.douyin.com", "m.douyin.com", "iesdouyin.com", "www.iesdouyin.com", "jingxuan.douyin.com"}
 PLATFORM_HOSTS = {"xiaohongshu.com", "www.xiaohongshu.com", "xhslink.com", "xhslink.cn", "bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv"}
@@ -20,6 +22,21 @@ LINK_PATTERN = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&()*+,;=%]+", re.
 
 class DouyinError(Exception):
     pass
+
+
+def stream_error(exc: ResponseReadError, size_error: str, kind: str = "页面") -> DouyinError:
+    messages = {"size": size_error, "encoding": f"平台{kind}压缩格式不受支持，已停止处理",
+                "format": f"平台压缩{kind}格式无效，已停止处理",
+                "incomplete": f"平台压缩{kind}不完整，已停止处理"}
+    return DouyinError(messages[str(exc)])
+
+
+async def read_response_bytes(response: httpx.Response, limit: int, *, size_error: str, kind: str = "页面"):
+    try:
+        async for chunk in response_bytes(response, limit):
+            yield chunk
+    except ResponseReadError as exc:
+        raise stream_error(exc, size_error, kind) from None
 
 
 def checked_url(url: str, *, media: bool = False, multi_platform: bool = False) -> str:
@@ -192,7 +209,7 @@ class DouyinParser:
         current = url
         for _ in range(7):
             current = checked_url(current)
-            async with self.client.stream("GET", current) as response:
+            async with self.client.stream("GET", current, headers={"Accept-Encoding": "gzip, deflate"}) as response:
                 if response.is_redirect:
                     location = response.headers.get("location")
                     if not location:
@@ -201,10 +218,8 @@ class DouyinParser:
                     continue
                 response.raise_for_status()
                 chunks = bytearray()
-                async for chunk in response.aiter_bytes():
+                async for chunk in read_response_bytes(response, 3 * 1024 * 1024, size_error="分享页面过大，已停止解析"):
                     chunks.extend(chunk)
-                    if len(chunks) > 3 * 1024 * 1024:
-                        raise DouyinError("分享页面过大，已停止解析")
                 return current, bytes(chunks).decode("utf-8", errors="replace")
         raise DouyinError("分享链接跳转次数过多")
 

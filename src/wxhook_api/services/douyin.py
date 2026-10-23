@@ -16,12 +16,13 @@ import httpx
 from wxhook_api.core.douyin_config import DouyinOptions, GroupSettings, save_group_settings
 from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.schemas.events import CallbackEvent
-from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links
+from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links, read_response_bytes
 from wxhook_api.services.douyin_delivery import DeliveryBlocked, DeliveryError, DouyinMessenger
 from wxhook_api.services.douyin_api import DouyinAPIParser
 from wxhook_api.services.parse_video import ParseVideoParser, REFERERS, source_platform
 from wxhook_api.services.groups import GroupManager, event_group, normalize_group_sender
 from wxhook_api.services.media_cleanup import ACTIVE_STATES, cleanup_media, next_cleanup_at, safe_child, timestamp, utcnow, valid_job_record
+from wxhook_api.services.storage_guard import LowDiskSpace, StorageGuard
 
 
 def media_extension(prefix: bytes, kind: str) -> str:
@@ -64,6 +65,7 @@ class DouyinService:
         self.account_check = None
         self.own_message_check = None
         self.cleanup_status = {"enabled": options.retention.enabled, "next_run_at": "", "last_run_at": "", "error": ""}
+        self.storage = StorageGuard(options.output_dir)
 
     def allowed(self, group: str, sender: str = "") -> bool:
         fallback = self.options.settings.enabled and group in self.options.settings.groups
@@ -85,8 +87,17 @@ class DouyinService:
     def _changed(self) -> None:
         self.revision = uuid4().hex
 
+    def _trim_jobs(self) -> None:
+        # This index also authorizes files used by outbound delivery. Queue-full
+        # failures must not displace jobs that still need that lookup.
+        for job_id in tuple(self._jobs):
+            if len(self._jobs) <= 150:
+                break
+            if job_id not in self._active_jobs and self._jobs[job_id].get("status") not in ACTIVE_STATES:
+                self._jobs.pop(job_id)
+
     def snapshot(self) -> dict[str, Any]:
-        return {"revision": self.revision, "jobs": list(reversed(self._jobs.values()))[:100], "pending": self._queue.qsize(), "cleanup": dict(self.cleanup_status)}
+        return {"revision": self.revision, "jobs": list(reversed(self._jobs.values()))[:100], "pending": self._queue.qsize(), "cleanup": dict(self.cleanup_status), "storage": self.storage.snapshot()}
 
     def _load_saved(self) -> None:
         if not self.options.output_dir.is_dir():
@@ -191,8 +202,7 @@ class DouyinService:
                 self._seen[key] = None
                 if len(self._seen) > 1000:
                     self._seen.popitem(last=False)
-            while len(self._jobs) > 150:
-                self._jobs.popitem(last=False)
+            self._trim_jobs()
             self._changed()
 
     def _save(self, job: dict[str, Any]) -> None:
@@ -368,6 +378,8 @@ class DouyinService:
                 job.update(status="failed", error=f"平台请求返回 HTTP {exc.response.status_code}，请确认链接可访问")
             except (httpx.HTTPError, TimeoutError):
                 job.update(status="failed", error="网络连接失败或解析下载超时，请检查网络后重试")
+            except LowDiskSpace as exc:
+                job.update(status="failed", error=str(exc))
             except OSError:
                 job.update(status="failed", error="无法保存文件，请检查下载目录权限和剩余磁盘空间")
             except Exception:
@@ -469,11 +481,12 @@ class DouyinService:
         if remaining <= 0:
             raise DouyinError("单个作品下载量超过 500 MB，已停止")
         limit = min(self.options.max_file_bytes, remaining)
+        await self.storage.ensure()
         current = url
         for _ in range(7):
             self._check_download_policy(group, sender)
             current = checked_url(current, media=True)
-            async with self._client.stream("GET", current, headers={"Referer": REFERERS.get(platform, REFERERS["douyin"])}) as response:
+            async with self._client.stream("GET", current, headers={"Referer": REFERERS.get(platform, REFERERS["douyin"]), "Accept-Encoding": "gzip, deflate"}) as response:
                 if response.is_redirect:
                     current = checked_url(urljoin(current, response.headers.get("location", "")), media=True)
                     continue
@@ -483,19 +496,22 @@ class DouyinService:
                 length = response.headers.get("content-length", "")
                 if length.isdigit() and int(length) > limit:
                     raise DouyinError("媒体文件超过配置的大小限制，已停止下载")
+                await self.storage.ensure(int(length) if length.isdigit() else 0)
                 partial = folder / f"{index:03d}.part"
                 size = 0
                 prefix = bytearray()
                 try:
                     with partial.open("wb") as output:
-                        async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                        async for chunk in read_response_bytes(response, limit, size_error="媒体文件超过配置的大小限制，已停止下载", kind="媒体"):
                             self._check_download_policy(group, sender)
                             size += len(chunk)
                             if size > limit:
                                 raise DouyinError("媒体文件超过配置的大小限制，已停止下载")
                             if len(prefix) < 32:
                                 prefix.extend(chunk[:32 - len(prefix)])
+                            await self.storage.ensure(len(chunk))
                             output.write(chunk)
+                            self.storage.written(len(chunk))
                     extension = media_extension(bytes(prefix), kind)
                     if length.isdigit() and size != int(length) and not response.headers.get("content-encoding"):
                         raise DouyinError("下载内容不完整，请重新发送链接")

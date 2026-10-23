@@ -81,85 +81,96 @@ class GroupManager:
             connection.close()
 
     async def start(self, legacy_groups: list[str]) -> None:
-        def initialize():
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as db:
-                db.executescript("""
-                    CREATE TABLE IF NOT EXISTS groups (
-                        id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
-                        pinned INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
-                        blocked INTEGER NOT NULL DEFAULT 0, douyin_enabled INTEGER, auto_download INTEGER,
-                        created_at TEXT NOT NULL, last_seen TEXT NOT NULL DEFAULT '',
-                        last_message TEXT NOT NULL DEFAULT '', message_count INTEGER NOT NULL DEFAULT 0
-                    );
-                    CREATE TABLE IF NOT EXISTS members (
-                        group_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
-                        blocked INTEGER NOT NULL DEFAULT 0, last_seen TEXT NOT NULL DEFAULT '',
-                        message_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (group_id, id)
-                    );
-                    CREATE TABLE IF NOT EXISTS audit (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL,
-                        target TEXT NOT NULL, action TEXT NOT NULL, created_at TEXT NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS chat_messages (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, msg_key TEXT NOT NULL,
-                        msgid TEXT NOT NULL, sender TEXT NOT NULL, type INTEGER NOT NULL,
-                        timestamp INTEGER NOT NULL, content TEXT NOT NULL, received_at TEXT NOT NULL,
-                        source TEXT NOT NULL, raw_json TEXT NOT NULL,
-                        UNIQUE(group_id, msg_key)
-                    );
-                    CREATE INDEX IF NOT EXISTS chat_messages_timeline ON chat_messages(group_id, timestamp DESC, id DESC);
-                    CREATE TABLE IF NOT EXISTS sync_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                    CREATE TABLE IF NOT EXISTS chat_reply_claims (
-                        group_id TEXT NOT NULL, message_key TEXT NOT NULL, status TEXT NOT NULL,
-                        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                        PRIMARY KEY (group_id, message_key)
-                    );
-                    CREATE TABLE IF NOT EXISTS chat_summaries (
-                        group_id TEXT NOT NULL, summary_date TEXT NOT NULL, summary TEXT NOT NULL,
-                        message_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                        PRIMARY KEY (group_id, summary_date)
-                    );
-                """)
-                migrations = {
-                    "groups": {"chat_enabled": "INTEGER", "summary_enabled": "INTEGER NOT NULL DEFAULT 0", "wechat_name": "TEXT NOT NULL DEFAULT ''", "members_sync": "TEXT NOT NULL DEFAULT 'pending'",
-                               "members_synced_at": "TEXT NOT NULL DEFAULT ''", "history_complete": "INTEGER NOT NULL DEFAULT 0",
-                               "history_next_page": "INTEGER NOT NULL DEFAULT 1", "history_error": "TEXT NOT NULL DEFAULT ''",
-                               "history_synced_at": "TEXT NOT NULL DEFAULT ''"},
-                    "members": {"wechat_name": "TEXT NOT NULL DEFAULT ''", "membership": "TEXT NOT NULL DEFAULT 'unknown'"},
-                }
-                for table, fields in migrations.items():
-                    columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
-                    for column, definition in fields.items():
-                        if column not in columns:
-                            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-                # Keep the existing count/policy queries covered by small
-                # subsets, rather than reading every member's full row.
-                db.execute("CREATE INDEX IF NOT EXISTS members_blocked ON members(id) WHERE blocked=1")
-                db.execute("CREATE INDEX IF NOT EXISTS members_current ON members(group_id,id) WHERE membership='current'")
-                for group in legacy_groups:
-                    db.execute("INSERT OR IGNORE INTO groups (id, created_at) VALUES (?, ?)", (group, now()))
-                if not db.execute("SELECT 1 FROM sync_metadata WHERE key='member_message_counts_v1'").fetchone():
-                    # Repair counts left by earlier sender enrichment without
-                    # changing member names, membership or blacklist policies.
-                    db.execute("UPDATE members SET message_count=0")
-                    db.executemany("UPDATE members SET message_count=? WHERE group_id=? AND id=?",
-                        ((row["total"], row["group_id"], row["sender"]) for row in db.execute(
-                            "SELECT group_id,sender,count(*) AS total FROM chat_messages GROUP BY group_id,sender")))
-                    db.execute("INSERT INTO sync_metadata(key,value) VALUES ('member_message_counts_v1',?)", (now(),))
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        def initialize(db):
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS groups (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
+                    pinned INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
+                    blocked INTEGER NOT NULL DEFAULT 0, douyin_enabled INTEGER, auto_download INTEGER,
+                    created_at TEXT NOT NULL, last_seen TEXT NOT NULL DEFAULT '',
+                    last_message TEXT NOT NULL DEFAULT '', message_count INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS members (
+                    group_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+                    blocked INTEGER NOT NULL DEFAULT 0, last_seen TEXT NOT NULL DEFAULT '',
+                    message_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (group_id, id)
+                );
+                CREATE TABLE IF NOT EXISTS audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL,
+                    target TEXT NOT NULL, action TEXT NOT NULL, created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, msg_key TEXT NOT NULL,
+                    msgid TEXT NOT NULL, sender TEXT NOT NULL, type INTEGER NOT NULL,
+                    timestamp INTEGER NOT NULL, content TEXT NOT NULL, received_at TEXT NOT NULL,
+                    source TEXT NOT NULL, raw_json TEXT NOT NULL,
+                    UNIQUE(group_id, msg_key)
+                );
+                CREATE INDEX IF NOT EXISTS chat_messages_timeline ON chat_messages(group_id, timestamp DESC, id DESC);
+                CREATE TABLE IF NOT EXISTS sync_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS chat_reply_claims (
+                    group_id TEXT NOT NULL, message_key TEXT NOT NULL, status TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY (group_id, message_key)
+                );
+                CREATE TABLE IF NOT EXISTS chat_summaries (
+                    group_id TEXT NOT NULL, summary_date TEXT NOT NULL, summary TEXT NOT NULL,
+                    message_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY (group_id, summary_date)
+                );
+            """)
+            migrations = {
+                "groups": {"chat_enabled": "INTEGER", "summary_enabled": "INTEGER NOT NULL DEFAULT 0", "wechat_name": "TEXT NOT NULL DEFAULT ''", "members_sync": "TEXT NOT NULL DEFAULT 'pending'",
+                           "members_synced_at": "TEXT NOT NULL DEFAULT ''", "history_complete": "INTEGER NOT NULL DEFAULT 0",
+                           "history_next_page": "INTEGER NOT NULL DEFAULT 1", "history_error": "TEXT NOT NULL DEFAULT ''",
+                           "history_synced_at": "TEXT NOT NULL DEFAULT ''"},
+                "members": {"wechat_name": "TEXT NOT NULL DEFAULT ''", "membership": "TEXT NOT NULL DEFAULT 'unknown'"},
+            }
+            for table, fields in migrations.items():
+                columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                for column, definition in fields.items():
+                    if column not in columns:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            # Keep the existing count/policy queries covered by small
+            # subsets, rather than reading every member's full row.
+            db.execute("CREATE INDEX IF NOT EXISTS members_blocked ON members(id) WHERE blocked=1")
+            db.execute("CREATE INDEX IF NOT EXISTS members_current ON members(group_id,id) WHERE membership='current'")
+            for group in legacy_groups:
+                db.execute("INSERT OR IGNORE INTO groups (id, created_at) VALUES (?, ?)", (group, now()))
+            if not db.execute("SELECT 1 FROM sync_metadata WHERE key='member_message_counts_v1'").fetchone():
+                # Repair counts left by earlier sender enrichment without
+                # changing member names, membership or blacklist policies.
+                db.execute("UPDATE members SET message_count=0")
+                db.executemany("UPDATE members SET message_count=? WHERE group_id=? AND id=?",
+                    ((row["total"], row["group_id"], row["sender"]) for row in db.execute(
+                        "SELECT group_id,sender,count(*) AS total FROM chat_messages GROUP BY group_id,sender")))
+                db.execute("INSERT INTO sync_metadata(key,value) VALUES ('member_message_counts_v1',?)", (now(),))
         await self._write_policy(initialize)
+
+    @staticmethod
+    def _read_policies(db):
+        policies = {row["id"]: dict(row) for row in db.execute("SELECT * FROM groups")}
+        blocked = {(row["group_id"], row["id"]) for row in db.execute("SELECT group_id, id FROM members WHERE blocked=1")}
+        return policies, blocked
 
     def _reload(self):
         with self._connect() as db:
-            policies = {row["id"]: dict(row) for row in db.execute("SELECT * FROM groups")}
-            blocked = {(row["group_id"], row["id"]) for row in db.execute("SELECT group_id, id FROM members WHERE blocked=1")}
-        self._policies = policies
-        self._blocked_members = blocked
+            snapshot = self._read_policies(db)
+        self._policies, self._blocked_members = snapshot
 
     async def _write_policy(self, action):
+        def write():
+            with self._connect() as db:
+                result = action(db)
+                snapshot = self._read_policies(db)
+            return result, snapshot
+
         async def commit():
-            result = await asyncio.to_thread(action)
-            await asyncio.to_thread(self._reload)
+            result, snapshot = await asyncio.to_thread(write)
+            # Publish on the event loop only after both the snapshot read and
+            # transaction commit succeed. Read/commit failure keeps old policy.
+            self._policies, self._blocked_members = snapshot
             return result
 
         # A cancelled request cannot stop a worker thread's database commit.
@@ -188,7 +199,7 @@ class GroupManager:
         def record():
             with self._connect() as db:
                 message_id = str(event.msgid)
-                self._save_messages(db, group, [{"key": f"server:{message_id}" if message_id not in {"", "0"} else f"callback:{uuid4().hex}",
+                self._save_messages(db, group, [{"key": f"server:{message_id}" if message_id not in {"", "0"} else f"callback:{event._receipt_key or uuid4().hex}",
                     "msgid": message_id, "sender": event_sender(event), "type": event.type,
                     "timestamp": event.timestamp, "content": event.content, "source": "callback", "raw": event.model_dump()}])
         async with self._lock:
@@ -226,12 +237,11 @@ class GroupManager:
         return rows
 
     async def add_group(self, group: str, name: str) -> bool:
-        def write():
-            with self._connect() as db:
-                inserted = db.execute("INSERT OR IGNORE INTO groups (id, name, created_at) VALUES (?, ?, ?)", (group, name, now())).rowcount
-                if inserted:
-                    self._audit(db, group, name or group, "添加群聊")
-                return bool(inserted)
+        def write(db):
+            inserted = db.execute("INSERT OR IGNORE INTO groups (id, name, created_at) VALUES (?, ?, ?)", (group, name, now())).rowcount
+            if inserted:
+                self._audit(db, group, name or group, "添加群聊")
+            return bool(inserted)
         return await self._write_policy(write)
 
     async def claim_chat_reply(self, group: str, key: str) -> bool:
@@ -252,20 +262,19 @@ class GroupManager:
         labels = {"name": "修改群名称", "note": "修改群备注", "pinned": "置顶群聊", "enabled": "群功能总开关", "blocked": "群聊黑名单", "douyin_enabled": "抖音解析", "auto_download": "自动保存媒体", "chat_enabled": "@机器人问答", "summary_enabled": "自动 AI 日总结"}
         assert changes.keys() <= labels.keys()
 
-        def write():
-            with self._connect() as db:
-                row = db.execute("SELECT * FROM groups WHERE id=?", (group,)).fetchone()
-                if row is None:
-                    return False
-                for key, value in changes.items():
-                    if row[key] == value:
-                        continue
-                    db.execute(f"UPDATE groups SET {key}=? WHERE id=?", (value, group))
-                    status = ("开启" if value else "关闭") if isinstance(value, bool) else "已更新"
-                    if key == "blocked":
-                        status = "已拉黑" if value else "已解除"
-                    self._audit(db, group, row["name"] or group, f"{labels[key]} · {status}")
-                return True
+        def write(db):
+            row = db.execute("SELECT * FROM groups WHERE id=?", (group,)).fetchone()
+            if row is None:
+                return False
+            for key, value in changes.items():
+                if row[key] == value:
+                    continue
+                db.execute(f"UPDATE groups SET {key}=? WHERE id=?", (value, group))
+                status = ("开启" if value else "关闭") if isinstance(value, bool) else "已更新"
+                if key == "blocked":
+                    status = "已拉黑" if value else "已解除"
+                self._audit(db, group, row["name"] or group, f"{labels[key]} · {status}")
+            return True
         return await self._write_policy(write)
 
     async def members(self, group: str | None = None, *, blocked_only: bool = False) -> list[dict]:
@@ -286,25 +295,24 @@ class GroupManager:
     async def save_member(self, group: str, member: str, changes: dict, *, create: bool = False) -> bool:
         assert changes.keys() <= {"name", "blocked"}
 
-        def write():
-            with self._connect() as db:
-                if not db.execute("SELECT 1 FROM groups WHERE id=?", (group,)).fetchone():
-                    return False
-                row = db.execute("SELECT * FROM members WHERE group_id=? AND id=?", (group, member)).fetchone()
-                if create and row is not None:
-                    return True
-                if row is None:
-                    if not create:
-                        return False
-                    db.execute("INSERT INTO members (group_id, id) VALUES (?, ?)", (group, member))
-                    self._audit(db, group, member, "添加群成员")
-                for key, value in changes.items():
-                    if row is not None and row[key] == value:
-                        continue
-                    db.execute(f"UPDATE members SET {key}=? WHERE group_id=? AND id=?", (value, group, member))
-                    action = ("拉黑群成员" if value else "解除成员黑名单") if key == "blocked" else "修改成员备注"
-                    self._audit(db, group, changes.get("name") or (row["name"] if row else "") or member, action)
+        def write(db):
+            if not db.execute("SELECT 1 FROM groups WHERE id=?", (group,)).fetchone():
+                return False
+            row = db.execute("SELECT * FROM members WHERE group_id=? AND id=?", (group, member)).fetchone()
+            if create and row is not None:
                 return True
+            if row is None:
+                if not create:
+                    return False
+                db.execute("INSERT INTO members (group_id, id) VALUES (?, ?)", (group, member))
+                self._audit(db, group, member, "添加群成员")
+            for key, value in changes.items():
+                if row is not None and row[key] == value:
+                    continue
+                db.execute(f"UPDATE members SET {key}=? WHERE group_id=? AND id=?", (value, group, member))
+                action = ("拉黑群成员" if value else "解除成员黑名单") if key == "blocked" else "修改成员备注"
+                self._audit(db, group, changes.get("name") or (row["name"] if row else "") or member, action)
+            return True
         return await self._write_policy(write)
 
     async def audit(self, group: str | None = None) -> list[dict]:
@@ -385,6 +393,8 @@ class GroupManager:
                         WHERE members.wechat_name<>excluded.wechat_name OR members.membership<>'current'""",
                         ((group, member["id"], member["name"]) for member in people))
         async with self._lock:
+            if self.account_error:
+                raise AccountMismatchError(self.account_error)
             await finish_before_cancel(asyncio.to_thread(write))
 
     async def claim_account(self, account: str) -> None:
@@ -426,8 +436,17 @@ class GroupManager:
             await finish_before_cancel(asyncio.to_thread(write))
 
     async def import_history(self, group: str, rows: list[dict]) -> tuple[int, int]:
+        if self.account_error:
+            raise AccountMismatchError(self.account_error)
         normalized = []
         for row in rows:
+            try:
+                message_type = int(row.get("local_type") or row.get("type") or 0)
+                timestamp = int(row.get("create_time") or row.get("timestamp") or 0)
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError("微信历史记录的消息类型或时间格式无效，未导入该页") from None
+            if not -(2**63) <= message_type <= 2**63 - 1:
+                raise ValueError("微信历史记录的消息类型超出支持范围，未导入该页")
             server = str(row.get("server_id") or row.get("msgid") or "0")
             if server == "0":
                 server = str(row.get("msgid") or "0")
@@ -448,12 +467,13 @@ class GroupManager:
                 if prefix:
                     sender = prefix[1]
             normalized.append({"key": key, "msgid": server, "sender": sender, "sender_name": str(row.get("sender_nickname") or "")[:256],
-                               "type": int(row.get("local_type") or row.get("type") or 0),
-                               "timestamp": int(row.get("create_time") or row.get("timestamp") or 0), "content": content, "source": "history", "raw": row})
+                               "type": message_type, "timestamp": timestamp, "content": content, "source": "history", "raw": row})
         def write():
             with self._connect() as db:
                 return self._save_messages(db, group, normalized)
         async with self._lock:
+            if self.account_error:
+                raise AccountMismatchError(self.account_error)
             return await finish_before_cancel(asyncio.to_thread(write))
 
     async def word_cloud(self, group: str, *, bot_wxid: str = "") -> dict:

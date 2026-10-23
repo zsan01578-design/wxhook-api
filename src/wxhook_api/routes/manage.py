@@ -65,10 +65,11 @@ async def state(request: Request):
     for group in groups:
         group["tools_enabled"] = group["id"] in tool_groups
     inbox = request.app.state.message_inbox.snapshot()
-    callbacks = {**request.app.state.callback_status, "total": inbox["total"], "last_received_at": inbox["messages"][0]["received_at"] if inbox["messages"] else ""}
+    callbacks = {**request.app.state.callback_status, "processing": request.app.state.event_dispatcher.snapshot(), "total": inbox["total"], "last_received_at": inbox["messages"][0]["received_at"] if inbox["messages"] else ""}
     media = {"parser_provider": settings.parser_provider, "notify_group": settings.notify_group,
              "send_results": settings.send_results, "feedback_available": service.messenger is not None}
-    return JSONResponse({"groups": groups, "blocked_members": await manager.members(blocked_only=True), "startup": request.app.state.launcher_status, "sync": request.app.state.wechat_sync.status, "media": media, "callbacks": callbacks, "chatbot": request.app.state.chatbot.snapshot()}, headers={"Cache-Control": "no-store"})
+    runtime = {"backup": request.app.state.backups.snapshot(), "media_storage": service.storage.snapshot()}
+    return JSONResponse({"groups": groups, "blocked_members": await manager.members(blocked_only=True), "startup": request.app.state.launcher_status, "sync": request.app.state.wechat_sync.status, "media": media, "callbacks": callbacks, "runtime": runtime, "chatbot": request.app.state.chatbot.snapshot()}, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/sync", status_code=202)

@@ -50,6 +50,7 @@ def prepare_image(path: Path) -> tuple[Path, str]:
                 if getattr(image, "n_frames", 1) > 1:
                     return path, "file"  # Preserve animation instead of flattening it.
                 if path.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                    image.load()
                     return path, "image"
                 image = ImageOps.exif_transpose(image)
                 converted = image.convert("RGBA" if "A" in image.getbands() else "RGB")

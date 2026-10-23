@@ -28,7 +28,7 @@ async def test_index_upgrade_preserves_rows_counts_order_and_policy_results(tmp_
         ])
 
     async def snapshot():
-        await manager._write_policy(lambda: None)
+        await manager._write_policy(lambda db: None)
         with manager._connect() as db:
             raw = {table: [dict(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY 1,2")]
                    for table in ("groups", "members", "sync_metadata")}

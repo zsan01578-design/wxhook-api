@@ -15,8 +15,9 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 import yaml
 
+from wxhook_api.core.bounded_http import LimitedStream, ResponseReadError
 from wxhook_api.core.config import PROJECT_ROOT
-from wxhook_api.services.douyin_parser import DouyinError, ParsedMedia, USER_AGENT, checked_url
+from wxhook_api.services.douyin_parser import DouyinError, ParsedMedia, USER_AGENT, checked_url, stream_error
 
 
 PLATFORMS = {
@@ -52,10 +53,14 @@ class _RequestContext:
     xhs_cookie: str = field(default="", repr=False)
 
 
+def parser_config_path() -> Path:
+    return Path(os.getenv("WXHOOK_PARSE_VIDEO_CONFIG") or PROJECT_ROOT / "parse-video.local.yml").expanduser().resolve()
+
+
 def _local_xhs_cookie() -> str:
     value = os.getenv("PARSE_VIDEO_XHS_COOKIE")
     if value is None:
-        path = Path(os.getenv("WXHOOK_PARSE_VIDEO_CONFIG", str(PROJECT_ROOT / "parse-video.local.yml")))
+        path = parser_config_path()
         try:
             if not path.is_file():
                 return ""
@@ -74,29 +79,25 @@ _request_context: ContextVar[_RequestContext | None] = ContextVar("wxhook_parse_
 _install_lock = threading.Lock()
 
 
-class _LimitedStream(httpx.AsyncByteStream):
-    def __init__(self, stream: httpx.AsyncByteStream, *, headers_only: bool = False):
-        self.stream, self.headers_only = stream, headers_only
+class _LimitedStream(LimitedStream):
+    def __init__(self, stream: httpx.AsyncByteStream, *, headers_only: bool = False, encoding: str = ""):
+        super().__init__(stream, _MAX_PAGE_BYTES, headers_only=headers_only, encoding=encoding)
 
     async def __aiter__(self):
-        # SDK redirect probes need media response headers, not a full MP4 in RAM.
-        if self.headers_only:
-            return
-        size = 0
-        async for chunk in self.stream:
-            size += len(chunk)
-            if size > _MAX_PAGE_BYTES:
-                raise DouyinError("平台解析页面过大，已停止处理")
-            yield chunk
-
-    async def aclose(self):
-        await self.stream.aclose()
+        try:
+            async for chunk in super().__aiter__():
+                yield chunk
+        except ResponseReadError as exc:
+            raise stream_error(exc, "平台解析页面过大，已停止处理") from None
 
 
 async def _guard_request(request: httpx.Request) -> None:
     # The SDK follows redirects. Check every outbound request, not just the
     # original share link, and never let platform content target the local Hook.
     checked_url(str(request.url), media=True)
+    # These encodings have bounded streaming decoders below. Do not negotiate
+    # optional codecs whose decoder may expand a single chunk without a limit.
+    request.headers["Accept-Encoding"] = "gzip, deflate"
     # A stable mobile page layout avoids SDK random-UA-dependent SSR schemas.
     host = request.url.host
     if host in PLATFORMS["douyin"][1]:
@@ -121,7 +122,15 @@ async def _guard_response(response: httpx.Response) -> None:
         if not binary and len(response.content) > _MAX_PAGE_BYTES:
             raise DouyinError("平台解析页面过大，已停止处理")
         return
-    response.stream = _LimitedStream(response.stream, headers_only=binary)
+    encoding = response.headers.get("content-encoding", "").strip().lower()
+    if not binary and encoding not in {"", "identity", "gzip", "deflate"}:
+        raise DouyinError("平台页面压缩格式不受支持，已停止处理")
+    response.stream = _LimitedStream(response.stream, headers_only=binary, encoding=encoding)
+    if not binary and encoding in {"gzip", "deflate"}:
+        # The wrapper yields decoded bytes. Prevent HTTPX from decoding again
+        # or reporting the compressed Content-Length as the decoded length.
+        response.headers.pop("content-encoding", None)
+        response.headers.pop("content-length", None)
 
 
 def _load_library():

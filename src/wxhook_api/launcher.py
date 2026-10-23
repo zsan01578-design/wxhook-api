@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from copy import deepcopy
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -167,7 +168,8 @@ async def manage_wechat(app: Any, settings: Settings, options: LauncherSettings)
 async def run_service(settings: Settings, options: LauncherSettings) -> None:
     app = create_app(settings)
     app.state.launcher_status = {"phase": "starting", "message": "正在启动微信与消息服务…"}
-    config = uvicorn.Config(app, host=settings.host, port=settings.port, workers=1, log_level=settings.log_level.lower())
+    config = uvicorn.Config(app, host=settings.host, port=settings.port, workers=1,
+                            log_level=settings.log_level.lower(), log_config=service_log_config(settings))
     server = uvicorn.Server(config)
 
     async def after_listening() -> None:
@@ -192,6 +194,21 @@ async def run_service(settings: Settings, options: LauncherSettings) -> None:
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+def service_log_config(settings: Settings) -> dict:
+    config = deepcopy(uvicorn.config.LOGGING_CONFIG)
+    database = Path(os.getenv("WXHOOK_MANAGEMENT_DB") or PROJECT_ROOT / "data" / "management.sqlite3")
+    path = Path(os.getenv("WXHOOK_LOG_FILE") or database.parent / "wxhook.log").expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    config["formatters"]["persistent"] = {"format": "%(asctime)s %(levelname)s [%(process)d] %(name)s: %(message)s"}
+    config["handlers"]["persistent"] = {"class": "logging.handlers.RotatingFileHandler", "formatter": "persistent",
+        "filename": str(path), "maxBytes": 5 * 1024 * 1024, "backupCount": 3, "encoding": "utf-8"}
+    config["loggers"]["uvicorn"]["handlers"].append("persistent")
+    # Keep verbose third-party HTTP request URLs out of persistent logs.
+    config["root"] = {"handlers": ["persistent"], "level": "WARNING"}
+    config["loggers"]["wxhook_api"] = {"level": settings.log_level, "propagate": True}
+    return config
 
 
 def existing_service(settings: Settings) -> bool:

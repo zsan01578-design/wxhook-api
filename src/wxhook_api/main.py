@@ -9,6 +9,7 @@ if __name__ == "__main__" and not __package__:
 from contextlib import AsyncExitStack, asynccontextmanager
 import os
 import sqlite3
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
@@ -17,10 +18,10 @@ from fastapi.staticfiles import StaticFiles
 from wxhook_api.clients.hook_client import HookClient
 from wxhook_api.core.body_limit import BodyLimitMiddleware
 from wxhook_api.core.access import AccessMiddleware
-from wxhook_api.core.config import Settings, load_settings
+from wxhook_api.core.config import PROJECT_ROOT, Settings, load_settings
 from wxhook_api.core.chatbot_config import load_chatbot_options
 from wxhook_api.core.douyin_config import load_douyin_options
-from wxhook_api.core.errors import install_exception_handlers
+from wxhook_api.core.errors import AccountMismatchError, HookTransportError, install_exception_handlers
 from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.core.runtime import source_revision
 from wxhook_api.routes import account, callbacks, contacts, douyin, group_tools, health, history, manage, media, messages, querydb, ui
@@ -30,6 +31,9 @@ from wxhook_api.services.chat_model import ChatModelConfiguration
 from wxhook_api.services.chat_summary import ChatSummaryService
 from wxhook_api.services.douyin_delivery import DouyinMessenger
 from wxhook_api.services.events import EventDispatcher
+from wxhook_api.services.callback_store import CallbackStore
+from wxhook_api.services.backups import BackupService
+from wxhook_api.services.parse_video import parser_config_path
 from wxhook_api.services.groups import GroupManager, event_group
 from wxhook_api.services.group_tools import GroupToolsService
 from wxhook_api.services.inbox import MessageInbox
@@ -39,8 +43,9 @@ from wxhook_api.services.web_search import WebSearchConfiguration
 
 def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncBaseTransport | None = None, hook_client: HookClient | None = None, douyin_service: DouyinService | None = None, group_manager: GroupManager | None = None, sync_options: SyncOptions | None = None, chat_service: MentionChatService | None = None) -> FastAPI:
     settings = settings or load_settings()
-    dispatcher = EventDispatcher(settings.callback_queue_size, workers=settings.callback_workers)
     groups = group_manager or GroupManager()
+    dispatcher = EventDispatcher(settings.callback_queue_size, workers=settings.callback_workers,
+                                 store=CallbackStore(groups, settings.callback_queue_size))
     synchronizer = WeChatSync(groups, sync_options or SyncOptions.from_environment())
     inbox = MessageInbox()
     douyin_worker = douyin_service or DouyinService(load_douyin_options())
@@ -56,6 +61,15 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     chatbot.summary_service = summary_service
     tools_service = GroupToolsService(groups, model_configuration, chatbot)
     chatbot.tools_service = tools_service
+    backups = BackupService(groups, {
+        "version.yml": settings.config_path,
+        "douyin.yml": PROJECT_ROOT / "douyin.yml", "douyin.local.yml": douyin_worker.options.config_path,
+        "chatbot.yml": PROJECT_ROOT / "chatbot.yml",
+        "chatbot.local.yml": Path(os.getenv("WXHOOK_CHATBOT_CONFIG") or PROJECT_ROOT / "chatbot.local.yml"),
+        "launcher.yml": Path(os.getenv("WXHOOK_LAUNCHER_CONFIG") or PROJECT_ROOT / "launcher.yml"),
+        "parse-video.local.yml": parser_config_path(),
+        "chat-model.local.json": model_configuration.path, "search.local.json": search_configuration.path,
+    }, databases={"ai-usage.sqlite3": model_configuration.budget.path})
 
     async def archive_event(event):
         if synchronizer.options.enabled:
@@ -65,7 +79,9 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
         if group and (chatbot.options.enabled or douyin_worker.allowed(group, event.sender)
                       or group in await tools_service.enabled_groups()):
             if not await chatbot.verify_account():
-                raise ValueError("无法核验微信账号，已停止处理此回调")
+                if groups.account_error:
+                    raise AccountMismatchError(groups.account_error)
+                raise HookTransportError("无法核验微信账号，已停止处理此回调")
         await groups.receive(event)
 
     dispatcher.register(archive_event, critical=True)
@@ -99,6 +115,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             cleanup.push_async_callback(tools_service.stop)
             cleanup.push_async_callback(dispatcher.stop, settings.shutdown_timeout)
             cleanup.push_async_callback(synchronizer.stop)
+            cleanup.push_async_callback(backups.stop)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -117,6 +134,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             await summary_service.start()
             await dispatcher.start()
             synchronizer.start(app.state.hook_client)
+            await backups.start()
             yield
         finally:
             await finish_before_cancel(shutdown())
@@ -137,6 +155,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.chat_summary = summary_service
     app.state.group_tools = tools_service
     app.state.runtime_revision = source_revision()
+    app.state.backups = backups
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
     app.add_middleware(AccessMiddleware)
     install_exception_handlers(app)

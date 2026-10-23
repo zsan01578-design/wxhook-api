@@ -37,13 +37,13 @@ async def test_cancelled_blacklist_settles_cache_before_releasing_lock(tmp_path,
 
         monkeypatch.setattr(groups, '_connect', paused_connect)
     else:
-        original = groups._reload
+        original = groups._read_policies
 
-        def paused_reload():
+        def paused_reload(db):
             pause()
-            original()
+            return original(db)
 
-        monkeypatch.setattr(groups, '_reload', paused_reload)
+        monkeypatch.setattr(groups, '_read_policies', paused_reload)
 
     pending = asyncio.create_task(groups.update_group(GROUP, {'blocked': True}) if kind == 'group'
         else groups.save_member(GROUP, MEMBER, {'blocked': True}))

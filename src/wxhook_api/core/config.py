@@ -86,6 +86,7 @@ class Settings:
             allowed = (
                 f"http://127.0.0.1:{port}/receiveChatBotMsg",
                 f"http://localhost:{port}/receiveChatBotMsg",
+                f"http://[::1]:{port}/receiveChatBotMsg",
             )
         allowed = tuple(_clean_url(url, "allowed callback URL") for url in allowed)
 

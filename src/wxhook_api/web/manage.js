@@ -984,12 +984,31 @@ function connectionDialog() {
   const callbacks = state.callbacks;
   const received = el("p", "form-note");
   callbackInfo(received, callbacks);
-  body.append(status, startup, received, result, actions);
+  const storage = el("p", "form-note");
+  const runtime = state.runtime;
+  if (runtime) {
+    const backup = runtime.backup;
+    storage.textContent = [runtime.media_storage?.error,
+      backup?.enabled ? (backup.last_error || backup.cleanup_error || (backup.last_success_at ? `最近备份：${dateText(backup.last_success_at)}，保留最近 ${backup.retained_limit} 份。` : "自动备份等待首次完成。")) : "自动备份已关闭。"].filter(Boolean).join(" ");
+  }
+  body.append(status, startup, received, storage, result, actions);
 }
 
 function callbackInfo(node, data) {
   if (!data) { node.textContent = "请更新并重启服务后查看实时回调接收状态。"; return; }
-  let text = `本次启动：接收成功 ${data.accepted ?? data.total ?? 0} 条，校验拒收 ${data.rejected ?? 0} 条。`;
+  let text = `本次启动：已接收 ${data.accepted ?? data.total ?? 0} 条，校验拒收 ${data.rejected ?? 0} 条。`;
+  const processing = data.processing;
+  if (processing) {
+    text += ` 后台处理完成 ${processing.processed ?? 0} 条，处理失败 ${processing.failed ?? 0} 条，排队 ${processing.pending ?? 0} 条，处理中 ${processing.inflight ?? 0} 条。`;
+    if (!processing.running) text += " 消息处理任务已停止，请重启服务；当前拒绝接收新回调。";
+    else if (processing.recovering) text += " 正在恢复已保存的待处理回调。";
+    else if (processing.storage_waiting) text += " 正在等待本地存储恢复，消息和会话顺序已保留，当前暂停接收新回调。";
+    else if (processing.stalled) text += " 消息队列长时间未推进，请检查连接和存储。";
+    if (processing.last_error) {
+      const labels = {account_blocked:"微信账号校验受限",storage_unavailable:"本地存储暂不可用",hook_unavailable:"微信连接暂不可用",handler_failed:"后台处理异常"};
+      text += ` 最近处理异常：${labels[processing.last_error.code] || "后台处理异常"}（${dateText(processing.last_error.at)}）。`;
+    }
+  }
   if (data.last_accepted_at || data.last_received_at) text += ` 最近接收：${dateText(data.last_accepted_at || data.last_received_at)}。`;
   if (data.last_rejection) {
     const detail = data.last_rejection.fields.map(item => `${item.field}：${item.error === "missing" ? "缺少字段" : `类型或格式不符（${item.input_type} / ${item.error}）`}`).join("；");

@@ -250,7 +250,14 @@ class WeChatSync:
         for page in pages:
             response = await self.client.get_history(HistoryRequest(wxid=group["id"], size=size, page=page))
             rows = records(response, context="读取群聊历史记录")
-            if response.data.get("wxid", group["id"]) != group["id"] or int(response.data.get("page", page)) != page or len(rows) > size:
+            reported_page = response.data.get("page", page)
+            if type(reported_page) not in {int, str}:
+                raise SyncError("微信历史接口的分页格式无效，未导入该页")
+            try:
+                reported_page = int(reported_page)
+            except ValueError:
+                raise SyncError("微信历史接口的分页格式无效，未导入该页") from None
+            if response.data.get("wxid", group["id"]) != group["id"] or reported_page != page or len(rows) > size:
                 raise SyncError("微信历史接口返回的会话或分页信息不一致，未导入该页")
             await self._same_account(account)
             signature = hashlib.sha256(json.dumps(rows, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
