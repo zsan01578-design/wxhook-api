@@ -294,7 +294,7 @@ async def test_verified_mentions_without_display_text_or_with_invisible_separato
         assert report["model_route"] == "image"
         runtime = (await state.client.get("/api/manage/state")).json()
         assert runtime["runtime"]["revision"] == state.app.state.runtime_revision
-        assert runtime["chatbot"]["image_routing_version"] == 2
+        assert runtime["chatbot"]["image_routing_version"] == 3
 
 
 async def test_ambiguous_multiple_mentions_never_send_drawing_request_to_chat_model(tmp_path):

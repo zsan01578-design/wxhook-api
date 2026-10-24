@@ -236,9 +236,10 @@ function renderFeatures(group) {
   const recent = chat?.recent_requests?.find(item => item.group_id === group.id) || chat?.recent_events?.find(item => item.group_id === group.id);
   const knownNames = chat?.mention_names?.length ? chat.mention_names : recent?.mention_names;
   const names = knownNames?.length ? knownNames.join("、") : "尚未识别";
-  const route = {image: "生图模型", chat: "文字问答 / 群工具", image_mention_unresolved: "绘图请求的 @位置无法确认，已停止调用模型"}[recent?.model_route];
+  const route = {image: "生图模型", chat: "文字问答 / 群工具", image_intent: "正在理解生图需求", image_clarification: "生图需求待补充，已停止生成", image_intent_error: "生图意图识别失败，已停止生成", image_mention_unresolved: "绘图请求的 @位置无法确认，已停止调用模型"}[recent?.model_route];
   const version = state.runtime?.revision ? `服务版本：${state.runtime.revision.slice(0, 12)} · 生图识别：${chat?.image_routing_version || "旧版，请更新重启"}` : "当前服务未返回版本信息，请运行一键更新重启。";
-  diagnostic.append(el("p", "", `当前识别的机器人称呼：${names}\n${version}\n${recent ? `最近实时消息：${dateText(recent.received_at)}\n${route ? `处理分支：${route}\n` : ""}处理状态：${recent.message}` : "本次启动尚未收到此群的实时消息。历史同步显示的消息不会触发问答。"}`), button("配置机器人群内显示名", "button small", mentionSettingsDialog));
+  const intentSource = {semantic: "对话模型提取", command: "直接生图指令", keyword: "关键词识别"}[recent?.image_intent_source];
+  diagnostic.append(el("p", "", `当前识别的机器人称呼：${names}\n${version}\n${recent ? `最近实时消息：${dateText(recent.received_at)}\n${route ? `处理分支：${route}\n` : ""}${intentSource ? `图片需求：${intentSource}，描述 ${recent.image_prompt_chars} 字\n` : ""}处理状态：${recent.message}` : "本次启动尚未收到此群的实时消息。历史同步显示的消息不会触发问答。"}`), button("配置机器人群内显示名", "button small", mentionSettingsDialog));
   const runtime = el("div", "feature-footnote"), media = state.media;
   if (media) {
     const provider = {parse_video: "parse-video-py（抖音 / 小红书 / B站）", api: "指定接口（仅抖音）", builtin: "公开分享页（仅抖音）"}[media.parser_provider] || media.parser_provider;
@@ -756,6 +757,7 @@ async function modelSettingsDialog(kind = "chat") {
   chatTab.setAttribute("aria-pressed", String(!isImage)); imageTab.setAttribute("aria-pressed", String(isImage));
   categories.append(chatTab, imageTab); body.append(categories);
   body.append(el("p", "modal-copy", isImage ? "生图模型独立于对话模型，可保存多个、启用一个。在已开启 @问答的群内，@机器人 后发送“生图：图片描述”“帮我画一个图：一只猫”“生成一张小猫的图片”或“生成星空壁纸”等绘图请求即可调用。每条消息最多回复一张图片。" : "可保存多个模型配置，同时只启用一个。新增和修改时自动测试；启用其他模型后，后续群内问答使用新模型。"));
+  if (isImage) body.append(el("p", "form-note", "复杂描述和“刚才那张再亮一点”等后续修改会使用当前对话模型提取需求，多一次对话调用并计入 AI 额度；语义不清时会追问。明确完整的“生图：描述”通常直接生成。实际图片尺寸以此处配置为准。"));
   if (!isImage) {
     const searchCard = el("section", "model-card"), searchCopy = el("div", "model-card-copy");
     searchCopy.append(

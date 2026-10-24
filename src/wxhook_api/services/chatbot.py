@@ -18,6 +18,8 @@ from wxhook_api.services.groups import GroupManager, event_group, event_text, no
 from wxhook_api.core.ai_safety import ai_scope, ai_permission
 from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.services.chat_context import ConversationTurn, GroupConversations
+from wxhook_api.services.image_intent import (EXPLICIT_IMAGE_COMMAND, IMAGE_FOLLOWUP, NON_GENERATION, SIMPLE_IMAGE_REQUEST,
+                                             VISUAL_TOPIC, ImageIntent, ImagePromptMemory)
 
 
 class AnswerProvider(Protocol):
@@ -149,6 +151,7 @@ class MentionChatService:
         self.search_service = None
         self.image_service = None
         self.conversations = GroupConversations()
+        self.image_prompts = ImagePromptMemory()
 
     @property
     def identity(self) -> str:
@@ -156,7 +159,7 @@ class MentionChatService:
 
     def snapshot(self) -> dict:
         return {"enabled": self.options.enabled, "answer_configured": self.provider is not None,
-                "image_routing_version": 2,
+                "image_routing_version": 3,
                 "image_configured": bool(self.image_service and self.image_service.settings),
                 "identity_known": bool(self._identity and self._profile_valid and not (self.groups and self.groups.account_error)), "mention_names": list(self._names),
                 "account_error": self.groups.account_error if self.groups else "",
@@ -229,6 +232,7 @@ class MentionChatService:
         self._pending_groups.clear()
         self._pending_members.clear()
         self.conversations.clear()
+        self.image_prompts.clear()
 
     async def verify_account(self) -> bool:
         return await self._identify(force=True)
@@ -351,23 +355,12 @@ class MentionChatService:
             return "我在，请在 @ 后写下你的问题。"
         if len(question) > 8000:
             return "问题太长了，请缩短后重新 @ 我。"
-        if image_ambiguous:
-            return "已识别到绘图请求，但暂时无法确认正文中哪个称呼是机器人。请单独 @机器人并在后面发送“生图：图片描述”，或在管理页配置机器人群内显示名。"
-        if image_question is not None and IMAGE_REQUEST.search(image_question):
-            prompt = re.sub(r"^(?:生图|画图|绘图|生成图片|生成图像)\s*[:：]?\s*", "", image_question, count=1).strip()
-            if not prompt:
-                return "请在生图指令后填写描述，例如：@机器人 生图：一只坐在窗边的橘猫。"
-            if self.image_service is None:
-                return "生图模型尚未配置，请联系管理员。"
-            try:
-                return await self.image_service.generate(prompt)
-            except Exception as exc:
-                from wxhook_api.services.chat_model import ModelError
-                self.last_error = str(exc) if isinstance(exc, ModelError) else "生图失败，请检查生图模型配置后重试。"
-                return self.last_error
         if re.sub(r"\s+", "", question).rstrip("。！!？?") in {"清空上下文", "重置对话"}:
             self.conversations.clear_group(self.identity, group)
+            self.image_prompts.clear_group(self.identity, group)
             return "本群对话上下文已清空。"
+        if image_ambiguous:
+            return "已识别到绘图请求，但暂时无法确认正文中哪个称呼是机器人。请单独 @机器人并在后面发送“生图：图片描述”，或在管理页配置机器人群内显示名。"
         if self.tools_service and sender is not None:
             result = await self.tools_service.reminders.chat_command(question, group, sender, key)
             if result is not None:
@@ -387,6 +380,9 @@ class MentionChatService:
             except Exception as exc:
                 self.last_error = str(exc)
                 return f"暂时无法生成群聊总结：{self.last_error}"
+        image_answer = await self._image_answer(image_question, group, sender=sender, turn=turn)
+        if image_answer is not None:
+            return image_answer
         if self.provider is None:
             return "问答接口尚未配置，请联系管理员。"
         provider = self.provider
@@ -423,6 +419,77 @@ class MentionChatService:
                 return self.last_error
             self.last_error = "问答接口返回失败或超时，请检查接口配置"
             return "暂时无法回答，请稍后重新 @ 我。"
+
+    async def _image_answer(self, question: str | None, group: str, *, sender: str | None,
+                            turn: ConversationTurn | None) -> str | Path | None:
+        if question is None:
+            return None
+        previous = self.image_prompts.get(self.identity, group, sender)
+        direct = bool(IMAGE_REQUEST.search(question))
+        followup = bool(IMAGE_FOLLOWUP.search(question))
+        if not (direct or VISUAL_TOPIC.search(question) or previous or followup and re.search(r"来[一1]?[张幅]", question)):
+            return None
+        report = self._recent_requests.get(group, {})
+        extractor = getattr(self.provider, "extract_image_intent", None)
+        reference = bool(re.search(r"刚才|上一张|那张|照旧|按原来|把它", question))
+        fast_command = bool(EXPLICIT_IMAGE_COMMAND.match(question.strip())) and not NON_GENERATION.search(question) and not reference
+        simple_request = (direct and SIMPLE_IMAGE_REQUEST.match(question.strip()) and len(question) <= 120
+                          and not NON_GENERATION.search(question) and not reference
+                          and not re.search(r"[，,。；;\r\n？?“”‘’\"]|怎么|如何|怎样|是否|能否|支持|吗[。！!？?]?$", question))
+        if not (fast_command or simple_request) and callable(extractor):
+            report["model_route"] = "image_intent"
+            provider = self.provider
+
+            def current_context():
+                questions = self.conversations.member_questions(turn, provider,
+                    allowed_sender=lambda member: self.groups.allowed(group, member)) if turn and self.groups else []
+                return {"questions": questions, "image_prompt": self.image_prompts.get(self.identity, group, sender)}
+
+            try:
+                intent = await extractor(question, context=current_context)
+                if not isinstance(intent, ImageIntent):
+                    raise ValueError("Invalid image intent")
+            except Exception as exc:
+                from wxhook_api.services.chat_model import ModelError
+                report["model_route"] = "image_intent_error"
+                self.last_error = str(exc) if isinstance(exc, ModelError) else "无法确认本次生图需求，请重新 @并发送“生图：完整图片描述”。"
+                return self.last_error
+            if intent.action == "chat":
+                report["model_route"] = "chat"
+                return None
+            if intent.action == "clarify":
+                report["model_route"] = "image_clarification"
+                return intent.message
+            prompt = intent.prompt
+            source = "semantic"
+        else:
+            if not fast_command and (NON_GENERATION.search(question) or re.search(r"[？?]|吗[。！!？?]?$|是否|能否|怎么|如何|怎样", question)):
+                report["model_route"] = "chat"
+                return None
+            if reference:
+                report["model_route"] = "image_clarification"
+                return "需要对话模型理解之前的图片描述，请先用“@机器人 生图：完整图片描述”重新描述。"
+            if not direct:
+                if previous and followup:
+                    report["model_route"] = "image_clarification"
+                    return "复杂修改需要配置对话模型以理解上下文，请先用“@机器人 生图：完整图片描述”重新描述。"
+                return None
+            prompt = re.sub(r"^(?:生图|画图|绘图|生成图片|生成图像)\s*[:：]?\s*", "", question, count=1).strip()
+            source = "command" if EXPLICIT_IMAGE_COMMAND.match(question.strip()) else "keyword"
+        report.update(model_route="image", image_intent_source=source, image_prompt_chars=len(prompt))
+        if not prompt:
+            return "请在生图指令后填写描述，例如：@机器人 生图：一只坐在窗边的橘猫。"
+        if self.image_service is None:
+            return "生图模型尚未配置，请联系管理员。"
+        try:
+            result = await self.image_service.generate(prompt)
+            if turn is not None:
+                turn.image_prompt = prompt
+            return result
+        except Exception as exc:
+            from wxhook_api.services.chat_model import ModelError
+            self.last_error = str(exc) if isinstance(exc, ModelError) else "生图失败，请检查生图模型配置后重试。"
+            return self.last_error
 
     async def _run(self) -> None:
         while True:
@@ -474,6 +541,8 @@ class MentionChatService:
                 self.sent += 1
                 if not is_image:
                     self.conversations.commit(turn, answer)
+                else:
+                    self.image_prompts.remember(self.identity, job["group"], job["sender"], turn.image_prompt)
                 report.update(status="sent", message="Hook 已确认发送一张生成图片" if is_image else "Hook 已确认发送一条回复")
             except asyncio.CancelledError:
                 status = "unknown" if attempted else "interrupted"

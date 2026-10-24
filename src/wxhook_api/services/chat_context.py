@@ -24,6 +24,7 @@ class ConversationTurn:
     provider: object | None = None
     generated: bool = False
     history_senders: frozenset[str] = field(default_factory=frozenset)
+    image_prompt: str = ""
     allowed_sender: Callable[[str], bool] | None = field(default=None, repr=False)
 
 
@@ -92,6 +93,22 @@ class GroupConversations:
     def history(self, account: str, group: str, provider: object,
                 *, allowed_sender: Callable[[str], bool] | None = None) -> list[dict]:
         return self._history(account, group, provider, allowed_sender=allowed_sender)[0]
+
+    def member_questions(self, turn: ConversationTurn, provider: object,
+                         *, allowed_sender: Callable[[str], bool]) -> list[str]:
+        """Only this known member's own questions, refreshed before dispatch."""
+        self._prune()
+        if self.participant_id(turn.account, turn.group, turn.sender) == "unknown" or not allowed_sender(turn.sender):
+            return []
+        session = self._sessions.get((turn.account, turn.group, id(provider)))
+        if session is None:
+            return []
+        questions = [exchange.question[:800] for exchange in session.exchanges
+                     if exchange.sender == turn.sender and all(allowed_sender(sender) for sender in exchange.history_senders | {exchange.sender})]
+        if questions:
+            turn.history_senders = frozenset({turn.sender})
+            turn.allowed_sender = allowed_sender
+        return questions[-3:]
 
     def _history(self, account: str, group: str, provider: object,
                  *, allowed_sender: Callable[[str], bool] | None = None) -> tuple[list[dict], frozenset[str]]:

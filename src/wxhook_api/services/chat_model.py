@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 from uuid import uuid4
-from typing import Annotated
+from typing import Annotated, Callable
 from urllib.parse import urlsplit
 
 import httpx
@@ -20,6 +20,7 @@ from wxhook_api.core.ai_safety import (ModelBudget, BudgetError, ai_scope, curre
                                       MAX_OUTPUT_TOKENS, MAX_RESPONSE_BYTES)
 from wxhook_api.services.chatbot import MentionChatService
 from wxhook_api.services.chat_context import ConversationView
+from wxhook_api.services.image_intent import IMAGE_INTENT_SYSTEM, ImageIntent, parse_image_intent
 
 
 PARTICIPANT_SYSTEM = (
@@ -105,6 +106,19 @@ class ChatCompletionsProvider:
                                  conversation: ConversationView | None = None) -> str:
         return await self.answer(question, search_service=search_service, history=history, conversation=conversation)
 
+    async def extract_image_intent(self, question: str, *, context: Callable[[], dict]) -> ImageIntent:
+        def current_input():
+            data = context()
+            return json.dumps({"current_message": question,
+                "same_member_recent_questions": [item[:800] for item in data.get("questions", [])[-3:] if isinstance(item, str)],
+                "last_image_prompt": data.get("image_prompt", "")[:8000]}, ensure_ascii=False)
+
+        answer = await self.answer(current_input(), system=IMAGE_INTENT_SYSTEM, question_factory=current_input)
+        try:
+            return parse_image_intent(answer)
+        except (ValueError, TypeError):
+            raise ModelError("无法确认本次生图需求，请重新 @并发送“生图：完整图片描述”。") from None
+
     @staticmethod
     def _messages(question: str, context: str | None, system: str | None,
                   history: list[dict] | None = None, participant: str | None = None) -> list[dict]:
@@ -155,7 +169,7 @@ class ChatCompletionsProvider:
 
     async def answer(self, question: str, context: str | None = None, *, system: str | None = None,
                      search_service=None, history: list[dict] | None = None,
-                     conversation: ConversationView | None = None) -> str:
+                     conversation: ConversationView | None = None, question_factory: Callable[[], str] | None = None) -> str:
         headers = {}
         if self.settings.api_key:
             headers["Authorization"] = "Bearer " + self.settings.api_key.get_secret_value()
@@ -187,6 +201,8 @@ class ChatCompletionsProvider:
                 # Refresh after every asynchronous wait, including search and
                 # account verification, so no stale blacklist snapshot is sent.
                 current_history = conversation.history() if conversation is not None else history
+                if question_factory is not None:
+                    question = question_factory()
                 payload["messages"] = self._messages(question, context, system, current_history, participant)
                 async with client.stream("POST", self.settings.base_url + "/chat/completions", headers=headers,
                                          json=payload) as response:
