@@ -4,20 +4,26 @@ pushd "%~dp0" || exit /b 1
 
 rem Parse the whole block before pulling, since the pull may update this file.
 (
-    where git.exe >nul 2>&1 || (
-        echo [ERROR] Git is missing. Install Git and reopen this window.
-        popd
-        pause
-        exit /b 1
-    )
+    if /I "%~1"=="--local" (
+        echo [1/4] Starting local code without a Git update...
+    ) else (
+        where git.exe >nul 2>&1 || (
+            echo [ERROR] Git is missing. Install Git and reopen this window.
+            echo [TIP] To start existing local code, run start-local.bat.
+            popd
+            pause
+            exit /b 1
+        )
 
-    echo [1/4] Updating code from the configured Git upstream...
-    git pull --ff-only
-    if errorlevel 1 (
-        echo [ERROR] Update failed. Resolve the Git error above, then retry.
-        popd
-        pause
-        exit /b 1
+        echo [1/4] Updating code from the configured Git upstream...
+        git pull --ff-only
+        if errorlevel 1 (
+            echo [ERROR] Update failed. Resolve the Git error above, then retry.
+            echo [TIP] To start existing local code, run start-local.bat.
+            popd
+            pause
+            exit /b 1
+        )
     )
 
     if not exist ".venv\Scripts\python.exe" (

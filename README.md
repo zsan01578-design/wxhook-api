@@ -1171,7 +1171,16 @@ wxhook-api/
 
 ### 部署与进程恢复
 
-Windows 上可双击项目根目录的 `update-and-start.bat`：先用 `git pull --ff-only` 从当前分支配置的上游更新代码，成功后启动 `main.py`。首次运行会安装依赖，之后仅在 `requirements-runtime.lock` 或 `pyproject.toml` 变化时重新安装，并在每次启动前运行 `pip check`。没有虚拟环境时需要已安装 Python 3.12。脚本默认设置常规同步间隔为 180 秒，已有 `WXHOOK_SYNC_INTERVAL` 环境变量时保留其值。Git、依赖或启动失败会保留报错窗口；代码更新失败时不会启动服务。使用前先停止旧 Python 服务，并确认本机 `launcher.yml` 的微信路径与 Hook 文件配置正确。脚本不自动覆盖或丢弃本地修改；本地修改阻止更新时，需要先处理 Git 提示。
+Windows 上提供两个启动入口，运行前先在旧服务窗口按 `Ctrl+C` 停止服务，再选择：
+
+| 需求 | 操作 |
+| --- | --- |
+| 拉取最新代码并启动 | 双击 `update-and-start.bat`，执行 `git pull --ff-only`，成功后启动 `main.py` |
+| 只重启当前本地版本 | 双击 `start-local.bat`，或执行 `.\update-and-start.bat --local`，跳过 Git 更新 |
+
+GitHub 无法连接时，更新脚本会停止并提示使用 `start-local.bat`。本地启动入口不会检查新版本；网络恢复后重新使用 `update-and-start.bat` 即可。使用 Git bundle 离线更新也不会更改 `origin`，后续仍可正常从原仓库拉取；在项目目录运行 `git pull --ff-only .\更新包文件名.bundle main` 成功后，使用 `start-local.bat` 启动，避免再次联网更新。
+
+两个入口共用依赖检查：首次运行会安装依赖，之后仅在 `requirements-runtime.lock` 或 `pyproject.toml` 变化时重新安装，并在每次启动前运行 `pip check`。因此，本地启动也需要已安装匹配的依赖；首次安装或依赖文件变化时仍可能需要访问软件源。没有虚拟环境时需要已安装 Python 3.12。脚本默认设置常规同步间隔为 180 秒，已有 `WXHOOK_SYNC_INTERVAL` 环境变量时保留其值。Git、依赖或启动失败会保留报错窗口；代码更新失败时不会启动服务。使用前确认本机 `launcher.yml` 的微信路径与 Hook 文件配置正确。脚本不自动覆盖或丢弃本地修改；本地修改阻止更新时，需要先处理 Git 提示。
 
 提供 [部署依赖快照](requirements-runtime.lock)，来自本轮 Windows / Python 3.12.14 的已验收运行环境，固定 39 个运行时依赖；开发测试依赖仍由 `.[dev]` 提供。在新虚拟环境中安装：
 
