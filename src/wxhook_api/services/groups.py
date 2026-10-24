@@ -21,6 +21,15 @@ from wxhook_api.services.word_cloud import frequent_words
 
 
 GROUP_PATTERN = r"[A-Za-z0-9_-]{1,128}@chatroom"
+SELF_MESSAGE_FIELDS = ("is_self", "isSelf", "is_sender", "isSender", "IsSender", "is_send", "isSend", "IsSend")
+SELF_MESSAGE_SQL = " OR ".join(
+    f"COALESCE(lower(trim(CAST(json_extract(raw_json,'$.{field}') AS TEXT))), '') IN ('1','true')"
+    for field in SELF_MESSAGE_FIELDS
+)
+
+
+def self_message(raw: dict) -> bool:
+    return any(str(raw.get(field, "")).strip().lower() in {"1", "true"} for field in SELF_MESSAGE_FIELDS)
 
 
 def event_group(event: CallbackEvent) -> str:
@@ -326,21 +335,37 @@ class GroupManager:
     @staticmethod
     def _save_messages(db, group: str, messages: list[dict]) -> tuple[int, int]:
         db.execute("INSERT OR IGNORE INTO groups (id, created_at) VALUES (?, ?)", (group, now()))
+        account_row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
+        account = account_row[0] if account_row else ""
         added, unseen_history = 0, 0
         for message in messages:
+            existing = None
             if message["source"] == "history":
-                existing = db.execute("SELECT source,sender FROM chat_messages WHERE group_id=? AND msg_key=?", (group, message["key"])).fetchone()
+                existing = db.execute("SELECT source,sender,raw_json FROM chat_messages WHERE group_id=? AND msg_key=?", (group, message["key"])).fetchone()
                 if not existing or existing["source"] != "history":
                     unseen_history += 1
+            raw = message["raw"]
+            own = self_message(raw) or bool(account and message["sender"] == account)
+            if existing:
+                # A history row with fewer fields must never erase a known
+                # self marker from the callback or an earlier history page.
+                own = own or self_message(json.loads(existing["raw_json"])) or bool(account and existing["sender"] == account)
+            if own:
+                raw = {**raw, "is_self": True}
             timestamp = int(message["timestamp"]) or int(datetime.now(timezone.utc).timestamp())
             timestamp = max(0, min(timestamp, 253402300799))
             seen_at = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
             values = (group, message["key"], message["msgid"], message["sender"], message["type"], timestamp,
-                      message["content"], now(), message["source"], json.dumps(message["raw"], ensure_ascii=False))
+                      message["content"], now(), message["source"], json.dumps(raw, ensure_ascii=False))
             inserted = db.execute("""INSERT OR IGNORE INTO chat_messages
                 (group_id,msg_key,msgid,sender,type,timestamp,content,received_at,source,raw_json)
                 VALUES (?,?,?,?,?,?,?,?,?,?)""", values).rowcount
             if not inserted:
+                if own and message["source"] != "history":
+                    # A callback may arrive after its history row. Enrich only
+                    # the self marker, preserving the archived text and sender.
+                    db.execute("UPDATE chat_messages SET raw_json=json_set(raw_json,'$.is_self',json('true')) WHERE group_id=? AND msg_key=?",
+                               (group, message["key"]))
                 if message["source"] == "history":
                     db.execute("""UPDATE chat_messages SET raw_json=?, source='history', type=?, timestamp=?,
                         sender=CASE WHEN ?<>'' THEN ? ELSE sender END,
@@ -482,13 +507,11 @@ class GroupManager:
                 account = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
                 identity = account[0] if account else bot_wxid
                 texts = []
-                rows = db.execute("""SELECT substr(content,1,2000) AS content,sender,
-                    json_extract(raw_json,'$.is_self') AS is_self FROM chat_messages
+                rows = db.execute(f"""SELECT substr(content,1,2000) AS content,sender FROM chat_messages
                     WHERE group_id=? AND type=1 AND (?='' OR sender<>?)
+                    AND NOT ({SELF_MESSAGE_SQL})
                     ORDER BY timestamp DESC,id DESC""", (group, identity, identity))
                 for row in rows:
-                    if row["is_self"] in (True, 1, "1", "true"):
-                        continue
                     if identity and row["sender"] in ("", group) and row["content"].startswith((identity + ":\n", identity + ":\r\n")):
                         continue
                     texts.append(row["content"])

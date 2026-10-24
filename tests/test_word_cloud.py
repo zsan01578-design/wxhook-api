@@ -1,4 +1,6 @@
 import httpx
+import json
+import pytest
 import subprocess
 import sys
 from asgi_lifespan import LifespanManager
@@ -116,6 +118,62 @@ async def test_robot_messages_do_not_consume_the_thousand_member_message_limit(t
     result = await manager.word_cloud(GROUP)
     assert result["sampled_messages"] == 1000
     assert result["words"] == [{"text": "苹果", "count": 1000}]
+
+
+@pytest.mark.parametrize("field", ["is_self", "isSelf", "is_sender", "isSender", "IsSender", "is_send", "isSend", "IsSend"])
+async def test_existing_archive_self_flags_are_excluded_without_account_identity(tmp_path, field):
+    manager = GroupManager(tmp_path / "self-flags.sqlite3")
+    await manager.start([])
+    await manager.import_history(GROUP, [
+        {"msgid": 1, "timestamp": 1, "type": 1, "content": "苹果"},
+        {"msgid": 2, "timestamp": 2, "type": 1, "content": "香蕉"},
+    ])
+    assert (await manager.word_cloud(GROUP))["sampled_messages"] == 2
+    # Simulate previously archived rows that predate flag normalization.
+    with manager._connect() as db:
+        db.execute("UPDATE chat_messages SET raw_json=? WHERE msgid='2'", (json.dumps({field: " TRUE "}),))
+    result = await manager.word_cloud(GROUP)
+    assert result["sampled_messages"] == 1 and result["words"] == [{"text": "苹果", "count": 1}]
+    assert (await manager.messages(GROUP))["total"] == 2
+
+
+@pytest.mark.parametrize("history_flag", [{}, {"is_self": False}, {"is_sender": "0"}])
+async def test_history_refresh_cannot_erase_robot_callback_marker(tmp_path, history_flag):
+    manager = GroupManager(tmp_path / "self-refresh.sqlite3")
+    await manager.start([])
+    await manager.receive(CallbackEvent.model_validate(event("苹果", msgid=1)))
+    await manager.receive(CallbackEvent.model_validate(event("香蕉", msgid=2, sender="", is_self=True)))
+    before = await manager.word_cloud(GROUP)
+    await manager.import_history(GROUP, [{"msgid": 2, "timestamp": 2, "type": 1, "content": "香蕉 香蕉", **history_flag}])
+    assert await manager.word_cloud(GROUP) == before
+    assert before["sampled_messages"] == 1 and before["words"] == [{"text": "苹果", "count": 1}]
+    messages = (await manager.messages(GROUP))["messages"]
+    assert next(item for item in messages if item["msgid"] == "2")["content"] == "香蕉 香蕉"
+
+
+async def test_late_callback_removes_robot_text_from_cached_cloud_without_replacing_history(tmp_path):
+    manager = GroupManager(tmp_path / "late-callback.sqlite3")
+    await manager.start([])
+    await manager.import_history(GROUP, [{"msgid": 2, "timestamp": 2, "type": 1, "content": "香蕉 香蕉"}])
+    assert (await manager.word_cloud(GROUP))["sampled_messages"] == 1
+    await manager.receive(CallbackEvent.model_validate(event("不同回调文本", msgid=2, sender="", is_sender=1)))
+    assert (await manager.word_cloud(GROUP))["sampled_messages"] == 0
+    stored = (await manager.messages(GROUP))["messages"][0]
+    assert stored["content"] == "香蕉 香蕉" and stored["source"] == "history"
+
+
+async def test_false_self_flags_remain_member_messages_and_self_rows_do_not_consume_limit(tmp_path):
+    manager = GroupManager(tmp_path / "flag-limit.sqlite3")
+    await manager.start([])
+    await manager.import_history(GROUP, [
+        {"msgid": i, "timestamp": i, "type": 1, "is_sender": "false", "content": "苹果"}
+        for i in range(1, 1001)
+    ] + [
+        {"msgid": i, "timestamp": i, "type": 1, "IsSend": 1, "content": "香蕉"}
+        for i in range(1001, 2101)
+    ])
+    result = await manager.word_cloud(GROUP)
+    assert result["sampled_messages"] == 1000 and result["words"] == [{"text": "苹果", "count": 1000}]
 
 
 def test_app_import_and_creation_do_not_require_jieba():
