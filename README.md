@@ -1171,16 +1171,20 @@ wxhook-api/
 
 ### 部署与进程恢复
 
-Windows 上提供两个启动入口，运行前先在旧服务窗口按 `Ctrl+C` 停止服务，再选择：
+Windows 上双击项目根目录的 **`update-and-start.bat` 即可一键更新并重启**，不必先手动关闭旧黑窗口。脚本按“拉取代码 → 检查依赖和配置 → 停止旧项目进程 → 启动新服务”的顺序执行，并核对新服务的健康状态和代码版本。
 
 | 需求 | 操作 |
 | --- | --- |
-| 拉取最新代码并启动 | 双击 `update-and-start.bat`，执行 `git pull --ff-only`，成功后启动 `main.py` |
-| 只重启当前本地版本 | 双击 `start-local.bat`，或执行 `.\update-and-start.bat --local`，跳过 Git 更新 |
+| 更新代码并自动重启 | 双击 `update-and-start.bat` |
+| 只重启当前本地版本 | 双击 `start-local.bat`，或执行 `.\update-and-start.bat --local`，跳过 Git 更新，自动停止旧进程后启动 |
 
-GitHub 无法连接时，更新脚本会停止并提示使用 `start-local.bat`。本地启动入口不会检查新版本；网络恢复后重新使用 `update-and-start.bat` 即可。使用 Git bundle 离线更新也不会更改 `origin`，后续仍可正常从原仓库拉取；在项目目录运行 `git pull --ff-only .\更新包文件名.bundle main` 成功后，使用 `start-local.bat` 启动，避免再次联网更新。
+GitHub 无法连接或依赖、配置检查失败时，脚本停止并保留旧服务运行，不会先杀掉旧服务。只需重启时可使用 `start-local.bat`。使用 Git bundle 离线更新也不会更改 `origin`，后续仍可正常从原仓库拉取；在项目目录运行 `git pull --ff-only .\更新包文件名.bundle main` 成功后，使用 `start-local.bat` 自动重启，避免再次联网更新。
 
-两个入口共用依赖检查：首次运行会安装依赖，之后仅在 `requirements-runtime.lock` 或 `pyproject.toml` 变化时重新安装，并在每次启动前运行 `pip check`。因此，本地启动也需要已安装匹配的依赖；首次安装或依赖文件变化时仍可能需要访问软件源。没有虚拟环境时需要已安装 Python 3.12。脚本默认设置常规同步间隔为 180 秒，已有 `WXHOOK_SYNC_INTERVAL` 环境变量时保留其值。Git、依赖或启动失败会保留报错窗口；代码更新失败时不会启动服务。使用前确认本机 `launcher.yml` 的微信路径与 Hook 文件配置正确。脚本不自动覆盖或丢弃本地修改；本地修改阻止更新时，需要先处理 Git 提示。
+重启控制由 `scripts/restart-project.ps1` 执行，按项目路径识别 Python 进程，并核对 PID、创建时间和命令行；不会批量结束所有 Python，不会退出微信。新版服务通过本机文件请求正常退出，最多等待45秒；旧版或无响应的已确认项目进程会被强制结束。无法确认归属的进程不会被结束，端口仍被占用时会报错并停止。连续双击使用项目级互斥锁，已有重启任务执行时不会再次启动。通过其他 Python 环境以相对路径手动运行的旧版本，可能无法确认归属，此时仍需在原窗口停止一次。
+
+启动成功后服务在后台运行，启动窗口可关闭；浏览器是否自动打开仍遵循 `launcher.yml` 的 `open-browser`。启动输出保存在 `data/startup.stdout.log` 与 `data/startup.stderr.log`，应用运行日志仍在配置的日志文件中（默认 `data/wxhook.log`）。旧版黑窗口可能留下已停止的提示，但原 Python 服务已结束，不会重复占用端口。
+
+两个入口共用依赖检查：首次运行会安装依赖，之后仅在 `requirements-runtime.lock` 或 `pyproject.toml` 变化时重新安装，并在每次启动前运行 `pip check`。因此，本地启动也需要已安装匹配的依赖；首次安装或依赖文件变化时仍可能需要访问软件源。没有虚拟环境时需要已安装 Python 3.12。脚本默认设置常规同步间隔为 180 秒，已有 `WXHOOK_SYNC_INTERVAL` 环境变量时保留其值。Git、依赖或启动失败会保留报错窗口；使用前确认本机 `launcher.yml` 的微信路径与 Hook 文件配置正确。脚本不自动覆盖或丢弃本地修改；本地修改阻止更新时，需要先处理 Git 提示。计划任务管理的服务应通过计划任务重启，避免其自动恢复策略与手动重启同时生效。
 
 提供 [部署依赖快照](requirements-runtime.lock)，来自本轮 Windows / Python 3.12.14 的已验收运行环境，固定 39 个运行时依赖；开发测试依赖仍由 `.[dev]` 提供。在新虚拟环境中安装：
 

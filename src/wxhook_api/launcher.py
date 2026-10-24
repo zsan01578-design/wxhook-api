@@ -16,6 +16,7 @@ import uvicorn
 
 from wxhook_api.core.config import PROJECT_ROOT, Settings, load_settings, load_yaml
 from wxhook_api.core.runtime import source_revision
+from wxhook_api.core.service_control import registered_service, watch_shutdown_request
 from wxhook_api.main import create_app
 from wxhook_api.services.desktop import show_wechat_window, wechat_process_ids
 
@@ -188,12 +189,14 @@ async def run_service(settings: Settings, options: LauncherSettings) -> None:
                 window_task.cancel()
                 await asyncio.gather(window_task, return_exceptions=True)
 
-    task = asyncio.create_task(after_listening())
-    try:
-        await server.serve()
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+    with registered_service() as control:
+        tasks = [asyncio.create_task(after_listening()), asyncio.create_task(watch_shutdown_request(server, *control))]
+        try:
+            await server.serve()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def service_log_config(settings: Settings) -> dict:

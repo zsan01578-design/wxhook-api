@@ -1,4 +1,5 @@
 import asyncio
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,12 @@ import pytest
 
 from wxhook_api import launcher
 from wxhook_api.core.config import load_settings
+from wxhook_api.core.service_control import registered_service
+
+
+@pytest.fixture(autouse=True)
+def isolated_launcher_registration(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "registered_service", lambda: registered_service(tmp_path))
 
 
 def test_launcher_path_is_relative_to_its_config_and_env_can_override(tmp_path, monkeypatch):
@@ -163,6 +170,28 @@ async def test_service_shutdown_cancels_startup_monitor(monkeypatch):
     await launcher.run_service(load_settings(), launcher.LauncherSettings(Path("Weixin.exe"), open_browser=False))
     assert entered.is_set()
     assert cancelled.is_set()
+
+
+async def test_local_restart_request_shuts_down_running_launcher(tmp_path, monkeypatch):
+    server = SimpleNamespace(started=True, should_exit=False)
+
+    async def serve():
+        while not server.should_exit:
+            await asyncio.sleep(0.01)
+
+    async def manage(*args):
+        await asyncio.Event().wait()
+
+    server.serve = serve
+    monkeypatch.setattr(launcher.uvicorn, "Server", lambda config: server)
+    monkeypatch.setattr(launcher, "manage_wechat", manage)
+    task = asyncio.create_task(launcher.run_service(load_settings(), launcher.LauncherSettings(Path("Weixin.exe"), open_browser=False)))
+    await asyncio.sleep(0)
+    state = tmp_path / "data" / "runtime" / "service.json"
+    record = json.loads(state.read_text())
+    (state.parent / f"stop-{record['token']}.request").write_text(record["token"])
+    await asyncio.wait_for(task, 1)
+    assert server.should_exit and not state.exists()
 
 
 async def test_bind_failure_does_not_launch_wechat_or_open_browser(monkeypatch):
