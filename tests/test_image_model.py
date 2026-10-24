@@ -193,6 +193,11 @@ async def test_group_command_sends_exactly_one_image_and_normal_chat_still_works
     (event("帮我画一个图 @机器人\u2005你好"), "帮我画一个图 \u2005你好"),
     (event("@机器人\u2005这张图片是什么"), "这张图片是什么"),
     (event("@机器人\u2005这幅画很好看"), "这幅画很好看"),
+    (event("@机器人\u2005生成一份小猫饲养计划"), "生成一份小猫饲养计划"),
+    (event("@机器人\u2005生成一个数据表"), "生成一个数据表"),
+    (event("@机器人\u2005生成一份报告。图片是什么格式"), "生成一份报告。图片是什么格式"),
+    (event("生成一张小猫的图片"), None),
+    (event("@其他人\u2005生成一张小猫的图片"), None),
     (event("生图 @机器人\u2005你好"), "生图 \u2005你好"),
 ])
 async def test_image_model_requires_keyword_after_bot_mention(tmp_path, payload, question):
@@ -218,6 +223,16 @@ async def test_image_model_requires_keyword_after_bot_mention(tmp_path, payload,
     ("请画一幅山水画", "请画一幅山水画"),
     ("给我画个可爱的机器人", "给我画个可爱的机器人"),
     ("生成一张图片：夜景", "生成一张图片：夜景"),
+    ("生成一张小猫的图片", "生成一张小猫的图片"),
+    ("帮我生成一张可爱的小猫图片", "帮我生成一张可爱的小猫图片"),
+    ("请生成小猫的图片", "请生成小猫的图片"),
+    ("生成一个小猫的图像", "生成一个小猫的图像"),
+    ("生成一幅雨中森林插画", "生成一幅雨中森林插画"),
+    ("生成一张橘猫照片", "生成一张橘猫照片"),
+    ("生成星空壁纸", "生成星空壁纸"),
+    ("生成活动海报", "生成活动海报"),
+    ("生成一个猫咪头像", "生成一个猫咪头像"),
+    ("生成一张小猫图", "生成一张小猫图"),
     ("绘制一幅图：森林", "绘制一幅图：森林"),
     ("画图：一只猫", "一只猫"),
     ("生成图片：一只猫", "一只猫"),
@@ -242,6 +257,22 @@ async def test_image_keyword_with_unsynced_alias_and_structured_bot_id(tmp_path)
         await add(state)
         await state.submit(event("@群内别名\u2005帮我生图一只猫", atlist=[BOT]))
         assert len(state.image_sends) == 1 and not state.sends
+
+
+async def test_screenshot_request_with_bot_display_name_uses_image_model(tmp_path):
+    from wxhook_api.core.chatbot_config import ChatbotOptions
+    answers, requests = Answers(), []
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return image_response()
+    async with context(tmp_path, provider=answers, image_hook=confirmed,
+                       bot_options=ChatbotOptions(True, BOT, ("吊毛",))) as state:
+        state.app.state.image_model.transport = httpx.MockTransport(respond)
+        await add(state)
+        requests.clear()
+        await state.submit(event("@吊毛\u2005生成一张小猫的图片", atlist=[BOT]))
+        assert [request["prompt"] for request in requests] == ["生成一张小猫的图片"]
+        assert len(state.image_sends) == 1 and not state.sends and not answers.questions
 
 
 async def test_missing_config_empty_prompt_and_generation_error_reply_with_text(tmp_path):

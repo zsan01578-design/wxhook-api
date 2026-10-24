@@ -753,7 +753,7 @@ async function modelSettingsDialog(kind = "chat") {
   const imageTab = button("生图模型", `button small${isImage ? " primary" : ""}`, () => modelSettingsDialog("image"));
   chatTab.setAttribute("aria-pressed", String(!isImage)); imageTab.setAttribute("aria-pressed", String(isImage));
   categories.append(chatTab, imageTab); body.append(categories);
-  body.append(el("p", "modal-copy", isImage ? "生图模型独立于对话模型，可保存多个、启用一个。在已开启 @问答的群内，@机器人 后发送“生图：图片描述”“帮我画一个图：一只猫”“画一张图，一朵花”或“生成一张图片：夜景”等绘图请求即可调用。每条消息最多回复一张图片。" : "可保存多个模型配置，同时只启用一个。新增和修改时自动测试；启用其他模型后，后续群内问答使用新模型。"));
+  body.append(el("p", "modal-copy", isImage ? "生图模型独立于对话模型，可保存多个、启用一个。在已开启 @问答的群内，@机器人 后发送“生图：图片描述”“帮我画一个图：一只猫”“生成一张小猫的图片”或“生成星空壁纸”等绘图请求即可调用。每条消息最多回复一张图片。" : "可保存多个模型配置，同时只启用一个。新增和修改时自动测试；启用其他模型后，后续群内问答使用新模型。"));
   if (!isImage) {
     const searchCard = el("section", "model-card"), searchCopy = el("div", "model-card-copy");
     searchCopy.append(
