@@ -33,6 +33,7 @@ IMAGE_REQUEST = re.compile(
     r"(?:画|绘制)\s*(?:一|1)\s*[张幅个只条朵座辆]|"
     r"(?:帮我|给我|为我|请|麻烦你?)\s*(?:画|绘制)"
 )
+MENTION_WHITESPACE = r"\s\u2005\u200b\u200c\u200d\u2060\ufeff"
 
 
 class GroupQuestionQueue(asyncio.Queue):
@@ -96,15 +97,19 @@ def addressed_question(event: CallbackEvent, identity: str, names: tuple[str, ..
         return None
     text = event_text(event)
     labels = tuple(dict.fromkeys((*names, identity)))
-    pattern = re.compile(r"@(?:" + "|".join(re.escape(name) for name in sorted(labels, key=len, reverse=True) if name) + r")(?=[\s\u2005]|$)")
+    pattern = re.compile(r"@(?:" + "|".join(re.escape(name) for name in sorted(labels, key=len, reverse=True) if name) + r")(?=[" + MENTION_WHITESPACE + r"]|$)")
     matched = pattern.search(text) if any(labels) else None
     if not structured and not matched:
         return None
     if after_mention:
+        # Some Hook builds preserve the @ IDs but omit the display text. The
+        # verified bot ID still addresses the body, even with no literal @.
+        if structured and "@" not in text:
+            return text.strip()
         # A keyword before the bot mention must not authorize image generation.
         # Structured IDs can identify a bot whose group alias is not yet synced.
         if not matched and ids == {identity}:
-            matched = re.search(r"@[^\s\u2005]+(?=[\s\u2005]|$)", text)
+            matched = re.search(r"@[^" + MENTION_WHITESPACE + r"]+(?=[" + MENTION_WHITESPACE + r"]|$)", text)
         if not matched:
             return None
         text = text[matched.end():]
@@ -136,6 +141,7 @@ class MentionChatService:
         self.last_error = ""
         self.sent = 0
         self._recent: OrderedDict[str, dict] = OrderedDict()
+        self._recent_requests: OrderedDict[str, dict] = OrderedDict()
         self._names_lock = asyncio.Lock()
         self._profile_names: tuple[str, ...] = ()
         self.summary_service = None
@@ -150,11 +156,13 @@ class MentionChatService:
 
     def snapshot(self) -> dict:
         return {"enabled": self.options.enabled, "answer_configured": self.provider is not None,
+                "image_routing_version": 2,
                 "image_configured": bool(self.image_service and self.image_service.settings),
                 "identity_known": bool(self._identity and self._profile_valid and not (self.groups and self.groups.account_error)), "mention_names": list(self._names),
                 "account_error": self.groups.account_error if self.groups else "",
                 "configured_mention_names": list(self.options.mention_names),
                 "pending": self._queue.qsize(), "sent": self.sent, "last_error": self.last_error,
+                "recent_requests": [dict(item) for item in self._recent_requests.values()],
                 "recent_events": [dict(item) for item in self._recent.values()]}
 
     def _report(self, event: CallbackEvent) -> dict:
@@ -319,9 +327,17 @@ class MentionChatService:
             report.update(status="rate_limited", message="此群或成员的待处理问题过多，请等待已有回复后重试")
             return True
         try:
+            image_question = addressed_question(event, self._identity, names, after_mention=True)
+            image_ambiguous = image_question is None and bool(IMAGE_REQUEST.search(question))
+            report["model_route"] = "image_mention_unresolved" if image_ambiguous else "image" if image_question and IMAGE_REQUEST.search(image_question) else "chat"
+            report["mention_source"] = "wxid" if ids else "display_name"
+            self._recent_requests[group] = report
+            self._recent_requests.move_to_end(group)
+            while len(self._recent_requests) > 100:
+                self._recent_requests.popitem(last=False)
             report.update(status="queued", message="已识别 @机器人，等待调用模型")
             self._queue.put_nowait({"group": group, "sender": event.sender, "key": key, "question": question,
-                                    "image_question": addressed_question(event, self._identity, names, after_mention=True), "report": report})
+                                    "image_question": image_question, "image_ambiguous": image_ambiguous, "report": report})
             self._pending_groups[group] += 1
             self._pending_members[(group, event.sender)] += 1
         except asyncio.QueueFull:
@@ -330,11 +346,13 @@ class MentionChatService:
         return True
 
     async def _answer(self, question: str, group: str = "", *, sender: str | None = None, key: str = "",
-                      turn: ConversationTurn | None = None, image_question: str | None = None) -> str | Path:
+                      turn: ConversationTurn | None = None, image_question: str | None = None, image_ambiguous: bool = False) -> str | Path:
         if not question:
             return "我在，请在 @ 后写下你的问题。"
         if len(question) > 8000:
             return "问题太长了，请缩短后重新 @ 我。"
+        if image_ambiguous:
+            return "已识别到绘图请求，但暂时无法确认正文中哪个称呼是机器人。请单独 @机器人并在后面发送“生图：图片描述”，或在管理页配置机器人群内显示名。"
         if image_question is not None and IMAGE_REQUEST.search(image_question):
             prompt = re.sub(r"^(?:生图|画图|绘图|生成图片|生成图像)\s*[:：]?\s*", "", image_question, count=1).strip()
             if not prompt:
@@ -428,7 +446,7 @@ class MentionChatService:
                 turn = ConversationTurn(self.identity, job["group"], job["sender"], job["question"])
                 with ai_scope(job["group"], job["sender"]), ai_permission(lambda: self._accepting and self.allowed(job["group"], job["sender"])):
                     answer = await self._answer(job["question"], job["group"], sender=job["sender"], key=job["key"], turn=turn,
-                                                image_question=job["image_question"])
+                                                image_question=job["image_question"], image_ambiguous=job["image_ambiguous"])
                 limit = self.options.max_reply_chars
                 is_image = isinstance(answer, Path)
                 if not is_image and len(answer) > limit:

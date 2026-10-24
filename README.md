@@ -214,6 +214,8 @@ $env:WXHOOK_SYNC_INTERVAL = '180'
 
 生图配置接口：`GET /api/manage/image-model` 查看状态，`POST /api/manage/image-models` 新增并测试，`PUT /api/manage/image-models/{ID}` 修改并测试，`POST /api/manage/image-models/{ID}/activate` 启用，`DELETE /api/manage/image-models/{ID}` 删除未启用配置。保存测试成功后才写入配置，接口不回显 API Key。
 
+生图触发兼容 Hook 仅返回真实 @ID、正文省略 @显示文本的消息，也识别 @称呼后的零宽分隔符。真实 @ID 必须包含机器人账号；存在多个未知称呼、无法确认机器人 @位置时，会明确提示单独 @机器人，不会把该绘图请求转给文字模型。群“功能配置”显示服务版本、生图识别版本及最近一次 @请求的处理分支（生图模型 / 文字问答或群工具 / @位置无法确认）；机器人自己的回调和后续普通聊天不会覆盖这条请求诊断。
+
 ## 群内 @机器人问答：一条提问最多一条回复
 
 在已启用机器人的群里，只有 @当前机器人账号的文字消息才进入问答；普通聊天、@其他人、仅 @所有人、

@@ -275,6 +275,50 @@ async def test_screenshot_request_with_bot_display_name_uses_image_model(tmp_pat
         assert len(state.image_sends) == 1 and not state.sends and not answers.questions
 
 
+@pytest.mark.parametrize("content, metadata", [
+    ("生成一张小猫的图片", {"atlist": [BOT]}),
+    ("wxid_member:\n生成一张小猫的图片", {"atlist": [BOT]}),
+    ("生成一张小猫的图片", {"atlist": [BOT, "wxid_other"]}),
+    ("@机器人\u200b生成一张小猫的图片", {}),
+    ("@机器人\u2060生成一张小猫的图片", {}),
+    ("@群内别名\u200b生成一张小猫的图片", {"atlist": [BOT]}),
+])
+async def test_verified_mentions_without_display_text_or_with_invisible_separator_generate_images(tmp_path, content, metadata):
+    answers = Answers()
+    async with context(tmp_path, provider=answers, image_hook=confirmed) as state:
+        state.app.state.image_model.transport = httpx.MockTransport(lambda request: image_response())
+        await add(state)
+        await state.submit(event(content, **metadata))
+        assert len(state.image_sends) == 1 and not state.sends and not answers.questions
+        report = state.bot.snapshot()["recent_events"][0]
+        assert report["model_route"] == "image"
+        runtime = (await state.client.get("/api/manage/state")).json()
+        assert runtime["runtime"]["revision"] == state.app.state.runtime_revision
+        assert runtime["chatbot"]["image_routing_version"] == 2
+
+
+async def test_ambiguous_multiple_mentions_never_send_drawing_request_to_chat_model(tmp_path):
+    answers = Answers()
+    async with context(tmp_path, provider=answers, image_hook=confirmed) as state:
+        state.app.state.image_model.transport = httpx.MockTransport(lambda request: image_response())
+        await add(state)
+        await state.submit(event("@未知群名\u2005@其他人\u2005生成一张小猫的图片", atlist=[BOT, "wxid_other"]))
+        assert not answers.questions and not state.image_sends
+        assert "请单独 @机器人" in state.sends[0]["msg"]
+        assert state.bot.snapshot()["recent_events"][0]["model_route"] == "image_mention_unresolved"
+
+
+async def test_image_routing_diagnostic_survives_self_callbacks_and_plain_chat(tmp_path):
+    async with context(tmp_path, image_hook=confirmed) as state:
+        state.app.state.image_model.transport = httpx.MockTransport(lambda request: image_response())
+        await add(state)
+        await state.submit(event("生成一张小猫的图片", atlist=[BOT]))
+        await state.submit(event("生成的图片", msgid=2, sender=BOT, is_self=True))
+        await state.submit(event("普通聊天", msgid=3))
+        report = state.bot.snapshot()["recent_requests"][0]
+        assert report["msgid"] == "1" and report["model_route"] == "image" and report["status"] == "sent"
+
+
 async def test_missing_config_empty_prompt_and_generation_error_reply_with_text(tmp_path):
     async with context(tmp_path) as state:
         await state.submit(event("@机器人\u2005生图：一只猫"))

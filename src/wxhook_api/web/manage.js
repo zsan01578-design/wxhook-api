@@ -233,10 +233,12 @@ function renderFeatures(group) {
   const chatStatus = chat?.enabled === false ? "@问答总开关已关闭。" : `${chat?.answer_configured ? "文字问答接口已接入。" : "普通文字问答尚未配置。"}${chat?.image_configured ? "生图已接入，可发送 @机器人 生图：描述。" : "可在 AI 模型中添加生图模型。"}`;
   chatNote.append(icon("info"), el("span", "", `${chatStatus}${chat?.last_error ? ` ${chat.last_error}` : ""}`), button("配置 AI 模型", "text-link", modelSettingsDialog));
   const diagnostic = el("div", "model-test-result");
-  const recent = chat?.recent_events?.find(item => item.group_id === group.id);
+  const recent = chat?.recent_requests?.find(item => item.group_id === group.id) || chat?.recent_events?.find(item => item.group_id === group.id);
   const knownNames = chat?.mention_names?.length ? chat.mention_names : recent?.mention_names;
   const names = knownNames?.length ? knownNames.join("、") : "尚未识别";
-  diagnostic.append(el("p", "", `当前识别的机器人称呼：${names}\n${recent ? `最近实时消息：${dateText(recent.received_at)}\n处理状态：${recent.message}` : "本次启动尚未收到此群的实时消息。历史同步显示的消息不会触发问答。"}`), button("配置机器人群内显示名", "button small", mentionSettingsDialog));
+  const route = {image: "生图模型", chat: "文字问答 / 群工具", image_mention_unresolved: "绘图请求的 @位置无法确认，已停止调用模型"}[recent?.model_route];
+  const version = state.runtime?.revision ? `服务版本：${state.runtime.revision.slice(0, 12)} · 生图识别：${chat?.image_routing_version || "旧版，请更新重启"}` : "当前服务未返回版本信息，请运行一键更新重启。";
+  diagnostic.append(el("p", "", `当前识别的机器人称呼：${names}\n${version}\n${recent ? `最近实时消息：${dateText(recent.received_at)}\n${route ? `处理分支：${route}\n` : ""}处理状态：${recent.message}` : "本次启动尚未收到此群的实时消息。历史同步显示的消息不会触发问答。"}`), button("配置机器人群内显示名", "button small", mentionSettingsDialog));
   const runtime = el("div", "feature-footnote"), media = state.media;
   if (media) {
     const provider = {parse_video: "parse-video-py（抖音 / 小红书 / B站）", api: "指定接口（仅抖音）", builtin: "公开分享页（仅抖音）"}[media.parser_provider] || media.parser_provider;
