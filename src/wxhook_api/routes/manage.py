@@ -8,6 +8,7 @@ from wxhook_api.schemas.requests import ContactSearchRequest
 from wxhook_api.core.chatbot_config import MentionSettings
 from wxhook_api.services.groups import GROUP_PATTERN
 from wxhook_api.services.chat_model import ModelDefinition, ModelError, ModelSettings
+from wxhook_api.services.image_model import ImageModelDefinition
 from wxhook_api.services.web_search import SearchError, SearchSettings
 from wxhook_api.services.wechat_sync import SyncError, records
 from wxhook_api.services.chat_summary import local_date
@@ -87,6 +88,31 @@ async def get_chat_model(request: Request):
 @router.get("/chat-search")
 async def get_chat_search(request: Request):
     return JSONResponse(request.app.state.chat_search.snapshot(), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/image-model")
+async def get_image_model(request: Request):
+    return JSONResponse(request.app.state.image_model.snapshot(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/image-models")
+async def add_image_model(body: ImageModelDefinition, request: Request):
+    return await model_mutation(request.app.state.image_model.save_profile(body))
+
+
+@router.put("/image-models/{model_id}")
+async def update_image_model(model_id: str, body: ImageModelDefinition, request: Request):
+    return await model_mutation(request.app.state.image_model.save_profile(body, model_id))
+
+
+@router.post("/image-models/{model_id}/activate")
+async def activate_image_model(model_id: str, request: Request):
+    return await model_mutation(request.app.state.image_model.activate(model_id))
+
+
+@router.delete("/image-models/{model_id}")
+async def delete_image_model(model_id: str, request: Request):
+    return await model_mutation(request.app.state.image_model.delete(model_id))
 
 
 @router.post("/chat-search")

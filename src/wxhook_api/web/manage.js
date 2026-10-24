@@ -230,7 +230,7 @@ function renderFeatures(group) {
   const note = el("div", "feature-footnote"); note.append(icon("info"), el("span", "", "回传媒体需要启用自动保存。群内处理提示和回传开关在“资源”页统一配置；关闭自动保存后只保留解析链接。"));
   const chatNote = el("div", "feature-footnote");
   const chat = state.chatbot;
-  const chatStatus = chat?.enabled === false ? "@问答总开关已关闭。" : chat?.answer_configured ? "问答接口已接入。" : "问答接口待接入，被 @ 时只回复一条“问答接口尚未配置”提示。";
+  const chatStatus = chat?.enabled === false ? "@问答总开关已关闭。" : `${chat?.answer_configured ? "文字问答接口已接入。" : "普通文字问答尚未配置。"}${chat?.image_configured ? "生图已接入，可发送 @机器人 生图：描述。" : "可在 AI 模型中添加生图模型。"}`;
   chatNote.append(icon("info"), el("span", "", `${chatStatus}${chat?.last_error ? ` ${chat.last_error}` : ""}`), button("配置 AI 模型", "text-link", modelSettingsDialog));
   const diagnostic = el("div", "model-test-result");
   const recent = chat?.recent_events?.find(item => item.group_id === group.id);
@@ -735,31 +735,41 @@ function mentionSettingsDialog() {
   bindForm(form, footer, () => api("/api/manage/chatbot/mentions", {mention_names: names.value.split(/\r?\n/).map(name => name.trim().replace(/^@/, "").trim()).filter(Boolean)}));
 }
 
-async function modelSettingsDialog() {
-  const body = showDialog("AI 对话模型", "机器人 · 全部群共用");
+async function modelSettingsDialog(kind = "chat") {
+  const isImage = kind === "image";
+  kind = isImage ? "image" : "chat";
+  const modelPath = `/api/manage/${kind}-models`;
+  const body = showDialog(isImage ? "AI 生图模型" : "AI 对话模型", "机器人 · 全部群共用");
   const version = dialogVersion;
   const active = () => $("modal").open && dialogVersion === version;
   body.append(el("p", "form-note", "正在读取模型配置…"));
   let settings, search;
-  try { [settings, search] = await Promise.all([api("/api/manage/chat-model"), api("/api/manage/chat-search")]); }
+  try { [settings, search] = await Promise.all([api(`/api/manage/${kind}-model`), isImage ? Promise.resolve(null) : api("/api/manage/chat-search")]); }
   catch (error) { if (active()) body.replaceChildren(el("p", "form-error", error.message)); return; }
   if (!active()) return;
   body.replaceChildren();
-  body.append(el("p", "modal-copy", "可保存多个模型配置，同时只启用一个。新增和修改时自动测试；启用其他模型后，后续群内问答使用新模型。"));
-  const searchCard = el("section", "model-card"), searchCopy = el("div", "model-card-copy");
-  searchCopy.append(
-    el("h3", "", "联网搜索"),
-    el("p", "", search.base_url || "https://api.deepseek.com/v1"),
-    el("p", "form-note", `${search.enabled ? "已开启" : "未开启"} · 今日已用 ${search.used_today} / ${search.daily_limit} 次 · ${search.has_api_key ? "已保存 API Key" : "未配置 API Key"}`),
-  );
-  const searchHeading = el("div", "model-card-heading");
-  searchHeading.append(searchCopy, el("span", search.enabled ? "badge" : "badge gray", search.enabled ? "已开启" : "未开启"));
-  const searchActions = el("div", "model-card-actions");
-  searchActions.append(button("配置联网搜索", "button small", () => searchSettingsDialog(search)));
-  searchCard.append(searchHeading, searchActions);
-  body.append(searchCard);
+  const categories = el("div", "model-card-actions");
+  const chatTab = button("对话模型", `button small${isImage ? "" : " primary"}`, () => modelSettingsDialog());
+  const imageTab = button("生图模型", `button small${isImage ? " primary" : ""}`, () => modelSettingsDialog("image"));
+  chatTab.setAttribute("aria-pressed", String(!isImage)); imageTab.setAttribute("aria-pressed", String(isImage));
+  categories.append(chatTab, imageTab); body.append(categories);
+  body.append(el("p", "modal-copy", isImage ? "生图模型独立于对话模型，可保存多个、启用一个。在已开启 @问答的群内，@机器人 后发送“生图：图片描述”“帮我画一个图：一只猫”“画一张图，一朵花”或“生成一张图片：夜景”等绘图请求即可调用。每条消息最多回复一张图片。" : "可保存多个模型配置，同时只启用一个。新增和修改时自动测试；启用其他模型后，后续群内问答使用新模型。"));
+  if (!isImage) {
+    const searchCard = el("section", "model-card"), searchCopy = el("div", "model-card-copy");
+    searchCopy.append(
+      el("h3", "", "联网搜索"),
+      el("p", "", search.base_url || "https://api.deepseek.com/v1"),
+      el("p", "form-note", `${search.enabled ? "已开启" : "未开启"} · 今日已用 ${search.used_today} / ${search.daily_limit} 次 · ${search.has_api_key ? "已保存 API Key" : "未配置 API Key"}`),
+    );
+    const searchHeading = el("div", "model-card-heading");
+    searchHeading.append(searchCopy, el("span", search.enabled ? "badge" : "badge gray", search.enabled ? "已开启" : "未开启"));
+    const searchActions = el("div", "model-card-actions");
+    searchActions.append(button("配置联网搜索", "button small", () => searchSettingsDialog(search)));
+    searchCard.append(searchHeading, searchActions);
+    body.append(searchCard);
+  }
   const toolbar = el("div", "model-list-toolbar");
-  toolbar.append(el("span", "form-note", `已保存 ${settings.models.length} 个模型`), button("添加模型", "button primary", () => modelEditorDialog()));
+  toolbar.append(el("span", "form-note", `已保存 ${settings.models.length} 个${isImage ? "生图" : "对话"}模型`), button(isImage ? "添加生图模型" : "添加模型", "button primary", () => modelEditorDialog({}, kind)));
   body.append(toolbar);
   if (settings.load_error) body.append(el("p", "form-error", settings.load_error));
   if (!settings.models.length) body.append(el("p", "modal-copy", "尚未配置模型。添加第一个模型并测试通过后会自动启用。"));
@@ -769,17 +779,17 @@ async function modelSettingsDialog() {
     copy.append(el("h3", "", profile.name || profile.model), el("p", "", profile.model), el("p", "", profile.base_url));
     heading.append(copy, el("span", profile.active ? "badge" : "badge gray", profile.active ? "已启用" : "未启用"));
     const thinking = profile.enable_thinking === false ? "关闭" : profile.enable_thinking === true ? "开启" : "跟随默认";
-    card.append(heading, el("p", "form-note", `深度思考：${thinking} · ${profile.has_api_key ? "已保存 API Key" : "未配置 API Key"}`));
+    card.append(heading, el("p", "form-note", `${isImage ? `尺寸：${profile.size || "跟随默认"} · 返回：${profile.response_format === "default" ? "跟随默认" : profile.response_format}` : `深度思考：${thinking}`} · ${profile.has_api_key ? "已保存 API Key" : "未配置 API Key"}`));
     const actions = el("div", "model-card-actions");
-    actions.append(button("查看 / 修改", "button small", () => modelEditorDialog(profile)));
-    const activate = button(profile.active ? "当前使用" : "启用", "button small primary", () => modelAction(`/api/manage/chat-models/${profile.id}/activate`, "POST", "正在测试并切换模型…", "模型已启用"));
+    actions.append(button("查看 / 修改", "button small", () => modelEditorDialog(profile, kind)));
+    const activate = button(profile.active ? "当前使用" : "启用", "button small primary", () => modelAction(`${modelPath}/${profile.id}/activate`, "POST", isImage ? "正在切换生图模型…" : "正在测试并切换模型…", "模型已启用"));
     activate.disabled = profile.active; actions.append(activate);
     const remove = button("删除", "button small danger", () => {
       const form = el("form");
       body.replaceChildren(el("p", "modal-copy", `确认删除「${profile.name || profile.model}」？此操作只删除本机保存的模型配置。`), form);
       const footer = formFooter(form, "删除模型"); footer.submit.className = "button danger";
-      form.querySelector("button").onclick = () => modelSettingsDialog();
-      form.addEventListener("submit", event => { event.preventDefault(); modelAction(`/api/manage/chat-models/${profile.id}`, "DELETE", "正在删除…", "模型已删除"); });
+      form.querySelector("button").onclick = () => modelSettingsDialog(kind);
+      form.addEventListener("submit", event => { event.preventDefault(); modelAction(`${modelPath}/${profile.id}`, "DELETE", "正在删除…", "模型已删除"); });
       form.append(result);
     });
     remove.disabled = profile.active; remove.title = profile.active ? "请先启用其他模型再删除" : "删除模型配置";
@@ -795,7 +805,7 @@ async function modelSettingsDialog() {
     try {
       const data = await api(path, {}, method, 60000);
       if (!data.saved) throw new Error(data.test?.message || "操作未完成，请重试。");
-      await modelSettingsDialog(); toast(success); await refreshState(true);
+      await modelSettingsDialog(kind); toast(success); await refreshState(true);
     } catch (error) { result.classList.add("failed"); result.textContent = error.message; }
     finally { modelSaving = false; mutating = false; controls.forEach((node, index) => node.disabled = disabled[index]); }
   }
@@ -851,15 +861,16 @@ function searchSettingsDialog(settings = {}) {
     }
   });
 }
-function modelEditorDialog(settings = {}) {
-  const body = showDialog(settings.id ? "修改 AI 模型" : "添加 AI 模型", "机器人 · 全部群共用");
-  body.append(button("返回模型列表", "text-link", modelSettingsDialog));
+function modelEditorDialog(settings = {}, kind = "chat") {
+  const isImage = kind === "image", label = isImage ? "生图模型" : " AI 模型";
+  const body = showDialog(`${settings.id ? "修改" : "添加"}${label}`, "机器人 · 全部群共用");
+  body.append(button("返回模型列表", "text-link", () => modelSettingsDialog(kind)));
   const form = el("form");
-  form.append(el("p", "modal-copy", "保存时自动发送一条测试消息。第一个模型会自动启用；其他新增模型测试通过后，可在列表中点击启用。"));
-  const name = formField(form, "配置名称", "例如：硅基流动 DeepSeek", settings.name || "", false, 80);
+  form.append(el("p", "modal-copy", isImage ? "保存时实际生成一张测试图片，可能产生服务商费用，最多等待 3 分钟。测试通过后保存，第一个生图模型自动启用；切换已保存的生图模型不会额外生成测试图片。" : "保存时自动发送一条测试消息。第一个模型会自动启用；其他新增模型测试通过后，可在列表中点击启用。"));
+  const name = formField(form, "配置名称", isImage ? "例如：主生图模型" : "例如：硅基流动 DeepSeek", settings.name || "", false, 80);
   const base = formField(form, "Base URL", "例如 https://api.siliconflow.cn/v1", settings.base_url, false, 2048);
   base.required = true; base.type = "url";
-  form.append(el("p", "form-note", "使用兼容 OpenAI 的 Chat Completions 服务，地址通常以 /v1 结尾。"));
+  form.append(el("p", "form-note", isImage ? "使用兼容 OpenAI Images 的服务，地址通常以 /v1 结尾；也可填写完整的 /images/generations 地址。" : "使用兼容 OpenAI 的 Chat Completions 服务，地址通常以 /v1 结尾。"));
   const model = formField(form, "模型名称", "填写服务商的完整模型 ID", settings.model, false, 256);
   model.required = true;
   const thinkingLabel = el("label", "form-label", "深度思考"), thinking = el("select", "form-input");
@@ -868,10 +879,21 @@ function modelEditorDialog(settings = {}) {
     const option = el("option", "", text); option.value = value; thinking.append(option);
   });
   thinking.value = settings.enable_thinking === false ? "off" : settings.enable_thinking === true ? "on" : "default";
-  form.append(thinkingLabel, thinking, el("p", "form-note", "硅基流动支持切换思考模式的模型可选择关闭；其他服务或不支持切换的模型请选择“跟随模型默认”。"));
+  if (!isImage) form.append(thinkingLabel, thinking, el("p", "form-note", "硅基流动支持切换思考模式的模型可选择关闭；其他服务或不支持切换的模型请选择“跟随模型默认”。"));
+  let size, responseFormat;
+  if (isImage) {
+    size = formField(form, "图片尺寸", "例如 1024x1024；也可填写 auto 或留空", settings.size ?? "1024x1024", false, 20);
+    const formatLabel = el("label", "form-label", "图片返回格式");
+    responseFormat = el("select", "form-input"); responseFormat.id = "image-response-format"; formatLabel.htmlFor = responseFormat.id;
+    [["default", "跟随服务默认"], ["b64_json", "Base64 图片"], ["url", "图片 URL"]].forEach(([value, text]) => {
+      const option = el("option", "", text); option.value = value; responseFormat.append(option);
+    });
+    responseFormat.value = settings.response_format || "default";
+    form.append(formatLabel, responseFormat, el("p", "form-note", "尺寸与返回格式须受所选模型支持；不确定时尺寸留空、返回格式跟随默认。每次生成一张图片，生图与对话共用每日 AI 调用额度。"));
+  }
   const key = formField(form, "API Key", settings.has_api_key ? "已保存密钥；留空沿用，更换地址时请重新填写" : "填写 API Key；本地免密服务可留空", "", false, 4096);
   key.type = "password"; key.spellcheck = false;
-  form.append(el("p", "form-note", "密钥仅保存在运行服务的电脑上，页面不会回显。测试消息只发给模型服务，结果显示在此处。"));
+  form.append(el("p", "form-note", isImage ? "密钥仅保存在运行服务的电脑上，页面不会回显。测试图片仅在此处预览，不发到微信群。" : "密钥仅保存在运行服务的电脑上，页面不会回显。测试消息只发给模型服务，结果显示在此处。"));
   const result = el("div", "model-test-result"); result.setAttribute("role", "status"); result.setAttribute("aria-live", "polite"); result.hidden = true;
   form.append(result);
   const footer = formFooter(form, "保存并测试");
@@ -880,23 +902,31 @@ function modelEditorDialog(settings = {}) {
   form.addEventListener("submit", async event => {
     event.preventDefault(); if (modelSaving || mutating) return;
     modelSaving = true; mutating = true;
-    const fields = [name, base, model, thinking, key, ...body.querySelectorAll("button"), $("close-modal")];
+    const fields = [name, base, model, thinking, key, size, responseFormat, ...body.querySelectorAll("button"), $("close-modal")].filter(Boolean);
     fields.forEach(node => node.disabled = true);
     footer.submit.textContent = "正在测试…"; footer.error.textContent = "";
     result.hidden = false; result.className = "model-test-result";
-    result.textContent = "正在向模型发送测试消息，请稍候…";
+    result.textContent = isImage ? "正在生成测试图片，请稍候（最多 3 分钟）…" : "正在向模型发送测试消息，请稍候…";
     try {
-      const path = settings.id ? `/api/manage/chat-models/${settings.id}` : "/api/manage/chat-models";
-      const data = await api(path, {name: name.value.trim(), base_url: base.value.trim(), model: model.value.trim(), api_key: key.value.trim() || null, enable_thinking: thinking.value === "default" ? null : thinking.value === "on"}, settings.id ? "PUT" : "POST", 60000);
+      const path = `/api/manage/${kind}-models${settings.id ? `/${settings.id}` : ""}`;
+      const payload = {name: name.value.trim(), base_url: base.value.trim(), model: model.value.trim(), api_key: key.value.trim() || null};
+      if (isImage) Object.assign(payload, {size: size.value.trim(), response_format: responseFormat.value});
+      else payload.enable_thinking = thinking.value === "default" ? null : thinking.value === "on";
+      const data = await api(path, payload, settings.id ? "PUT" : "POST", isImage ? 210000 : 60000);
       if (!data.saved || !data.test?.ok) {
         result.classList.add("failed"); result.textContent = `测试未通过：${data.test?.message || "请检查模型配置。"}\n原有配置保持生效，请修改后重试。`;
         return;
       }
       settings = data.profile;
-      $("modal-title").textContent = "修改 AI 模型";
+      $("modal-title").textContent = `修改${label}`;
       key.value = ""; key.placeholder = settings.has_api_key ? "已保存密钥；留空沿用，更换地址时请重新填写" : "本地免密服务可留空";
       base.value = settings.base_url; name.value = settings.name;
-      result.classList.add("passed"); result.textContent = `${data.test.message}\n模型回复：${data.test.reply}`;
+      result.classList.add("passed"); result.textContent = isImage ? data.test.message : `${data.test.message}\n模型回复：${data.test.reply}`;
+      if (isImage && data.test.preview?.startsWith("data:image/png;base64,")) {
+        const preview = el("img", "image-model-preview"); preview.alt = "生图连接测试预览";
+        preview.addEventListener("load", () => result.scrollIntoView({block: "nearest"}), {once: true});
+        preview.src = data.test.preview; result.append(preview);
+      }
       await refreshState(true);
     } catch (error) {
       result.classList.add("failed"); result.textContent = error.name === "TimeoutError" ? "请求超时，请重新打开配置查看保存状态后重试。" : `保存或测试失败：${error.message}`;

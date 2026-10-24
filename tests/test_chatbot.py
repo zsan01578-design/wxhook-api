@@ -38,14 +38,17 @@ def event(content="@机器人\u2005你好", msgid=1, **extra):
 
 
 @asynccontextmanager
-async def context(tmp_path, *, provider=None, bot_options=None, hook=None, profile=None):
-    state = SimpleNamespace(sends=[], hook_calls=[], media_calls=[])
+async def context(tmp_path, *, provider=None, bot_options=None, hook=None, profile=None, image_hook=None):
+    state = SimpleNamespace(sends=[], image_sends=[], hook_calls=[], media_calls=[])
 
     async def hook_response(request):
         body = json.loads(request.content)
         state.hook_calls.append(request.url.path)
         if request.url.path == "/GetSelfProfile":
             return httpx.Response(200, json=profile or {"wxid": BOT, "nickname": "机器人"})
+        if request.url.path == "/SendImgMsg" and image_hook is not None:
+            state.image_sends.append(body)
+            return await image_hook(request)
         assert request.url.path == "/SendTextMsg", "Unexpected outbound Hook operation"
         state.sends.append(body)
         return await hook(request) if hook else httpx.Response(200, json={"ret": 0})

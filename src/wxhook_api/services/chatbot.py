@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 import re
+from pathlib import Path
 from typing import Callable, Protocol
 from uuid import uuid4
 
@@ -21,6 +22,15 @@ from wxhook_api.services.chat_context import ConversationTurn, GroupConversation
 
 class AnswerProvider(Protocol):
     async def answer(self, question: str, context: str | None = None) -> str: ...
+
+
+IMAGE_REQUEST = re.compile(
+    r"生图|画图|绘图|"
+    r"生成\s*(?:(?:一|1)\s*)?(?:[张幅个]\s*)?图(?:片|像)?|"
+    r"(?:画|绘制)\s*(?:(?:一|1)\s*)?[张幅个]\s*(?:图(?:片|像|画)?|画)|"
+    r"(?:画|绘制)\s*(?:一|1)\s*[张幅个只条朵座辆]|"
+    r"(?:帮我|给我|为我|请|麻烦你?)\s*(?:画|绘制)"
+)
 
 
 class GroupQuestionQueue(asyncio.Queue):
@@ -78,7 +88,7 @@ def mention_ids(event: CallbackEvent) -> tuple[set[str], bool]:
     return ids, bool(ids)
 
 
-def addressed_question(event: CallbackEvent, identity: str, names: tuple[str, ...]) -> str | None:
+def addressed_question(event: CallbackEvent, identity: str, names: tuple[str, ...], *, after_mention: bool = False) -> str | None:
     ids, structured = mention_ids(event)
     if structured and identity not in ids:
         return None
@@ -88,6 +98,14 @@ def addressed_question(event: CallbackEvent, identity: str, names: tuple[str, ..
     matched = pattern.search(text) if any(labels) else None
     if not structured and not matched:
         return None
+    if after_mention:
+        # A keyword before the bot mention must not authorize image generation.
+        # Structured IDs can identify a bot whose group alias is not yet synced.
+        if not matched and ids == {identity}:
+            matched = re.search(r"@[^\s\u2005]+(?=[\s\u2005]|$)", text)
+        if not matched:
+            return None
+        text = text[matched.end():]
     return pattern.sub("", text).strip() if any(labels) else text.strip()
 
 
@@ -121,6 +139,7 @@ class MentionChatService:
         self.summary_service = None
         self.tools_service = None
         self.search_service = None
+        self.image_service = None
         self.conversations = GroupConversations()
 
     @property
@@ -129,6 +148,7 @@ class MentionChatService:
 
     def snapshot(self) -> dict:
         return {"enabled": self.options.enabled, "answer_configured": self.provider is not None,
+                "image_configured": bool(self.image_service and self.image_service.settings),
                 "identity_known": bool(self._identity and self._profile_valid and not (self.groups and self.groups.account_error)), "mention_names": list(self._names),
                 "account_error": self.groups.account_error if self.groups else "",
                 "configured_mention_names": list(self.options.mention_names),
@@ -298,7 +318,8 @@ class MentionChatService:
             return True
         try:
             report.update(status="queued", message="已识别 @机器人，等待调用模型")
-            self._queue.put_nowait({"group": group, "sender": event.sender, "key": key, "question": question, "report": report})
+            self._queue.put_nowait({"group": group, "sender": event.sender, "key": key, "question": question,
+                                    "image_question": addressed_question(event, self._identity, names, after_mention=True), "report": report})
             self._pending_groups[group] += 1
             self._pending_members[(group, event.sender)] += 1
         except asyncio.QueueFull:
@@ -307,11 +328,23 @@ class MentionChatService:
         return True
 
     async def _answer(self, question: str, group: str = "", *, sender: str | None = None, key: str = "",
-                      turn: ConversationTurn | None = None) -> str:
+                      turn: ConversationTurn | None = None, image_question: str | None = None) -> str | Path:
         if not question:
             return "我在，请在 @ 后写下你的问题。"
         if len(question) > 8000:
             return "问题太长了，请缩短后重新 @ 我。"
+        if image_question is not None and IMAGE_REQUEST.search(image_question):
+            prompt = re.sub(r"^(?:生图|画图|绘图|生成图片|生成图像)\s*[:：]?\s*", "", image_question, count=1).strip()
+            if not prompt:
+                return "请在生图指令后填写描述，例如：@机器人 生图：一只坐在窗边的橘猫。"
+            if self.image_service is None:
+                return "生图模型尚未配置，请联系管理员。"
+            try:
+                return await self.image_service.generate(prompt)
+            except Exception as exc:
+                from wxhook_api.services.chat_model import ModelError
+                self.last_error = str(exc) if isinstance(exc, ModelError) else "生图失败，请检查生图模型配置后重试。"
+                return self.last_error
         if re.sub(r"\s+", "", question).rstrip("。！!？?") in {"清空上下文", "重置对话"}:
             self.conversations.clear_group(self.identity, group)
             return "本群对话上下文已清空。"
@@ -392,10 +425,14 @@ class MentionChatService:
                 report.update(status="answering", message="正在等待模型回复")
                 turn = ConversationTurn(self.identity, job["group"], job["sender"], job["question"])
                 with ai_scope(job["group"], job["sender"]), ai_permission(lambda: self._accepting and self.allowed(job["group"], job["sender"])):
-                    answer = await self._answer(job["question"], job["group"], sender=job["sender"], key=job["key"], turn=turn)
+                    answer = await self._answer(job["question"], job["group"], sender=job["sender"], key=job["key"], turn=turn,
+                                                image_question=job["image_question"])
                 limit = self.options.max_reply_chars
-                if len(answer) > limit:
+                is_image = isinstance(answer, Path)
+                if not is_image and len(answer) > limit:
                     answer = answer[:limit - 1] + "…"
+                if is_image:
+                    image_path, image_mode = await self._messenger.prepare(answer, "image")
                 if not self._accepting or not self.allowed(job["group"], job["sender"]):
                     status = "skipped"
                     report.update(status="skipped", message="生成回复期间问答已被暂停，未发送")
@@ -408,13 +445,16 @@ class MentionChatService:
                     continue
                 report.update(status="sending", message="模型回复已生成，正在发送到微信群")
                 attempted = True
-                await self._messenger.text(job["group"], answer,
-                    allowed=lambda: self._accepting and self.options.enabled
-                        and self.allowed(job["group"], job["sender"]) and self.conversations.valid(turn))
+                allowed = lambda: self._accepting and self.options.enabled and self.allowed(job["group"], job["sender"]) and self.conversations.valid(turn)
+                if is_image:
+                    await self._messenger.send(job["group"], image_path, image_mode, allowed=allowed)
+                else:
+                    await self._messenger.text(job["group"], answer, allowed=allowed)
                 status = "sent"
                 self.sent += 1
-                self.conversations.commit(turn, answer)
-                report.update(status="sent", message="Hook 已确认发送一条回复")
+                if not is_image:
+                    self.conversations.commit(turn, answer)
+                report.update(status="sent", message="Hook 已确认发送一张生成图片" if is_image else "Hook 已确认发送一条回复")
             except asyncio.CancelledError:
                 status = "unknown" if attempted else "interrupted"
                 raise

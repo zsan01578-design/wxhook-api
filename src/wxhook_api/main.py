@@ -28,6 +28,7 @@ from wxhook_api.routes import account, callbacks, contacts, douyin, group_tools,
 from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.chatbot import MentionChatService
 from wxhook_api.services.chat_model import ChatModelConfiguration
+from wxhook_api.services.image_model import ImageModelConfiguration
 from wxhook_api.services.chat_summary import ChatSummaryService
 from wxhook_api.services.douyin_delivery import DouyinMessenger
 from wxhook_api.services.events import EventDispatcher
@@ -56,6 +57,8 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     douyin_worker.account_check = chatbot.verify_account
     douyin_worker.own_message_check = chatbot.own_message
     model_configuration = ChatModelConfiguration(chatbot)
+    image_configuration = ImageModelConfiguration(chatbot, budget=model_configuration.budget)
+    chatbot.image_service = image_configuration
     search_configuration = WebSearchConfiguration(chatbot=chatbot)
     summary_service = ChatSummaryService(groups, model_configuration, chatbot.identity)
     chatbot.summary_service = summary_service
@@ -69,6 +72,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
         "launcher.yml": Path(os.getenv("WXHOOK_LAUNCHER_CONFIG") or PROJECT_ROOT / "launcher.yml"),
         "parse-video.local.yml": parser_config_path(),
         "chat-model.local.json": model_configuration.path, "search.local.json": search_configuration.path,
+        "image-model.local.json": image_configuration.path,
     }, databases={"ai-usage.sqlite3": model_configuration.budget.path})
 
     async def archive_event(event):
@@ -151,6 +155,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.wechat_sync = synchronizer
     app.state.chatbot = chatbot
     app.state.chat_model = model_configuration
+    app.state.image_model = image_configuration
     app.state.chat_search = search_configuration
     app.state.chat_summary = summary_service
     app.state.group_tools = tools_service

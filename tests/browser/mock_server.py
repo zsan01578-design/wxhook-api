@@ -14,13 +14,15 @@ os.environ["WXHOOK_CONFIG"] = str(project / "version.yml")
 for name, filename in {
     "WXHOOK_MANAGEMENT_DB": "management.sqlite3",
     "WXHOOK_CHAT_MODEL_CONFIG": "model.json",
+    "WXHOOK_IMAGE_MODEL_CONFIG": "image-model.json",
     "WXHOOK_SEARCH_CONFIG": "search.json",
     "WXHOOK_CHATBOT_CONFIG": "chatbot.yml",
     "WXHOOK_DOUYIN_CONFIG": "media.yml",
     "WXHOOK_AI_USAGE_DB": "usage.sqlite3",
 }.items():
     os.environ[name] = str(root / filename)
-for name in ("WXHOOK_SYNC_ENABLED", "WXHOOK_MEDIA_CLEANUP_ENABLED", "WXHOOK_CHATBOT_ENABLED", "WXHOOK_DOUYIN_FEEDBACK_ENABLED"):
+os.environ["WXHOOK_IMAGE_OUTPUT_DIR"] = str(root / "generated-images")
+for name in ("WXHOOK_SYNC_ENABLED", "WXHOOK_MEDIA_CLEANUP_ENABLED", "WXHOOK_CHATBOT_ENABLED", "WXHOOK_DOUYIN_FEEDBACK_ENABLED", "WXHOOK_BACKUP_ENABLED"):
     os.environ[name] = "false"
 os.environ.pop("WXHOOK_ADMIN_TOKEN", None)
 

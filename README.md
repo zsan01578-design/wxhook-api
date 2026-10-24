@@ -178,6 +178,38 @@ $env:WXHOOK_SYNC_INTERVAL = '180'
 
 群工具接口前缀为 `/api/manage/groups/{群ID}/tools`：`GET` 读取状态，`PATCH /preferences` 设置 `auto_reports` 与 `task_reminders`；`POST /reports/week`、`POST /reports/month` 刷新报表；`POST /rules`、`PUT /rules/{ID}`、`DELETE /rules/{ID}` 管理规则；`POST /tasks/extract` 提取候选项、`POST /tasks` 保存待办、`PUT /tasks/{ID}` 编辑事项、负责人及截止时间，`PATCH /tasks/{ID}` 更新 `status`（`open` / `done` / `cancelled`）。新增和编辑支持 `due_at`（ISO日期时间，缺少时区时按北京时间解释）或旧版 `due_date`（YYYY-MM-DD）；返回的待办 `due_at` 为Unix秒数，创建者和完成时间由服务端记录，不能由请求伪造。
 
+## 群内生图与生图模型配置
+
+打开管理页左侧 **「AI 模型 → 生图模型 → 添加生图模型」**，填写配置名称、Base URL、完整模型 ID、API Key 和图片尺寸。生图模型与对话模型分别保存、分别启用；可以保存多个生图配置，同时启用一个。
+
+- 接口使用兼容 OpenAI 的非流式 `POST /images/generations`，地址通常以 `/v1` 结尾，也可直接填写完整生图地址。支持 `data[0].b64_json` 和 `data[0].url` 返回，接口字段参考 [OpenAI Images 官方文档](https://developers.openai.com/api/reference/resources/images/methods/generate)。仅支持此接口协议，暂不支持 Chat Completions 生图、异步任务轮询和图生图。
+- 图片尺寸默认 `1024x1024`，可填写服务商支持的其他尺寸（边长不超过 4096）、`auto` 或留空；留空时不发送尺寸参数。返回格式默认跟随服务，也可指定 Base64 或 URL。模型实际支持的参数以服务商为准。
+- **保存并测试会实际生成一张测试图片，可能产生服务商费用**，最多等待约 3 分钟。测试图只在网页预览，不发微信群；通过后才保存，首个配置自动启用。切换已保存的生图配置不再额外调用测试。失败时保留原配置，启用中的配置需先切换才能删除。
+- 生图与对话共用 AI 并发和每日调用额度；测试也计入全局额度，失败或超时可能已计费，不自动重试。密钥按原模型配置方式受本机 Windows 账户保护，页面不回显；编辑留空沿用该配置的密钥，更换地址须重新填写。
+
+在已开启群功能与 **「@机器人问答」** 的群内，用另一个微信账号发送：
+
+```text
+@机器人 生图：一只坐在窗边的橘猫，温暖的水彩风格
+```
+
+只有 @机器人 后输入的文字包含“生图”或常见绘图请求才调用生图模型。“生图”可出现在 @ 后文字的任意位置；也支持“画图”“绘图”“画一只猫”“请画”“给我画”“绘制一幅图”等表达。
+
+| 消息示例 | 处理方式 |
+| --- | --- |
+| `@机器人 生图：一只猫`、`@机器人 一只猫，水彩风格，生图` | 调用生图模型 |
+| `@机器人 帮我画一个图：一只猫`、`@机器人 画一张图，一朵花` | 调用生图模型 |
+| `@机器人 画一只猫`、`@机器人 生成一张图片：夜景` | 调用生图模型 |
+| `@机器人 这张图片是什么`、`@机器人 这幅画很好看` | 普通文字问答 |
+| `帮我画一个图`、`@其他人 生图：一只猫` | 不触发生图 |
+| `生图 @机器人 你好` | 关键词在 @ 前，不触发生图，走文字问答 |
+
+每条实时指令最多生成并回传一张图片，描述最多 8000 字；不需要同时配置对话模型。群/成员黑名单、账号校验、排队与回调去重沿用现有问答规则，生成图片不写入文字对话上下文。发送失败或结果不明不会自动重发。修改代码后重启 Python 服务，再刷新网页即可看到入口，无需退出微信。
+
+配置保存在 `data/image-model.local.json`，纳入自动配置备份，可用 `WXHOOK_IMAGE_MODEL_CONFIG` 指定路径。生成图片保存在 `data/generated-images`（可用 `WXHOOK_IMAGE_OUTPUT_DIR` 指定），单张下载与转存 PNG 均限制 20 MiB，并校验静态图片可读性；远程图片 URL 仅允许公开 HTTPS 地址，本机免密服务可返回同源本机地址。图片下载不附带模型 API Key。下次生成时清理本目录中超过 24 小时的系统生成图片；停止生成时不会定时清理。生图目录同样受 `WXHOOK_MEDIA_MIN_FREE_MB` 的磁盘余量保护。
+
+生图配置接口：`GET /api/manage/image-model` 查看状态，`POST /api/manage/image-models` 新增并测试，`PUT /api/manage/image-models/{ID}` 修改并测试，`POST /api/manage/image-models/{ID}/activate` 启用，`DELETE /api/manage/image-models/{ID}` 删除未启用配置。保存测试成功后才写入配置，接口不回显 API Key。
+
 ## 群内 @机器人问答：一条提问最多一条回复
 
 在已启用机器人的群里，只有 @当前机器人账号的文字消息才进入问答；普通聊天、@其他人、仅 @所有人、
@@ -1138,6 +1170,8 @@ wxhook-api/
 恢复时先停止 Python 服务，将 ZIP 解压到独立目录，检查 `manifest.json` 和数据库 `PRAGMA quick_check`；验证后按清单还原数据库与对应配置。恢复到同一微信账号，先核对群开关、黑名单和发送状态，再启动服务。不要把原数据库与别的时间点留下的 `-wal`、`-shm`、`-journal` 文件混用；建议先在独立目录验收恢复副本。同磁盘备份不能覆盖物理磁盘损坏，可用备份目录设置保存到其他磁盘。
 
 ### 部署与进程恢复
+
+Windows 上可双击项目根目录的 `update-and-start.bat`：先用 `git pull --ff-only` 从当前分支配置的上游更新代码，成功后启动 `main.py`。首次运行会安装依赖，之后仅在 `requirements-runtime.lock` 或 `pyproject.toml` 变化时重新安装，并在每次启动前运行 `pip check`。没有虚拟环境时需要已安装 Python 3.12。脚本默认设置常规同步间隔为 180 秒，已有 `WXHOOK_SYNC_INTERVAL` 环境变量时保留其值。Git、依赖或启动失败会保留报错窗口；代码更新失败时不会启动服务。使用前先停止旧 Python 服务，并确认本机 `launcher.yml` 的微信路径与 Hook 文件配置正确。脚本不自动覆盖或丢弃本地修改；本地修改阻止更新时，需要先处理 Git 提示。
 
 提供 [部署依赖快照](requirements-runtime.lock)，来自本轮 Windows / Python 3.12.14 的已验收运行环境，固定 39 个运行时依赖；开发测试依赖仍由 `.[dev]` 提供。在新虚拟环境中安装：
 
