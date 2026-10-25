@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 import json
 
 import httpx
@@ -7,7 +7,7 @@ from asgi_lifespan import LifespanManager
 from tests.test_manage import make_service
 from tests.test_douyin import GROUP, profile_transport
 from wxhook_api.main import create_app
-from wxhook_api.services.chat_summary import CHINA, ChatSummaryService, is_summary_request, local_date
+from wxhook_api.services.chat_summary import CHINA, is_summary_request, local_date
 from wxhook_api.services.groups import GroupManager
 from wxhook_api.services.chatbot import MentionChatService
 from wxhook_api.core.chatbot_config import ChatbotOptions

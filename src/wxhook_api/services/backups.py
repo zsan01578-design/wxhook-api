@@ -14,11 +14,16 @@ import tempfile
 import time
 from uuid import uuid4
 from zipfile import BadZipFile, ZipFile, ZIP_DEFLATED
+import zlib
 
 from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.services.groups import GroupManager
 from wxhook_api.services.media_cleanup import safe_child
 from wxhook_api.services.storage_guard import StorageGuard
+
+
+INVALID_BACKUP = (OSError, BadZipFile, ValueError, KeyError, TypeError, AttributeError,
+                  OverflowError, RuntimeError, EOFError, zlib.error)
 
 
 class BackupService:
@@ -38,7 +43,7 @@ class BackupService:
         self.storage = StorageGuard(self.directory, env="WXHOOK_BACKUP_MIN_FREE_MB")
         self._task = None
         self._lock = asyncio.Lock()
-        self._discovered_file = ""
+        self._validated = {}
         self.status = {"enabled": self.enabled, "last_success_at": "", "last_error": "", "last_file": "", "cleanup_error": ""}
 
     def snapshot(self):
@@ -70,19 +75,38 @@ class BackupService:
                 raise ValueError("Invalid backup timestamp")
         return {"last_success_at": created.astimezone(timezone.utc).isoformat(), "last_file": path.name}
 
-    async def _discover(self, path: Path):
+    def _verified(self, path: Path) -> dict:
+        if not safe_child(path, self.directory):
+            raise OSError("Unsafe backup path")
+        def signature():
+            info = path.stat()
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        before = signature()
+        cached = self._validated.get(path.name)
+        if cached and cached[0] == before:
+            return cached[1]
+        self._validated.pop(path.name, None)
+        restored = self._existing(path)
+        if signature() != before:
+            raise OSError("Backup changed during validation")
+        # Reuse expensive ZIP checks only while the file's identity and write
+        # metadata remain unchanged. All callers hold the backup service lock.
+        self._validated[path.name] = (before, restored)
+        return restored
+
+    async def _discover(self, path: Path) -> bool:
         async with self._lock:
-            if self._discovered_file == path.name or self.status["last_file"] == path.name:
-                return
             async def discover():
                 try:
-                    restored = await asyncio.to_thread(self._existing, path)
-                except (OSError, BadZipFile, ValueError, KeyError, TypeError, AttributeError, OverflowError):
-                    self.status["last_error"] = "最近备份未通过完整性检查，请检查备份文件；自动备份将在周期到期后继续。"
-                    return
+                    restored = await asyncio.to_thread(self._verified, path)
+                except INVALID_BACKUP:
+                    if self.status["last_file"] == path.name:
+                        self.status.update(last_file="", last_success_at="")
+                    self.status["last_error"] = "最近备份未通过完整性检查，将立即尝试生成新备份；失败后每分钟重试。"
+                    return False
                 self.status.update(restored, last_error="")
-                self._discovered_file = path.name
-            await finish_before_cancel(discover())
+                return True
+            return await finish_before_cancel(discover())
 
     @staticmethod
     def _database(source: Path, target: Path):
@@ -90,7 +114,11 @@ class BackupService:
         def progress(*args):
             if time.monotonic() > deadline:
                 raise TimeoutError("Backup exceeded time limit")
-        with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as src, closing(sqlite3.connect(target)) as dst:
+        # A normal connection can read a WAL snapshot; mode=ro may not create the
+        # WAL shared-memory file. query_only keeps this reader strictly read-only.
+        with closing(sqlite3.connect(source.resolve(), timeout=5)) as src, closing(sqlite3.connect(target)) as dst:
+            src.execute("PRAGMA query_only=ON")
+            src.execute("PRAGMA busy_timeout=5000")
             src.backup(dst, pages=128, progress=progress, sleep=0.05)
             if dst.execute("PRAGMA quick_check").fetchone() != ("ok",):
                 raise sqlite3.DatabaseError("Backup validation failed")
@@ -139,13 +167,25 @@ class BackupService:
                 path.unlink(missing_ok=True)
 
     def _prune(self):
-        # A locked file must not block other old snapshots. Keep the newest
-        # configured number even when extra, undeletable files remain.
+        files = self._files()
+        names = {path.name for path in files}
+        self._validated = {name: value for name, value in self._validated.items() if name in names}
+        # Invalid/unreadable files do not count toward retention. Do not delete
+        # anything until enough newer, verified copies have been protected.
+        retained = 0
         failures = 0
-        for old in self._files()[:-self.keep]:
+        for old in reversed(files):
+            if retained < self.keep:
+                try:
+                    self._verified(old)
+                except INVALID_BACKUP:
+                    continue
+                retained += 1
+                continue
             try:
                 if safe_child(old, self.directory):
                     old.unlink()
+                    self._validated.pop(old.name, None)
                 else:
                     failures += 1
             except FileNotFoundError:
@@ -159,7 +199,7 @@ class BackupService:
             failures = await asyncio.to_thread(self._prune)
         except OSError:
             failures = 1
-        self.status["cleanup_error"] = ("部分旧备份暂时无法清理，将在 1 分钟后重试；最新备份仍可使用。"
+        self.status["cleanup_error"] = ("部分旧备份暂时无法清理，将在 1 分钟后重试。"
                                         if failures else "")
 
     async def cleanup(self):
@@ -194,9 +234,8 @@ class BackupService:
                 # snapshot fails. It must not depend on a successful backup.
                 await self.cleanup()
                 files = await asyncio.to_thread(self._files)
-                if files:
-                    await self._discover(files[-1])
-                elapsed = time.time() - files[-1].stat().st_mtime if files else self.interval
+                valid = bool(files) and await self._discover(files[-1])
+                elapsed = time.time() - files[-1].stat().st_mtime if valid else self.interval
                 if elapsed >= self.interval:
                     await self.run_once()
                 delay = self.interval - max(0, elapsed) if elapsed < self.interval else self.interval

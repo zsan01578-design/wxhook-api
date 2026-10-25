@@ -10,7 +10,7 @@ root = project / ".tools" / "browser-smoke"
 root.mkdir(parents=True, exist_ok=True)
 (project / ".tools" / "project-audit").mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(project / "src"))
-os.environ["WXHOOK_CONFIG"] = str(project / "version.yml")
+os.environ["WXHOOK_CONFIG"] = str(project / "version.example.yml")
 for name, filename in {
     "WXHOOK_MANAGEMENT_DB": "management.sqlite3",
     "WXHOOK_CHAT_MODEL_CONFIG": "model.json",

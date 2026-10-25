@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import html
@@ -9,7 +10,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from typing import Annotated, Awaitable, Callable
+from typing import Annotated, Callable
 from urllib.parse import urlsplit
 
 import httpx
@@ -18,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints,
 from wxhook_api.core.config import PROJECT_ROOT
 from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.core.access import loopback
+from wxhook_api.core.bounded_http import ResponseReadError, response_bytes
 from wxhook_api.core.secrets import protect_secret, reveal_secret
 from wxhook_api.core.ai_safety import MAX_RESPONSE_BYTES, check_ai_permission
 
@@ -104,6 +106,7 @@ class DeepSeekSearchProvider:
         result_count: int = 5,
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 10.0,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         if self.base_url.endswith("/tools/search"):
@@ -112,28 +115,37 @@ class DeepSeekSearchProvider:
         self.result_count = min(max(result_count, 1), 50)
         self.transport = transport
         self.timeout = timeout
+        self.client = client
 
     async def search(self, query: str) -> list[SearchResult]:
         query = " ".join((query or "").split())[:128]
         if not query:
             return []
         try:
-            async with asyncio.timeout(self.timeout + 5), httpx.AsyncClient(
-                timeout=httpx.Timeout(self.timeout, connect=min(4.0, self.timeout)),
-                transport=self.transport,
-                follow_redirects=False,
-            ) as client:
+            async with AsyncExitStack() as stack:
+                await stack.enter_async_context(asyncio.timeout(self.timeout + 5))
+                if self.client is None:
+                    client = await stack.enter_async_context(httpx.AsyncClient(
+                        timeout=httpx.Timeout(self.timeout, connect=min(4.0, self.timeout)),
+                        transport=self.transport,
+                        follow_redirects=False,
+                        trust_env=False,
+                    ))
+                else:
+                    client = self.client
                 async with client.stream("POST",
                     self.base_url + "/tools/search",
-                    headers={"Authorization": "Bearer " + self.api_key},
+                    headers={"Authorization": "Bearer " + self.api_key, "Accept-Encoding": "gzip, deflate"},
                     json={"query": query, "count": self.result_count},
+                    timeout=httpx.Timeout(self.timeout, connect=min(4.0, self.timeout)),
                 ) as response:
                     body = bytearray()
                     if response.status_code == 200:
-                        async for chunk in response.aiter_bytes():
-                            if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
-                                raise SearchError("联网搜索返回内容过大，已回退普通回答。")
+                        async for chunk in response_bytes(response, MAX_RESPONSE_BYTES):
                             body.extend(chunk)
+        except ResponseReadError as exc:
+            message = "联网搜索返回内容过大，已回退普通回答。" if str(exc) == "size" else "联网搜索响应传输不完整或压缩格式无效，已回退普通回答。"
+            raise SearchError(message) from None
         except (httpx.TimeoutException, TimeoutError):
             raise SearchError("联网搜索超时，已回退普通回答。") from None
         except httpx.RequestError:
@@ -182,6 +194,7 @@ class WebSearchConfiguration:
         self.last_error = ""
         self._provider_override = provider
         self._transport = transport
+        self._client: httpx.AsyncClient | None = None
         self._now = now or (lambda: datetime.now(timezone(timedelta(hours=8))).date())
         self._lock = asyncio.Lock()
         self._load()
@@ -295,7 +308,21 @@ class WebSearchConfiguration:
             self.settings.api_key.get_secret_value(),
             result_count=self.settings.result_count,
             transport=self._transport,
+            client=self.http_client(),
         )
+
+    def http_client(self) -> httpx.AsyncClient | None:
+        if self._transport is not None:
+            return None
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(10, connect=4), follow_redirects=False, trust_env=False)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def context(self, question: str) -> str | None:
         async with self._lock:

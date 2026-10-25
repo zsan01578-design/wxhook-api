@@ -6,7 +6,7 @@ import pytest
 from tests.test_chatbot import context, event
 from wxhook_api.core.chatbot_config import ChatbotOptions
 from wxhook_api.services.chatbot import MentionChatService
-from wxhook_api.services.chat_model import ChatModelConfiguration, ChatCompletionsProvider, ModelDefinition, ModelError, ModelSettings
+from wxhook_api.services.chat_model import ChatModelConfiguration, ChatCompletionsProvider, ModelDefinition
 from wxhook_api.core.secrets import reveal_secret
 
 
@@ -321,3 +321,24 @@ async def test_legacy_config_migrates_without_losing_key_or_thinking_setting(tmp
     assert disk["active_id"] == "legacy" and len(disk["models"]) == 2
     restored = ChatModelConfiguration(MentionChatService(ChatbotOptions()))
     assert restored.settings.api_key.get_secret_value() == CONFIG["api_key"]
+
+
+async def test_usage_is_recorded_and_exposed_without_keys(tmp_path):
+    def respond(request):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "答"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19},
+        })
+
+    async with context(tmp_path) as state:
+        config = state.app.state.chat_model
+        config.transport = httpx.MockTransport(respond)
+        assert (await state.client.post("/api/manage/chat-model", json=CONFIG)).json()["saved"]
+        await state.submit(event())
+        usage = await config.budget.usage_snapshot(7)
+        assert usage["totals"] == {"prompt_tokens": 24, "completion_tokens": 14, "requests": 2}
+        assert usage["models"][0]["model"] == "example/chat"
+        response = await state.client.get("/api/manage/ai-usage?days=7")
+        assert response.status_code == 200
+        assert response.json()["totals"]["completion_tokens"] == 14
+        assert "test-private-key" not in response.text

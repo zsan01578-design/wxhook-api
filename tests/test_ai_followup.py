@@ -42,15 +42,15 @@ async def test_disabling_reports_cancels_already_selected_scheduler_jobs(tmp_pat
         models = Models()
         tools.models = models
         selected = asyncio.Event()
-        original_db = tools.db
+        original_read = tools.read
 
         async def observed(action):
-            result = await original_db(action)
+            result = await original_read(action)
             if result == [GROUP]:
                 selected.set()
             return result
 
-        monkeypatch.setattr(tools, 'db', observed)
+        monkeypatch.setattr(tools, 'read', observed)
         async with tools._generation_lock:
             pending = asyncio.create_task(tools.scheduled_reports())
             try:

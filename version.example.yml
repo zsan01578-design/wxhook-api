@@ -1,0 +1,16 @@
+# Copy this file to version.yml and fill in the values for this computer.
+# version.yml is ignored by Git and must never contain real account IDs in the repository.
+# 复制本文件为 version.yml，并填写本机 Hook 配置；version.yml 已被 Git 忽略。
+
+# 现有 Hook 上游端口（不是 FastAPI 桥接层端口）
+start-port: 30001
+# Hook 消息回调地址；一键启动会自动覆盖为当前服务地址
+callback-url: "http://localhost:8000/receiveChatBotMsg"
+# 是否开启图片自动下载
+image-auto-download: true
+# 自动下载白名单，逗号分隔；没有需要时留空
+image-download-white-list: ""
+# 语音转文字
+voice-to-text-enable: false
+# 语音转文字白名单，逗号分隔；没有需要时留空
+voice-to-text-white-list: ""

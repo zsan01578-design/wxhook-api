@@ -188,3 +188,19 @@ async def test_global_pause_preserves_pending_and_interrupted_send_is_not_retrie
         tools = state.app.state.group_tools
         await tools.reminders.due_reminders()
         assert not state.sends and (await reminders(tools))[0]['status'] == "unknown"
+
+
+async def test_idle_scheduler_does_not_commit_every_second(tmp_path, monkeypatch):
+    async with context(tmp_path) as state:
+        tools = state.app.state.group_tools
+        calls = 0
+        original = tools.reminders.due_reminders
+
+        async def counted():
+            nonlocal calls
+            calls += 1
+            return await original()
+
+        monkeypatch.setattr(tools.reminders, "due_reminders", counted)
+        await asyncio.sleep(1.2)
+        assert calls <= 1, "idle reminder scheduling must not run a DB write every second"

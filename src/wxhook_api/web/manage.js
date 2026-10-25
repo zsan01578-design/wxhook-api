@@ -22,6 +22,14 @@ function el(tag, className = "", text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+function formatBytes(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return "未知";
+  if (number < 1024) return `${number} B`;
+  if (number < 1024 ** 2) return `${(number / 1024).toFixed(1)} KB`;
+  if (number < 1024 ** 3) return `${(number / 1024 ** 2).toFixed(1)} MB`;
+  return `${(number / 1024 ** 3).toFixed(2)} GB`;
+}
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.classList.add("icon");
@@ -773,6 +781,20 @@ async function modelSettingsDialog(kind = "chat") {
     searchActions.append(button("配置联网搜索", "button small", () => searchSettingsDialog(search)));
     searchCard.append(searchHeading, searchActions);
     body.append(searchCard);
+    const usageCard = el("section", "model-card"), usageCopy = el("div", "model-card-copy");
+    usageCopy.append(el("h3", "", "AI 用量（近 7 天）"), el("p", "form-note", "正在读取…"));
+    usageCard.append(usageCopy); body.append(usageCard);
+    api("/api/manage/ai-usage?days=7").then(usage => {
+      if (!active()) return;
+      const totals = usage.totals || {}, limits = usage.limits || {};
+      usageCopy.replaceChildren(
+        el("h3", "", "AI 用量（近 7 天）"),
+        el("p", "form-note", `${totals.requests || 0} 次调用 · 输入 ${totals.prompt_tokens || 0} tokens · 输出 ${totals.completion_tokens || 0} tokens。额度：全局 ${limits.daily ?? "?"} 次/日，单群 ${limits.group ?? "?"}，单成员 ${limits.member ?? "?"}。`),
+        el("p", "form-note", usage.models.length ? "按模型：" + usage.models.slice(0, 4).map(model => `${model.model || "未知"} ${(model.prompt_tokens || 0) + (model.completion_tokens || 0)} tokens`).join(" · ") : "尚无 token 记录；服务商返回 usage 后自动统计。"),
+      );
+    }).catch(error => {
+      if (active()) usageCopy.replaceChildren(el("h3", "", "AI 用量"), el("p", "form-note", `读取用量失败：${error.message}`));
+    });
   }
   const toolbar = el("div", "model-list-toolbar");
   toolbar.append(el("span", "form-note", `已保存 ${settings.models.length} 个${isImage ? "生图" : "对话"}模型`), button(isImage ? "添加生图模型" : "添加模型", "button primary", () => modelEditorDialog({}, kind)));
@@ -788,6 +810,10 @@ async function modelSettingsDialog(kind = "chat") {
   if (route?.attempts?.length) {
     body.append(el("p", "form-note", `最近完成的调用：${route.used_id ? `使用 ${profileName(route.used_id)}` : "未成功"}`));
     for (const attempt of route.attempts) body.append(el("p", "form-note", `${profileName(attempt.profile_id)}：${attempt.status === "success" ? "成功" : attempt.message || "已停止"}`));
+  }
+  const cooldown = settings.cooldown || {};
+  if (Object.keys(cooldown).length) {
+    body.append(el("p", "form-note", `连接失败后暂时跳过：${Object.entries(cooldown).map(([id, seconds]) => `${profileName(id)}（剩余 ${Math.ceil(seconds)} 秒）`).join("、")}`));
   }
   const orderedProfiles = [...orderedIds.map(id => settings.models.find(profile => profile.id === id)).filter(Boolean), ...settings.models.filter(profile => !orderedIds.includes(profile.id))];
   const saveFallbacks = ids => modelAction(`/api/manage/${kind}-model/fallbacks`, "PUT", "正在保存备用顺序…", "备用顺序已保存", {fallback_ids: ids});
@@ -1054,6 +1080,11 @@ function connectionDialog() {
     const backup = runtime.backup;
     storage.textContent = [runtime.media_storage?.error,
       backup?.enabled ? (backup.last_error || backup.cleanup_error || (backup.last_success_at ? `最近备份：${dateText(backup.last_success_at)}，保留最近 ${backup.retained_limit} 份。` : "自动备份等待首次完成。")) : "自动备份已关闭。"].filter(Boolean).join(" ");
+    const retention = runtime.retention, database = retention?.database;
+    if (database) {
+      storage.textContent += ` 管理库约 ${formatBytes(database.size_bytes)}：消息 ${database.chat_messages ?? 0} 条，回复凭据 ${database.chat_reply_claims ?? 0} 条，待办 ${database.group_tasks ?? 0} 条，提醒 ${database.member_reminders ?? 0} 条。${retention.chat_days ? `聊天记录保留 ${retention.chat_days} 天。` : "聊天记录长期保留。"}`;
+    }
+    if (retention?.last_error) storage.textContent += ` ${retention.last_error}`;
   }
   body.append(status, startup, received, storage, result, actions);
 }

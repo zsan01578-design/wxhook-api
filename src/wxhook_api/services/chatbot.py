@@ -36,6 +36,9 @@ IMAGE_REQUEST = re.compile(
     r"(?:帮我|给我|为我|请|麻烦你?)\s*(?:画|绘制)"
 )
 MENTION_WHITESPACE = r"\s\u2005\u200b\u200c\u200d\u2060\ufeff"
+# Routing may reuse a recent identity check. verify_account() is always fresh,
+# except that concurrent callers share a check that completed after they asked.
+PROFILE_CACHE_SECONDS = 5.0
 
 
 class GroupQuestionQueue(asyncio.Queue):
@@ -138,6 +141,8 @@ class MentionChatService:
         self._names = options.mention_names
         self._profile_checked = 0.0
         self._profile_valid = False
+        self._profile_lock = asyncio.Lock()
+        self._claimed_identity = ""
         self._identity_error = ""
         self._accepting = False
         self.last_error = ""
@@ -234,7 +239,12 @@ class MentionChatService:
         self.conversations.clear()
         self.image_prompts.clear()
 
+    async def ensure_account(self) -> bool:
+        """Cheap routing check; pre-send callers must use verify_account()."""
+        return await self._identify(force=False)
+
     async def verify_account(self) -> bool:
+        """Force a check, coalescing only short bursts of concurrent callers."""
         return await self._identify(force=True)
 
     async def _identify(self, *, force: bool = False) -> bool:
@@ -243,43 +253,52 @@ class MentionChatService:
             self.last_error = self.groups.account_error
             self._identity_error = self.last_error
             return False
-        now = asyncio.get_running_loop().time()
-        if not force and self._profile_checked and now - self._profile_checked < 30:
+        loop = asyncio.get_running_loop()
+        requested_at = loop.time()
+        if not force and self._profile_checked and requested_at - self._profile_checked < PROFILE_CACHE_SECONDS:
             return self._profile_valid
-        self._profile_checked = now
-        try:
-            async with asyncio.timeout(5):
-                response = await self._client.get_self_profile()
-            profile = response.data
-            if isinstance(profile, dict) and isinstance(profile.get("data"), dict):
-                profile = profile["data"]
-            identity = profile.get("wxid") if isinstance(profile, dict) else None
-            if response.status_code != 200 or not isinstance(identity, str) or not identity or identity.endswith("@chatroom"):
-                raise ValueError
-            if self.options.bot_wxid and identity != self.options.bot_wxid:
+        async with self._profile_lock:
+            # Reuse only a check that completed after this caller asked. A
+            # pre-send check therefore always observes the current account.
+            if self._profile_checked > requested_at:
+                return self._profile_valid
+            try:
+                async with asyncio.timeout(5):
+                    response = await self._client.get_self_profile()
+                profile = response.data
+                if isinstance(profile, dict) and isinstance(profile.get("data"), dict):
+                    profile = profile["data"]
+                identity = profile.get("wxid") if isinstance(profile, dict) else None
+                if response.status_code != 200 or not isinstance(identity, str) or not identity or identity.endswith("@chatroom"):
+                    raise ValueError
+                if self.options.bot_wxid and identity != self.options.bot_wxid:
+                    self._profile_valid = False
+                    self.last_error = "配置的机器人 wxid 与当前登录账号不一致"
+                    self._identity_error = self.last_error
+                    self.groups.suspend_account(self.last_error)
+                    return False
+                if identity != self._claimed_identity:
+                    await self.groups.claim_account(identity)
+                    self._claimed_identity = identity
+                self._identity = identity
+                self._profile_valid = True
+                nickname = profile.get("nickname")
+                if isinstance(nickname, str) and 0 < len(nickname.strip()) <= 80:
+                    self._profile_names = (nickname.strip(),)
+                else:
+                    self._profile_names = ()
+                self._names = tuple(dict.fromkeys((*self.options.mention_names, *self._profile_names)))
+                if self.last_error == self._identity_error:
+                    self.last_error = ""
+                self._identity_error = ""
+                return True
+            except Exception:
                 self._profile_valid = False
-                self.last_error = "配置的机器人 wxid 与当前登录账号不一致"
+                self.last_error = "无法确认机器人账号，请检查微信连接或本机 chatbot.local.yml"
                 self._identity_error = self.last_error
-                self.groups.suspend_account(self.last_error)
                 return False
-            await self.groups.claim_account(identity)
-            self._identity = identity
-            self._profile_valid = True
-            nickname = profile.get("nickname")
-            if isinstance(nickname, str) and 0 < len(nickname.strip()) <= 80:
-                self._profile_names = (nickname.strip(),)
-            else:
-                self._profile_names = ()
-            self._names = tuple(dict.fromkeys((*self.options.mention_names, *self._profile_names)))
-            if self.last_error == self._identity_error:
-                self.last_error = ""
-            self._identity_error = ""
-            return True
-        except Exception:
-            self._profile_valid = False
-            self.last_error = "无法确认机器人账号，请检查微信连接或本机 chatbot.local.yml"
-            self._identity_error = self.last_error
-            return False
+            finally:
+                self._profile_checked = loop.time()
 
     async def receive(self, event: CallbackEvent) -> bool:
         # Returning True also prevents our own model answer (which may contain
@@ -303,7 +322,7 @@ class MentionChatService:
         if not ids and "@" not in event.content:
             report.update(status="no_mention", message="消息中没有 @提及，不触发问答")
             return False
-        if not await self.verify_account() or self.own_message(event):
+        if not await self.ensure_account() or self.own_message(event):
             report.update(status="identity", message=self.last_error or "消息来自机器人自己，不触发问答")
             return self.own_message(event)
         names = await self._group_names(group)
@@ -502,7 +521,7 @@ class MentionChatService:
                 if not self.allowed(job["group"], job["sender"]):
                     report.update(status="policy", message="排队期间群开关或黑名单发生变化，已停止问答")
                     continue
-                if not await self.verify_account():
+                if not await self.ensure_account():
                     report.update(status="identity", message=self.last_error)
                     continue
                 claimed = await self.groups.claim_chat_reply(job["group"], job["key"])
@@ -532,7 +551,12 @@ class MentionChatService:
                     continue
                 report.update(status="sending", message="模型回复已生成，正在发送到微信群")
                 attempted = True
-                allowed = lambda: self._accepting and self.options.enabled and self.allowed(job["group"], job["sender"]) and self.conversations.valid(turn)
+
+                def allowed():
+                    return (self._accepting and self.options.enabled
+                            and self.allowed(job["group"], job["sender"])
+                            and self.conversations.valid(turn))
+
                 if is_image:
                     await self._messenger.send(job["group"], image_path, image_mode, allowed=allowed)
                 else:

@@ -35,6 +35,7 @@ from wxhook_api.services.events import EventDispatcher
 from wxhook_api.services.callback_store import CallbackStore
 from wxhook_api.services.backups import BackupService
 from wxhook_api.services.parse_video import parser_config_path
+from wxhook_api.services.retention import RetentionService
 from wxhook_api.services.groups import GroupManager, event_group
 from wxhook_api.services.group_tools import GroupToolsService
 from wxhook_api.services.inbox import MessageInbox
@@ -64,6 +65,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     chatbot.summary_service = summary_service
     tools_service = GroupToolsService(groups, model_configuration, chatbot)
     chatbot.tools_service = tools_service
+    retention = RetentionService(groups, tools_service)
     backups = BackupService(groups, {
         "version.yml": settings.config_path,
         "douyin.yml": PROJECT_ROOT / "douyin.yml", "douyin.local.yml": douyin_worker.options.config_path,
@@ -112,6 +114,9 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
         # service fails to stop. Keep the shared Hook open until all workers exit.
         async with AsyncExitStack() as cleanup:
             cleanup.push_async_callback(close_owned_client)
+            cleanup.push_async_callback(model_configuration.aclose)
+            cleanup.push_async_callback(image_configuration.aclose)
+            cleanup.push_async_callback(search_configuration.aclose)
             cleanup.callback(setattr, douyin_worker, "messenger", None)
             cleanup.push_async_callback(douyin_worker.stop)
             cleanup.push_async_callback(chatbot.stop)
@@ -119,6 +124,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             cleanup.push_async_callback(tools_service.stop)
             cleanup.push_async_callback(dispatcher.stop, settings.shutdown_timeout)
             cleanup.push_async_callback(synchronizer.stop)
+            cleanup.push_async_callback(retention.stop)
             cleanup.push_async_callback(backups.stop)
 
     @asynccontextmanager
@@ -134,6 +140,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             await douyin_worker.start()
             await chatbot.start(app.state.hook_client)
             await tools_service.start()
+            await retention.start()
             summary_service.bot_wxid = chatbot.identity
             await summary_service.start()
             await dispatcher.start()
@@ -159,6 +166,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.chat_search = search_configuration
     app.state.chat_summary = summary_service
     app.state.group_tools = tools_service
+    app.state.retention = retention
     app.state.runtime_revision = source_revision()
     app.state.backups = backups
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)

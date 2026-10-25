@@ -70,7 +70,7 @@ async def state(request: Request):
     media = {"parser_provider": settings.parser_provider, "notify_group": settings.notify_group,
              "send_results": settings.send_results, "feedback_available": service.messenger is not None}
     runtime = {"backup": request.app.state.backups.snapshot(), "media_storage": service.storage.snapshot(),
-               "revision": request.app.state.runtime_revision}
+               "retention": request.app.state.retention.snapshot(), "revision": request.app.state.runtime_revision}
     return JSONResponse({"groups": groups, "blocked_members": await manager.members(blocked_only=True), "startup": request.app.state.launcher_status, "sync": request.app.state.wechat_sync.status, "media": media, "callbacks": callbacks, "runtime": runtime, "chatbot": request.app.state.chatbot.snapshot()}, headers={"Cache-Control": "no-store"})
 
 
@@ -89,6 +89,12 @@ async def get_chat_model(request: Request):
 @router.get("/chat-search")
 async def get_chat_search(request: Request):
     return JSONResponse(request.app.state.chat_search.snapshot(), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/ai-usage")
+async def get_ai_usage(request: Request, days: int = Query(7, ge=1, le=90)):
+    data = await request.app.state.chat_model.budget.usage_snapshot(days)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/image-model")

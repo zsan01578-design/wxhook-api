@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+from contextlib import AsyncExitStack
 from io import BytesIO
 import ipaddress
 import json
@@ -26,8 +27,8 @@ from wxhook_api.core.bounded_http import ResponseReadError, response_bytes
 from wxhook_api.core.config import PROJECT_ROOT
 from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.core.secrets import reveal_secret
-from wxhook_api.services.chat_model import (ChatModelConfiguration, ModelError, ModelSettings,
-    UpstreamModelError, upstream_failure, validate_fallbacks, run_model_chain)
+from wxhook_api.services.chat_model import (ChatModelConfiguration, ModelCooldown, ModelError, ModelSettings,
+    ProviderUnavailable, upstream_failure, validate_fallbacks, run_model_chain)
 from wxhook_api.services.media_cleanup import safe_child
 from wxhook_api.services.storage_guard import StorageGuard
 
@@ -110,9 +111,10 @@ def image_png(content: bytes, *, preview=False) -> bytes:
 
 
 class ImagesProvider:
-    def __init__(self, settings, *, transport=None, budget, account_check):
+    def __init__(self, settings, *, transport=None, budget, account_check, client=None):
         self.settings, self.transport = settings, transport
         self.budget, self.account_check = budget, account_check
+        self.client = client
 
     async def _download_url(self, value: str) -> str:
         try:
@@ -164,8 +166,15 @@ class ImagesProvider:
             headers["Authorization"] = "Bearer " + self.settings.api_key.get_secret_value()
         generation_accepted = False
         try:
-            async with asyncio.timeout(180), self.budget.slots, httpx.AsyncClient(
-                    timeout=httpx.Timeout(150, connect=10), transport=self.transport, follow_redirects=False) as client:
+            async with AsyncExitStack() as stack:
+                await stack.enter_async_context(asyncio.timeout(180))
+                await stack.enter_async_context(self.budget.slots)
+                if self.client is None:
+                    client = await stack.enter_async_context(httpx.AsyncClient(
+                        timeout=httpx.Timeout(150, connect=10), transport=self.transport,
+                        follow_redirects=False, trust_env=False))
+                else:
+                    client = self.client
                 check_ai_permission()
                 await self.account_check()
                 check_ai_permission()
@@ -191,11 +200,17 @@ class ImagesProvider:
                             raise ValueError
                     elif isinstance(url, str) and url:
                         # Never send the API credential or cookies to an image URL.
-                        async with httpx.AsyncClient(timeout=30, transport=self.transport, follow_redirects=False) as download:
+                        async with AsyncExitStack() as download_stack:
+                            if self.client is None:
+                                download = await download_stack.enter_async_context(httpx.AsyncClient(
+                                    timeout=30, transport=self.transport, follow_redirects=False, trust_env=False))
+                            else:
+                                download = self.client
                             for _ in range(4):
                                 url = await self._download_url(url)
                                 check_ai_permission()
-                                async with download.stream("GET", url, headers={"Accept-Encoding": "identity"}) as image:
+                                async with download.stream("GET", url, headers={"Accept-Encoding": "identity"},
+                                                           timeout=httpx.Timeout(30, connect=10)) as image:
                                     if image.status_code in {301, 302, 303, 307, 308} and image.headers.get("location"):
                                         url = urljoin(url, image.headers["location"])
                                         continue
@@ -218,7 +233,7 @@ class ImagesProvider:
         except (httpx.ConnectError, httpx.ConnectTimeout):
             if generation_accepted:
                 raise ModelError("图片已经生成，但下载连接失败，请检查图片服务或改用 Base64 返回格式。") from None
-            raise UpstreamModelError("无法连接生图服务，请检查地址、网络和代理设置。") from None
+            raise ProviderUnavailable("无法连接生图服务，请检查地址、网络和代理设置。") from None
         except (TimeoutError, httpx.TimeoutException):
             raise ModelError("生图超时，请稍后重试；本次请求可能已计费。") from None
         except httpx.RequestError:
@@ -241,7 +256,9 @@ class ImageModelConfiguration:
         self.storage = StorageGuard(self.output_dir)
         self.models, self.active_id, self.load_error = {}, "", ""
         self.fallback_ids, self.last_route = [], {}
+        self.cooldown = ModelCooldown()
         self.transport = None
+        self._client: httpx.AsyncClient | None = None
         self._lock = asyncio.Lock()
         if self.path.is_file():
             try:
@@ -266,10 +283,25 @@ class ImageModelConfiguration:
     def snapshot(self):
         return {"configured": self.settings is not None, "active_id": self.active_id,
                 "fallback_ids": self.fallback_ids.copy(), "last_route": self.last_route,
+                "cooldown": self.cooldown.snapshot(),
                 "models": [self.profile_snapshot(p) for p in self.models.values()], "load_error": self.load_error}
 
+    def http_client(self) -> httpx.AsyncClient | None:
+        if self.transport is not None:
+            return None
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(150, connect=10), follow_redirects=False, trust_env=False)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
     def provider(self, profile):
-        return ImagesProvider(profile, transport=self.transport, budget=self.budget, account_check=self._verify_group_account)
+        return ImagesProvider(profile, transport=self.transport, budget=self.budget,
+                              account_check=self._verify_group_account, client=self.http_client())
 
     async def _commit(self, models, active_id, *, fallback_ids=None):
         ordered = [key for key in (self.fallback_ids if fallback_ids is None else fallback_ids)
@@ -278,6 +310,7 @@ class ImageModelConfiguration:
             await asyncio.to_thread(self._save, ImageModelCollection(active_id=active_id, models=list(models.values()), fallback_ids=ordered))
             self.models, self.active_id, self.load_error = models, active_id, ""
             self.fallback_ids, self.last_route = ordered, {}
+            self.cooldown.clear()
         await finish_before_cancel(commit())
 
     async def save_profile(self, requested, model_id=None):
@@ -340,7 +373,7 @@ class ImageModelConfiguration:
             await self.storage.ensure(MAX_IMAGE_BYTES)
             profiles = [self.models[key] for key in [self.active_id, *self.fallback_ids]]
             content = await run_model_chain(profiles, lambda profile: self.provider(profile).generate(prompt),
-                                           self.record_route, timeout=240)
+                                           self.record_route, timeout=240, cooldown=self.cooldown)
             check_ai_permission()
             await self.storage.ensure(len(content))
             path = await finish_before_cancel(asyncio.to_thread(self._store, content))

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict, deque
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -16,6 +16,7 @@ from uuid import uuid4
 from wxhook_api.core.config import PROJECT_ROOT
 from wxhook_api.core.errors import AccountMismatchError
 from wxhook_api.core.persistence import finish_before_cancel
+from wxhook_api.core.schema import apply_management_schema
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.word_cloud import frequent_words
 
@@ -74,6 +75,10 @@ class GroupManager:
     def __init__(self, path: Path | None = None):
         self.path = path or Path(os.getenv("WXHOOK_MANAGEMENT_DB", str(PROJECT_ROOT / "data" / "management.sqlite3")))
         self._lock = asyncio.Lock()
+        # WAL readers do not block the single writer. Cap concurrent scans so a
+        # large radar/word-cloud query cannot open unbounded SQLite handles.
+        self._readers = asyncio.Semaphore(2)
+        self.fts_available = False
         self._policies: dict[str, dict] = {}
         self._blocked_members: set[tuple[str, str]] = set()
         self._word_cloud_cache: OrderedDict[str, tuple[str, dict]] = OrderedDict()
@@ -83,58 +88,44 @@ class GroupManager:
     def _connect(self):
         connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA synchronous=NORMAL")
         try:
             with connection:
                 yield connection
         finally:
             connection.close()
 
+    @contextmanager
+    def _read_connect(self):
+        connection = sqlite3.connect(self.path, timeout=10)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA busy_timeout=5000")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
+    async def read(self, action):
+        def execute():
+            with self._read_connect() as db:
+                return action(db)
+        async with self._readers:
+            return await asyncio.to_thread(execute)
+
     async def start(self, legacy_groups: list[str]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         def initialize(db):
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS groups (
-                    id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
-                    pinned INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
-                    blocked INTEGER NOT NULL DEFAULT 0, douyin_enabled INTEGER, auto_download INTEGER,
-                    created_at TEXT NOT NULL, last_seen TEXT NOT NULL DEFAULT '',
-                    last_message TEXT NOT NULL DEFAULT '', message_count INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS members (
-                    group_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
-                    blocked INTEGER NOT NULL DEFAULT 0, last_seen TEXT NOT NULL DEFAULT '',
-                    message_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (group_id, id)
-                );
-                CREATE TABLE IF NOT EXISTS audit (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL,
-                    target TEXT NOT NULL, action TEXT NOT NULL, created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS chat_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, msg_key TEXT NOT NULL,
-                    msgid TEXT NOT NULL, sender TEXT NOT NULL, type INTEGER NOT NULL,
-                    timestamp INTEGER NOT NULL, content TEXT NOT NULL, received_at TEXT NOT NULL,
-                    source TEXT NOT NULL, raw_json TEXT NOT NULL,
-                    UNIQUE(group_id, msg_key)
-                );
-                CREATE INDEX IF NOT EXISTS chat_messages_timeline ON chat_messages(group_id, timestamp DESC, id DESC);
-                CREATE TABLE IF NOT EXISTS sync_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS chat_reply_claims (
-                    group_id TEXT NOT NULL, message_key TEXT NOT NULL, status TEXT NOT NULL,
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    PRIMARY KEY (group_id, message_key)
-                );
-                CREATE TABLE IF NOT EXISTS chat_summaries (
-                    group_id TEXT NOT NULL, summary_date TEXT NOT NULL, summary TEXT NOT NULL,
-                    message_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    PRIMARY KEY (group_id, summary_date)
-                );
-            """)
+            apply_management_schema(db)
             migrations = {
                 "groups": {"chat_enabled": "INTEGER", "summary_enabled": "INTEGER NOT NULL DEFAULT 0", "wechat_name": "TEXT NOT NULL DEFAULT ''", "members_sync": "TEXT NOT NULL DEFAULT 'pending'",
                            "members_synced_at": "TEXT NOT NULL DEFAULT ''", "history_complete": "INTEGER NOT NULL DEFAULT 0",
                            "history_next_page": "INTEGER NOT NULL DEFAULT 1", "history_error": "TEXT NOT NULL DEFAULT ''",
                            "history_synced_at": "TEXT NOT NULL DEFAULT ''"},
                 "members": {"wechat_name": "TEXT NOT NULL DEFAULT ''", "membership": "TEXT NOT NULL DEFAULT 'unknown'"},
+                "chat_messages": {"is_self": "INTEGER NOT NULL DEFAULT 0"},
             }
             for table, fields in migrations.items():
                 columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -145,6 +136,15 @@ class GroupManager:
             # subsets, rather than reading every member's full row.
             db.execute("CREATE INDEX IF NOT EXISTS members_blocked ON members(id) WHERE blocked=1")
             db.execute("CREATE INDEX IF NOT EXISTS members_current ON members(group_id,id) WHERE membership='current'")
+            db.execute("CREATE INDEX IF NOT EXISTS chat_messages_self ON chat_messages(group_id,is_self,timestamp)")
+            if not db.execute("SELECT 1 FROM sync_metadata WHERE key='is_self_flags_v1'").fetchone():
+                # One-time normalization so word clouds and radar no longer
+                # extract the same JSON flag from every message row.
+                db.execute(f"UPDATE chat_messages SET is_self=1 WHERE is_self=0 AND ({SELF_MESSAGE_SQL})")
+                db.execute("INSERT INTO sync_metadata(key,value) VALUES ('is_self_flags_v1',?)", (now(),))
+            account_row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
+            if account_row and account_row[0]:
+                self._backfill_account_self(db, account_row[0])
             for group in legacy_groups:
                 db.execute("INSERT OR IGNORE INTO groups (id, created_at) VALUES (?, ?)", (group, now()))
             if not db.execute("SELECT 1 FROM sync_metadata WHERE key='member_message_counts_v1'").fetchone():
@@ -155,7 +155,39 @@ class GroupManager:
                     ((row["total"], row["group_id"], row["sender"]) for row in db.execute(
                         "SELECT group_id,sender,count(*) AS total FROM chat_messages GROUP BY group_id,sender")))
                 db.execute("INSERT INTO sync_metadata(key,value) VALUES ('member_message_counts_v1',?)", (now(),))
-        await self._write_policy(initialize)
+            fts_available = False
+            fts_enabled = os.getenv("WXHOOK_FTS_ENABLED", "true").lower() not in {"false", "0", "off"}
+            try:
+                if not fts_enabled:
+                    raise sqlite3.OperationalError("FTS disabled")
+                db.executescript("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(
+                        content, content='chat_messages', content_rowid='id', tokenize='trigram');
+                    CREATE TRIGGER IF NOT EXISTS chat_messages_fts_ai AFTER INSERT ON chat_messages BEGIN
+                        INSERT INTO chat_messages_fts(rowid, content) VALUES (new.id, new.content);
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS chat_messages_fts_ad AFTER DELETE ON chat_messages BEGIN
+                        INSERT INTO chat_messages_fts(chat_messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS chat_messages_fts_au AFTER UPDATE OF content ON chat_messages BEGIN
+                        INSERT INTO chat_messages_fts(chat_messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+                        INSERT INTO chat_messages_fts(rowid, content) VALUES (new.id, new.content);
+                    END;
+                """)
+                if not db.execute("SELECT 1 FROM sync_metadata WHERE key='fts_backfill_v1'").fetchone():
+                    db.execute("INSERT INTO chat_messages_fts(chat_messages_fts) VALUES('rebuild')")
+                    db.execute("INSERT INTO sync_metadata(key,value) VALUES ('fts_backfill_v1',?)", (now(),))
+                fts_available = True
+            except sqlite3.OperationalError:
+                # Older SQLite builds may lack FTS5/trigram; search falls back to instr().
+                fts_available = False
+            return fts_available
+        self.fts_available = await self._write_policy(initialize)
+        def enable_wal():
+            with closing(sqlite3.connect(self.path, timeout=10)) as db:
+                db.execute("PRAGMA journal_mode=WAL")
+                db.execute("PRAGMA synchronous=NORMAL")
+        await asyncio.to_thread(enable_wal)
 
     @staticmethod
     def _read_policies(db):
@@ -224,15 +256,13 @@ class GroupManager:
         db.execute("DELETE FROM audit WHERE id NOT IN (SELECT id FROM audit ORDER BY id DESC LIMIT 500)")
 
     async def groups(self, legacy) -> list[dict[str, Any]]:
-        def read():
-            with self._connect() as db:
-                return [dict(row) for row in db.execute("""SELECT g.*,
-                    (SELECT count(*) FROM members m WHERE m.group_id=g.id) AS member_count,
-                    (SELECT count(*) FROM members m WHERE m.group_id=g.id AND m.blocked=1) AS blocked_member_count
-                    , (SELECT count(*) FROM members m WHERE m.group_id=g.id AND m.membership='current') AS current_member_count
-                    FROM groups g ORDER BY pinned DESC, last_seen DESC, created_at DESC, id""")]
-        async with self._lock:
-            rows = await asyncio.to_thread(read)
+        def read(db):
+            return [dict(row) for row in db.execute("""SELECT g.*,
+                (SELECT count(*) FROM members m WHERE m.group_id=g.id) AS member_count,
+                (SELECT count(*) FROM members m WHERE m.group_id=g.id AND m.blocked=1) AS blocked_member_count
+                , (SELECT count(*) FROM members m WHERE m.group_id=g.id AND m.membership='current') AS current_member_count
+                FROM groups g ORDER BY pinned DESC, last_seen DESC, created_at DESC, id""")]
+        rows = await self.read(read)
         for row in rows:
             row["local_name"] = row["name"]
             row["name"] = row["name"] or row["wechat_name"]
@@ -287,7 +317,7 @@ class GroupManager:
         return await self._write_policy(write)
 
     async def members(self, group: str | None = None, *, blocked_only: bool = False) -> list[dict]:
-        def read():
+        def read(db):
             clauses, parameters = [], []
             if group is not None:
                 clauses.append("m.group_id=?")
@@ -295,11 +325,9 @@ class GroupManager:
             if blocked_only:
                 clauses.append("m.blocked=1")
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
-            with self._connect() as db:
-                rows = db.execute("SELECT m.*, COALESCE(NULLIF(g.name,''),g.wechat_name) AS group_name FROM members m JOIN groups g ON g.id=m.group_id" + where + " ORDER BY m.blocked DESC, m.last_seen DESC, m.id", parameters)
-                return [{**dict(row), "local_name": row["name"], "name": row["name"] or row["wechat_name"], "blocked": bool(row["blocked"])} for row in rows]
-        async with self._lock:
-            return await asyncio.to_thread(read)
+            rows = db.execute("SELECT m.*, COALESCE(NULLIF(g.name,''),g.wechat_name) AS group_name FROM members m JOIN groups g ON g.id=m.group_id" + where + " ORDER BY m.blocked DESC, m.last_seen DESC, m.id", parameters)
+            return [{**dict(row), "local_name": row["name"], "name": row["name"] or row["wechat_name"], "blocked": bool(row["blocked"])} for row in rows]
+        return await self.read(read)
 
     async def save_member(self, group: str, member: str, changes: dict, *, create: bool = False) -> bool:
         assert changes.keys() <= {"name", "blocked"}
@@ -325,12 +353,10 @@ class GroupManager:
         return await self._write_policy(write)
 
     async def audit(self, group: str | None = None) -> list[dict]:
-        def read():
-            with self._connect() as db:
-                rows = db.execute("SELECT * FROM audit" + (" WHERE group_id=?" if group else "") + " ORDER BY id DESC LIMIT 100", (group,) if group else ())
-                return [dict(row) for row in rows]
-        async with self._lock:
-            return await asyncio.to_thread(read)
+        def read(db):
+            rows = db.execute("SELECT * FROM audit" + (" WHERE group_id=?" if group else "") + " ORDER BY id DESC LIMIT 100", (group,) if group else ())
+            return [dict(row) for row in rows]
+        return await self.read(read)
 
     @staticmethod
     def _save_messages(db, group: str, messages: list[dict]) -> tuple[int, int]:
@@ -355,22 +381,25 @@ class GroupManager:
             timestamp = int(message["timestamp"]) or int(datetime.now(timezone.utc).timestamp())
             timestamp = max(0, min(timestamp, 253402300799))
             seen_at = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+            raw_json = json.dumps(raw, ensure_ascii=False)
             values = (group, message["key"], message["msgid"], message["sender"], message["type"], timestamp,
-                      message["content"], now(), message["source"], json.dumps(raw, ensure_ascii=False))
+                      message["content"], now(), message["source"], raw_json, int(own))
             inserted = db.execute("""INSERT OR IGNORE INTO chat_messages
-                (group_id,msg_key,msgid,sender,type,timestamp,content,received_at,source,raw_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?)""", values).rowcount
+                (group_id,msg_key,msgid,sender,type,timestamp,content,received_at,source,raw_json,is_self)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""", values).rowcount
             if not inserted:
                 if own and message["source"] != "history":
                     # A callback may arrive after its history row. Enrich only
                     # the self marker, preserving the archived text and sender.
-                    db.execute("UPDATE chat_messages SET raw_json=json_set(raw_json,'$.is_self',json('true')) WHERE group_id=? AND msg_key=?",
+                    db.execute("UPDATE chat_messages SET raw_json=json_set(raw_json,'$.is_self',json('true')),is_self=1 WHERE group_id=? AND msg_key=?",
                                (group, message["key"]))
                 if message["source"] == "history":
                     db.execute("""UPDATE chat_messages SET raw_json=?, source='history', type=?, timestamp=?,
                         sender=CASE WHEN ?<>'' THEN ? ELSE sender END,
-                        content=CASE WHEN ?<>'' THEN ? ELSE content END WHERE group_id=? AND msg_key=?""",
-                        (values[-1], message["type"], timestamp, message["sender"], message["sender"], message["content"], message["content"], group, message["key"]))
+                        content=CASE WHEN ?<>'' THEN ? ELSE content END,
+                        is_self=CASE WHEN ? THEN 1 ELSE is_self END WHERE group_id=? AND msg_key=?""",
+                        (raw_json, message["type"], timestamp, message["sender"], message["sender"], message["content"],
+                         message["content"], int(own), group, message["key"]))
                     sender = message["sender"]
                     sender_changed = bool(sender and sender != existing["sender"])
                     if sender_changed:
@@ -422,6 +451,16 @@ class GroupManager:
                 raise AccountMismatchError(self.account_error)
             await finish_before_cancel(asyncio.to_thread(write))
 
+    @staticmethod
+    def _backfill_account_self(db, account: str):
+        key = "is_self_account:" + account
+        if db.execute("SELECT 1 FROM sync_metadata WHERE key=?", (key,)).fetchone():
+            return
+        db.execute("UPDATE chat_messages SET is_self=1 WHERE is_self=0 AND sender=?", (account,))
+        db.execute("""UPDATE chat_messages SET is_self=1 WHERE is_self=0 AND sender IN ('', group_id)
+            AND (instr(content, ? || char(58,10))=1 OR instr(content, ? || char(58,13,10))=1)""", (account, account))
+        db.execute("INSERT OR IGNORE INTO sync_metadata(key,value) VALUES (?,?)", (key, now()))
+
     async def claim_account(self, account: str) -> None:
         if self.account_error:
             raise AccountMismatchError(self.account_error)
@@ -431,6 +470,7 @@ class GroupManager:
                 if row and row[0] != account:
                     raise AccountMismatchError("微信账号与本地资料库不一致，请为新账号设置独立的 WXHOOK_MANAGEMENT_DB 后重启")
                 db.execute("INSERT OR IGNORE INTO sync_metadata (key,value) VALUES ('account',?)", (account,))
+                self._backfill_account_self(db, account)
         async def verify():
             if self.account_error:
                 raise AccountMismatchError(self.account_error)
@@ -502,24 +542,22 @@ class GroupManager:
             return await finish_before_cancel(asyncio.to_thread(write))
 
     async def word_cloud(self, group: str, *, bot_wxid: str = "") -> dict:
-        def read():
-            with self._connect() as db:
-                account = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
-                identity = account[0] if account else bot_wxid
-                texts = []
-                rows = db.execute(f"""SELECT substr(content,1,2000) AS content,sender FROM chat_messages
-                    WHERE group_id=? AND type=1 AND (?='' OR sender<>?)
-                    AND NOT ({SELF_MESSAGE_SQL})
-                    ORDER BY timestamp DESC,id DESC""", (group, identity, identity))
-                for row in rows:
-                    if identity and row["sender"] in ("", group) and row["content"].startswith((identity + ":\n", identity + ":\r\n")):
-                        continue
-                    texts.append(row["content"])
-                    if len(texts) == 1000:
-                        break
-                return texts
-        async with self._lock:
-            texts = await asyncio.to_thread(read)
+        def read(db):
+            account = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
+            identity = account[0] if account else bot_wxid
+            texts = []
+            rows = db.execute(f"""SELECT substr(content,1,2000) AS content,sender FROM chat_messages
+                WHERE group_id=? AND type=1 AND (?='' OR sender<>?) AND is_self=0
+                AND NOT ({SELF_MESSAGE_SQL})
+                ORDER BY timestamp DESC,id DESC""", (group, identity, identity))
+            for row in rows:
+                if identity and row["sender"] in ("", group) and row["content"].startswith((identity + ":\n", identity + ":\r\n")):
+                    continue
+                texts.append(row["content"])
+                if len(texts) == 1000:
+                    break
+            return texts
+        texts = await self.read(read)
         signature = hashlib.sha256(json.dumps(texts, ensure_ascii=False).encode()).hexdigest()
         cached = self._word_cloud_cache.get(group)
         if cached and cached[0] == signature:
@@ -542,59 +580,56 @@ class GroupManager:
         start_timestamp = int(start_local.timestamp())
         end_timestamp = int((datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=china)).timestamp())
 
-        def read():
-            with self._connect() as db:
-                account_row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
-                identity = account_row[0] if account_row else bot_wxid
-                rows = db.execute("""SELECT sender,type,timestamp,content,
-                    json_extract(raw_json,'$.is_self') AS is_self
-                    FROM chat_messages WHERE group_id=? AND type<10000 AND timestamp>=? AND timestamp<?
-                    ORDER BY timestamp ASC,id ASC""", (group, start_timestamp, end_timestamp))
-                member_names = {row["id"]: (row["name"] or row["wechat_name"] or row["id"])
-                                for row in db.execute("SELECT id,name,wechat_name FROM members WHERE group_id=?", (group,))}
-                daily = [{"date": str(today - timedelta(days=offset)), "count": 0, "text_count": 0, "active_members": set()}
-                         for offset in range(days - 1, -1, -1)]
-                hourly = [0] * 24
-                members = {}
-                texts = deque(maxlen=1000)
-                total = text_total = 0
-                for row in rows:
-                    sender = row["sender"] or ""
-                    if row["is_self"] in (True, 1, "1", "true") or (identity and sender == identity):
-                        continue
-                    if identity and sender in ("", group) and str(row["content"] or "").startswith((identity + ":\n", identity + ":\r\n")):
-                        continue
-                    timestamp = int(row["timestamp"] or 0)
-                    # The window starts at Beijing midnight (fixed UTC+8).
-                    # Bucket integers instead of formatting a date per message.
-                    day, within_day = divmod(timestamp - start_timestamp, 86400)
-                    if not 0 <= day < days:
-                        continue
-                    total += 1
-                    daily[day]["count"] += 1
-                    hourly[within_day // 3600] += 1
-                    if sender and sender != group:
-                        entry = members.setdefault(sender, {"id": sender, "name": member_names.get(sender, sender), "count": 0, "last_seen": 0})
-                        entry["count"] += 1
-                        entry["last_seen"] = timestamp  # Rows arrive oldest first.
-                        daily[day]["active_members"].add(sender)
-                    if int(row["type"] or 0) == 1:
-                        text_total += 1
-                        texts.append(str(row["content"] or "")[:2000])
-                        daily[day]["text_count"] += 1
-                return {
-                    "daily": [{**item, "active_members": len(item["active_members"])} for item in daily],
-                    "hourly": [{"hour": hour, "count": count} for hour, count in enumerate(hourly)],
-                    "members": [{**item, "last_seen": datetime.fromtimestamp(item["last_seen"], timezone.utc).isoformat()}
-                                for item in sorted(members.values(), key=lambda item: (-item["count"], item["name"]))[:10]],
-                    "active_member_count": len(members),
-                    "texts": list(texts),
-                    "total": total,
-                    "text_total": text_total,
-                }
+        def read(db):
+            account_row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
+            identity = account_row[0] if account_row else bot_wxid
+            rows = db.execute("""SELECT sender,type,timestamp,content,is_self
+                FROM chat_messages WHERE group_id=? AND type<10000 AND timestamp>=? AND timestamp<?
+                ORDER BY timestamp ASC,id ASC""", (group, start_timestamp, end_timestamp))
+            member_names = {row["id"]: (row["name"] or row["wechat_name"] or row["id"])
+                            for row in db.execute("SELECT id,name,wechat_name FROM members WHERE group_id=?", (group,))}
+            daily = [{"date": str(today - timedelta(days=offset)), "count": 0, "text_count": 0, "active_members": set()}
+                     for offset in range(days - 1, -1, -1)]
+            hourly = [0] * 24
+            members = {}
+            texts = deque(maxlen=1000)
+            total = text_total = 0
+            for row in rows:
+                sender = row["sender"] or ""
+                if row["is_self"] in (True, 1, "1", "true") or (identity and sender == identity):
+                    continue
+                if identity and sender in ("", group) and str(row["content"] or "").startswith((identity + ":\n", identity + ":\r\n")):
+                    continue
+                timestamp = int(row["timestamp"] or 0)
+                # The window starts at Beijing midnight (fixed UTC+8).
+                # Bucket integers instead of formatting a date per message.
+                day, within_day = divmod(timestamp - start_timestamp, 86400)
+                if not 0 <= day < days:
+                    continue
+                total += 1
+                daily[day]["count"] += 1
+                hourly[within_day // 3600] += 1
+                if sender and sender != group:
+                    entry = members.setdefault(sender, {"id": sender, "name": member_names.get(sender, sender), "count": 0, "last_seen": 0})
+                    entry["count"] += 1
+                    entry["last_seen"] = timestamp  # Rows arrive oldest first.
+                    daily[day]["active_members"].add(sender)
+                if int(row["type"] or 0) == 1:
+                    text_total += 1
+                    texts.append(str(row["content"] or "")[:2000])
+                    daily[day]["text_count"] += 1
+            return {
+                "daily": [{**item, "active_members": len(item["active_members"])} for item in daily],
+                "hourly": [{"hour": hour, "count": count} for hour, count in enumerate(hourly)],
+                "members": [{**item, "last_seen": datetime.fromtimestamp(item["last_seen"], timezone.utc).isoformat()}
+                            for item in sorted(members.values(), key=lambda item: (-item["count"], item["name"]))[:10]],
+                "active_member_count": len(members),
+                "texts": list(texts),
+                "total": total,
+                "text_total": text_total,
+            }
 
-        async with self._lock:
-            raw = await asyncio.to_thread(read)
+        raw = await self.read(read)
         words = await asyncio.to_thread(frequent_words, raw.pop("texts"))
         peak_hour = max(raw["hourly"], key=lambda item: item["count"]) if raw["hourly"] else {"hour": 0, "count": 0}
         peak_day = max(raw["daily"], key=lambda item: item["count"]) if raw["daily"] else {"date": "", "count": 0}
@@ -616,33 +651,29 @@ class GroupManager:
 
     async def summary_messages(self, group: str, summary_date: str, *, bot_wxid: str = "") -> list[dict]:
         """Return today's text messages in Asia/Shanghai, excluding the bot."""
-        def read():
-            account = None
-            with self._connect() as db:
-                row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
-                account = row[0] if row else bot_wxid
-                rows = db.execute("""SELECT sender,timestamp,substr(content,1,1200) AS content,json_extract(raw_json,'$.is_self') AS is_self
-                    FROM chat_messages WHERE group_id=? AND type=1
-                    AND timestamp>=? AND timestamp<? AND (?='' OR sender<>?)
-                    ORDER BY timestamp DESC,id DESC LIMIT 800""", (group, *_day_bounds(summary_date), account, account))
-                result = []
-                for item in rows:
-                    if item["is_self"] in (True, 1, "1", "true"):
-                        continue
-                    if account and item["sender"] in ("", group) and item["content"].startswith((account + ":\n", account + ":\r\n")):
-                        continue
-                    result.append(dict(item))
-                return list(reversed(result))
-        async with self._lock:
-            return await asyncio.to_thread(read)
+        def read(db):
+            row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
+            account = row[0] if row else bot_wxid
+            rows = db.execute(f"""SELECT sender,timestamp,substr(content,1,1200) AS content,is_self
+                FROM chat_messages WHERE group_id=? AND type=1
+                AND timestamp>=? AND timestamp<? AND (?='' OR sender<>?)
+                AND is_self=0 AND NOT ({SELF_MESSAGE_SQL})
+                ORDER BY timestamp DESC,id DESC LIMIT 800""", (group, *_day_bounds(summary_date), account, account))
+            result = []
+            for item in rows:
+                if item["is_self"] in (True, 1, "1", "true"):
+                    continue
+                if account and item["sender"] in ("", group) and item["content"].startswith((account + ":\n", account + ":\r\n")):
+                    continue
+                result.append(dict(item))
+            return list(reversed(result))
+        return await self.read(read)
 
     async def get_summary(self, group: str, summary_date: str) -> dict | None:
-        def read():
-            with self._connect() as db:
-                row = db.execute("SELECT group_id,summary_date,summary,message_count,created_at,updated_at FROM chat_summaries WHERE group_id=? AND summary_date=?", (group, summary_date)).fetchone()
-                return dict(row) if row else None
-        async with self._lock:
-            return await asyncio.to_thread(read)
+        def read(db):
+            row = db.execute("SELECT group_id,summary_date,summary,message_count,created_at,updated_at FROM chat_summaries WHERE group_id=? AND summary_date=?", (group, summary_date)).fetchone()
+            return dict(row) if row else None
+        return await self.read(read)
 
     async def save_summary(self, group: str, summary_date: str, summary: str, message_count: int) -> dict:
         timestamp = now()
@@ -657,24 +688,25 @@ class GroupManager:
             return await finish_before_cancel(asyncio.to_thread(write))
 
     async def summary_group_ids(self) -> list[str]:
-        def read():
-            with self._connect() as db:
-                return [row[0] for row in db.execute("SELECT id FROM groups ORDER BY id")]
-        async with self._lock:
-            return await asyncio.to_thread(read)
+        def read(db):
+            return [row[0] for row in db.execute("SELECT id FROM groups ORDER BY id")]
+        return await self.read(read)
 
     async def messages(self, group: str, *, page: int = 1, size: int = 50, query: str = "") -> dict:
-        def read():
+        def read(db):
             where, args = "group_id=?", [group]
             if query:
-                where += " AND instr(lower(content),lower(?))>0"
-                args.append(query)
-            with self._connect() as db:
-                total = db.execute(f"SELECT count(*) FROM chat_messages WHERE {where}", args).fetchone()[0]
-                offset = (page - 1) * size
-                # Out-of-range pages are empty; never bind an unbounded Python
-                # integer as SQLite's signed 64-bit OFFSET.
-                rows = [] if offset >= total else db.execute(f"SELECT id,msgid,sender,type,timestamp,content,received_at,source FROM chat_messages WHERE {where} ORDER BY timestamp DESC,id DESC LIMIT ? OFFSET ?", (*args,size,offset))
-                return {"messages": [dict(row) for row in rows], "total": total, "page": page, "size": size, "has_more": total > page*size}
-        async with self._lock:
-            return await asyncio.to_thread(read)
+                if self.fts_available and len(query.strip()) >= 3:
+                    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    where += " AND id IN (SELECT rowid FROM chat_messages_fts WHERE chat_messages_fts.content LIKE ? ESCAPE '\\')"
+                    args.append("%" + escaped + "%")
+                else:
+                    where += " AND instr(lower(content),lower(?))>0"
+                    args.append(query)
+            total = db.execute(f"SELECT count(*) FROM chat_messages WHERE {where}", args).fetchone()[0]
+            offset = (page - 1) * size
+            # Out-of-range pages are empty; never bind an unbounded Python
+            # integer as SQLite's signed 64-bit OFFSET.
+            rows = [] if offset >= total else db.execute(f"SELECT id,msgid,sender,type,timestamp,content,received_at,source FROM chat_messages WHERE {where} ORDER BY timestamp DESC,id DESC LIMIT ? OFFSET ?", (*args,size,offset))
+            return {"messages": [dict(row) for row in rows], "total": total, "page": page, "size": size, "has_more": total > page*size}
+        return await self.read(read)

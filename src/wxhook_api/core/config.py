@@ -12,6 +12,7 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "version.yml"
+EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "version.example.yml"
 
 
 def _parse_port(value: Any, name: str) -> int:
@@ -68,6 +69,16 @@ class Settings:
     @classmethod
     def from_environment(cls, config_path: str | Path | None = None) -> "Settings":
         selected_path = Path(config_path or os.getenv("WXHOOK_CONFIG") or DEFAULT_CONFIG_PATH).expanduser().resolve()
+        if not selected_path.is_file() and config_path is None and not os.getenv("WXHOOK_CONFIG"):
+            # A fresh clone has only the example. Keep the service importable while
+            # making it obvious that this is not a completed local configuration.
+            if EXAMPLE_CONFIG_PATH.is_file():
+                selected_path = EXAMPLE_CONFIG_PATH.resolve()
+        if not selected_path.is_file() and selected_path.name == "version.yml":
+            raise ValueError(
+                "configuration file does not exist: "
+                f"{selected_path}. Copy version.example.yml to version.yml and fill in this computer's Hook settings."
+            )
         loaded = load_yaml(selected_path)
         hook_port = _parse_port(loaded.get("start-port", 30001), "start-port")
         host = os.getenv("WXHOOK_HOST", "127.0.0.1").strip()

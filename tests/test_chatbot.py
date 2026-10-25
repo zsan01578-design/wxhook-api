@@ -141,6 +141,8 @@ async def test_profile_is_rechecked_and_missing_roomid_uses_wxid(tmp_path):
         payload = event()
         payload.pop("roomid")
         await state.submit(payload)
+        # Simulate the short coalescing window expiring between two messages.
+        state.bot._profile_checked -= 2
         await state.submit(event(msgid=2))
         assert state.hook_calls.count("/GetSelfProfile") >= 2
         assert len(state.sends) == 2

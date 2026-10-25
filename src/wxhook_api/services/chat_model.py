@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 import json
 import os
 from pathlib import Path
 import tempfile
+import time
 from uuid import uuid4
 from typing import Annotated, Callable
 from urllib.parse import urlsplit
@@ -15,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, String
 from wxhook_api.core.config import PROJECT_ROOT
 from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.core.access import loopback
+from wxhook_api.core.bounded_http import ResponseReadError, response_bytes
 from wxhook_api.core.secrets import protect_secret, reveal_secret
 from wxhook_api.core.ai_safety import (ModelBudget, BudgetError, ai_scope, current_ai_group, check_ai_permission, MAX_INPUT_CHARS,
                                       MAX_OUTPUT_TOKENS, MAX_RESPONSE_BYTES)
@@ -77,6 +80,10 @@ class UpstreamModelError(ModelError):
     """An upstream failure for which the next configured provider may be tried."""
 
 
+class ProviderUnavailable(UpstreamModelError):
+    """A connection/timeout/service failure that warrants a short cooldown."""
+
+
 class ModelFallbacks(BaseModel):
     model_config = ConfigDict(extra="forbid")
     fallback_ids: list[Annotated[str, StringConstraints(pattern=r"^[a-zA-Z0-9_-]{1,64}$")]] = Field(default_factory=list, max_length=4)
@@ -90,31 +97,63 @@ def validate_fallbacks(active_id, models, fallback_ids):
 
 async def upstream_failure(response, message):
     retryable = response.status_code in {401, 402, 403, 404, 408, 429} or 500 <= response.status_code <= 599
+    unavailable = response.status_code in {408, 429} or 500 <= response.status_code <= 599
     # Some compatible gateways report exhausted balances as HTTP 400. Inspect
     # only bounded, machine-readable codes; never expose their response body.
     if response.status_code == 400:
         body = bytearray()
-        async for chunk in response.aiter_bytes():
-            if len(body) + len(chunk) > 16384:
-                break
-            body.extend(chunk)
-        else:
-            try:
-                data = json.loads(body)
-                error = data.get("error", data)
-                codes = {str(error.get(key, "")).lower() for key in ("code", "type")}
-                retryable = bool(codes & {"insufficient_quota", "insufficient_balance", "balance_insufficient",
-                    "quota_exceeded", "credit_balance_too_low", "insufficient_credits"})
-            except (ValueError, AttributeError, TypeError):
-                pass
-    raise (UpstreamModelError if retryable else ModelError)(message)
+        try:
+            async for chunk in response_bytes(response, 16384):
+                body.extend(chunk)
+            data = json.loads(body)
+            error = data.get("error", data)
+            codes = {str(error.get(key, "")).lower() for key in ("code", "type")}
+            retryable = bool(codes & {"insufficient_quota", "insufficient_balance", "balance_insufficient",
+                "quota_exceeded", "credit_balance_too_low", "insufficient_credits"})
+            unavailable = False
+        except (ResponseReadError, ValueError, AttributeError, TypeError):
+            # Partial/unverified error bodies must not authorize failover.
+            pass
+    if not retryable:
+        raise ModelError(message)
+    raise (ProviderUnavailable if unavailable else UpstreamModelError)(message)
 
 
-async def run_model_chain(profiles, operation, report, *, timeout):
+class ModelCooldown:
+    """Skip a provider that just refused connections for a short interval."""
+
+    def __init__(self, seconds: float = 20.0, clock=time.monotonic):
+        self.seconds = seconds
+        self._clock = clock
+        self._until: dict[str, float] = {}
+
+    def available(self, profile_id: str) -> bool:
+        return self._until.get(profile_id, 0) <= self._clock()
+
+    def failure(self, profile_id: str) -> None:
+        self._until[profile_id] = self._clock() + self.seconds
+
+    def success(self, profile_id: str) -> None:
+        self._until.pop(profile_id, None)
+
+    def clear(self) -> None:
+        self._until.clear()
+
+    def snapshot(self) -> dict[str, float]:
+        now = self._clock()
+        return {key: round(value - now, 1) for key, value in self._until.items() if value > now}
+
+
+async def run_model_chain(profiles, operation, report, *, timeout, cooldown=None):
     attempts = []
+    profiles = list(profiles)
+    candidates = [profile for profile in profiles if cooldown is None or cooldown.available(profile.id)]
+    if not candidates:
+        # Never strand every request because every provider was recently down.
+        candidates = profiles
     try:
         async with asyncio.timeout(timeout):
-            for profile in profiles:
+            for profile in candidates:
                 check_ai_permission()
                 attempt = {"profile_id": profile.id, "status": "running"}
                 attempts.append(attempt)
@@ -122,11 +161,15 @@ async def run_model_chain(profiles, operation, report, *, timeout):
                     result = await operation(profile)
                 except UpstreamModelError as exc:
                     attempt.update(status="failed", message=str(exc))
+                    if cooldown is not None and isinstance(exc, ProviderUnavailable):
+                        cooldown.failure(profile.id)
                     continue
                 except ModelError as exc:
                     attempt.update(status="stopped", message=str(exc))
                     raise
                 attempt["status"] = "success"
+                if cooldown is not None:
+                    cooldown.success(profile.id)
                 report({"used_id": profile.id, "attempts": attempts})
                 return result
             if len(attempts) == 1:
@@ -136,6 +179,8 @@ async def run_model_chain(profiles, operation, report, *, timeout):
         message = str(exc) if isinstance(exc, BudgetError) else "模型切换等待超时，本次调用已停止。"
         if attempts and attempts[-1]["status"] == "running":
             attempts[-1].update(status="stopped", message=message)
+            if cooldown is not None and isinstance(exc, TimeoutError):
+                cooldown.failure(attempts[-1]["profile_id"])
         report({"used_id": "", "attempts": attempts})
         raise ModelError(message) from None
     except ModelError:
@@ -168,11 +213,13 @@ class ModelCollection(BaseModel):
 
 
 class ChatCompletionsProvider:
-    def __init__(self, settings: ModelSettings, transport: httpx.AsyncBaseTransport | None = None, *, budget=None, account_check=None):
+    def __init__(self, settings: ModelSettings, transport: httpx.AsyncBaseTransport | None = None, *, budget=None,
+                 account_check=None, client: httpx.AsyncClient | None = None):
         self.settings = settings
         self.transport = transport
         self.budget = budget or ModelBudget()
         self.account_check = account_check
+        self.client = client
 
     async def answer_with_search(self, question: str, search_service, *, history: list[dict] | None = None,
                                  conversation: ConversationView | None = None) -> str:
@@ -242,7 +289,7 @@ class ChatCompletionsProvider:
     async def answer(self, question: str, context: str | None = None, *, system: str | None = None,
                      search_service=None, history: list[dict] | None = None,
                      conversation: ConversationView | None = None, question_factory: Callable[[], str] | None = None) -> str:
-        headers = {}
+        headers = {"Accept-Encoding": "gzip, deflate"}
         if self.settings.api_key:
             headers["Authorization"] = "Bearer " + self.settings.api_key.get_secret_value()
         participant = conversation.participant if conversation is not None else None
@@ -252,8 +299,15 @@ class ChatCompletionsProvider:
         if self.settings.enable_thinking is not None:
             payload["enable_thinking"] = self.settings.enable_thinking
         try:
-            async with asyncio.timeout(60 if search_service is not None else 45), self.budget.slots, httpx.AsyncClient(timeout=httpx.Timeout(40, connect=10),
-                    transport=self.transport, follow_redirects=False) as client:
+            async with AsyncExitStack() as stack:
+                await stack.enter_async_context(asyncio.timeout(60 if search_service is not None else 45))
+                await stack.enter_async_context(self.budget.slots)
+                if self.client is None:
+                    client = await stack.enter_async_context(httpx.AsyncClient(
+                        timeout=httpx.Timeout(40, connect=10), transport=self.transport,
+                        follow_redirects=False, trust_env=False))
+                else:
+                    client = self.client
                 check_ai_permission()
                 if search_service is not None and self.account_check is not None:
                     await self.account_check()
@@ -287,20 +341,24 @@ class ChatCompletionsProvider:
                             f"模型服务返回 HTTP {response.status_code}，请检查模型名称与服务状态。"))
                     body = bytearray()
                     if response.status_code == 200:
-                        async for chunk in response.aiter_bytes():
-                            if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
-                                raise ModelError("模型返回内容过大，已停止读取。")
+                        async for chunk in response_bytes(response, MAX_RESPONSE_BYTES):
                             body.extend(chunk)
+        except ResponseReadError as exc:
+            message = "模型返回内容过大，已停止读取。" if str(exc) == "size" else "模型响应传输不完整或压缩格式无效，已停止读取。"
+            raise ModelError(message) from None
         except BudgetError as exc:
             raise ModelError(str(exc)) from None
         except (httpx.TimeoutException, TimeoutError):
-            raise UpstreamModelError("模型响应超时，请检查网络或稍后重试。") from None
+            raise ProviderUnavailable("模型响应超时，请检查网络或稍后重试。") from None
         except httpx.RequestError:
-            raise UpstreamModelError("无法连接模型服务，请检查 Base URL、网络和代理设置。") from None
+            raise ProviderUnavailable("无法连接模型服务，请检查 Base URL、网络和代理设置。") from None
+        usage = None
         try:
-            choice = json.loads(body)["choices"][0]
+            data = json.loads(body)
+            choice = data["choices"][0]
             if not isinstance(choice, dict):
                 raise ValueError
+            usage = data.get("usage")
             finish_reason = choice.get("finish_reason")
             if finish_reason in {"length", "max_tokens"}:
                 raise UpstreamModelError("模型输出因长度限制被截断，本次未采用。请缩短问题或记录范围后重试。")
@@ -311,6 +369,14 @@ class ChatCompletionsProvider:
                 raise ValueError
         except (ValueError, KeyError, IndexError, TypeError):
             raise UpstreamModelError("模型未返回有效文本，请确认服务支持 Chat Completions 接口。") from None
+        if isinstance(usage, dict):
+            try:
+                await self.budget.record_usage(
+                    usage.get("prompt_tokens"), usage.get("completion_tokens"),
+                    model=getattr(self.settings, "model", ""))
+            except Exception:
+                # Token statistics are optional and must never hide a valid answer.
+                pass
         return answer.strip()
 
 
@@ -324,8 +390,9 @@ class OrderedChatProvider(ChatCompletionsProvider):
 
     async def _run(self, operation):
         return await run_model_chain(self.profiles, lambda profile: operation(ChatCompletionsProvider(
-            profile, self.config.transport, budget=self.budget, account_check=self.account_check)),
-            self.config.record_route, timeout=120)
+            profile, self.config.transport, budget=self.budget, account_check=self.account_check,
+            client=self.config.http_client())),
+            self.config.record_route, timeout=120, cooldown=self.config.cooldown)
 
     async def answer(self, question, context=None, **kwargs):
         search = kwargs.get("search_service")
@@ -354,7 +421,9 @@ class ChatModelConfiguration:
         self.active_id = ""
         self.fallback_ids = []
         self.last_route = {}
+        self.cooldown = ModelCooldown()
         self.transport: httpx.AsyncBaseTransport | None = None
+        self._client: httpx.AsyncClient | None = None
         self.budget = ModelBudget()
         self._lock = asyncio.Lock()
         self.load_error = ""
@@ -390,6 +459,21 @@ class ChatModelConfiguration:
     def settings(self) -> ModelProfile | None:
         return self.models.get(self.active_id)
 
+    def http_client(self) -> httpx.AsyncClient | None:
+        # Tests and injected transports keep the per-call client so changing the
+        # transport takes effect immediately. Production reuses one connection pool.
+        if self.transport is not None:
+            return None
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(40, connect=10), follow_redirects=False, trust_env=False)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
     def profile_snapshot(self, profile: ModelProfile) -> dict:
         return {**profile.model_dump(exclude={"api_key"}), "has_api_key": bool(profile.api_key),
                 "active": profile.id == self.active_id}
@@ -401,7 +485,7 @@ class ChatModelConfiguration:
                 "has_api_key": bool(active and active.api_key), "configured": active is not None,
                 "active_id": self.active_id, "models": [self.profile_snapshot(p) for p in self.models.values()],
                 "fallback_ids": self.fallback_ids.copy(), "last_route": self.last_route,
-                "load_error": self.load_error}
+                "cooldown": self.cooldown.snapshot(), "load_error": self.load_error}
 
     def record_route(self, route):
         self.last_route = route
@@ -455,6 +539,7 @@ class ChatModelConfiguration:
             self.models, self.active_id = models, active_id
             self.fallback_ids = ordered
             self.last_route = {}
+            self.cooldown.clear()
             if refresh:
                 self.chatbot.provider = OrderedChatProvider(self)
                 self.chatbot.last_error = ""
@@ -471,7 +556,8 @@ class ChatModelConfiguration:
             settings = settings.model_copy(update={"api_key": previous.api_key})
         profile = ModelProfile(**settings.model_dump(exclude={"name"}),
                                name=settings.name or settings.model[:80], id=model_id or uuid4().hex)
-        provider = ChatCompletionsProvider(profile, self.transport, budget=self.budget, account_check=self._verify_group_account)
+        provider = ChatCompletionsProvider(profile, self.transport, budget=self.budget,
+                                           account_check=self._verify_group_account, client=self.http_client())
         answer = await provider.answer("你好，这是连接测试。请简短回复：模型连接正常。")
         models = {**self.models, profile.id: profile}
         active_id = self.active_id or profile.id
@@ -496,7 +582,8 @@ class ChatModelConfiguration:
     async def activate(self, model_id: str) -> dict:
         async with self._lock:
             profile = self._profile(model_id)
-            provider = ChatCompletionsProvider(profile, self.transport, budget=self.budget, account_check=self._verify_group_account)
+            provider = ChatCompletionsProvider(profile, self.transport, budget=self.budget,
+                                               account_check=self._verify_group_account, client=self.http_client())
             await provider.answer("你好，这是连接测试。请简短回复：模型连接正常。")
             await self._commit(self.models.copy(), model_id, provider)
             return {"saved": True, "settings": self.snapshot(), "test": {"ok": True, "message": "模型测试通过，已启用。"}}

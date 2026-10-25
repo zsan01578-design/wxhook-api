@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 import json
 import sqlite3
@@ -145,6 +146,8 @@ async def test_rescheduling_a_sent_reminder_is_explicit_and_preserves_task_ident
 async def test_daily_digest_does_not_send_before_precise_manual_deadline(tmp_path):
     async with context(tmp_path) as state:
         tools = state.app.state.group_tools
+        tools._scheduler.cancel()
+        await asyncio.gather(tools._scheduler, return_exceptions=True)
         task_id = await tools.save_task(GROUP, dict(title="稍后开会", owner="", due_at=(datetime.now(CHINA) + timedelta(minutes=1)).isoformat()))
         await tools.preferences(GROUP, reminders=True)
         await tools.due_reminders()

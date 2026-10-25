@@ -33,11 +33,7 @@ class CallbackStore:
 
     async def start(self) -> tuple[list[Delivery], int]:
         def initialize(db):
-            db.execute("""CREATE TABLE IF NOT EXISTS callback_receipts (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT, receipt_key TEXT NOT NULL UNIQUE,
-                event_json TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
-            db.execute("CREATE INDEX IF NOT EXISTS callback_receipts_state ON callback_receipts(state,sequence)")
+            # callback_receipts is part of the central management schema.
             interrupted = db.execute("UPDATE callback_receipts SET state='unknown',event_json='',updated_at=? WHERE state='dispatched'", (now(),)).rowcount
             db.execute("UPDATE callback_receipts SET state='failed',event_json='',updated_at=? WHERE state='pending' AND attempts>=?", (now(), self.max_attempts))
             deliveries = []

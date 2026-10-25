@@ -67,37 +67,13 @@ class GroupToolsService:
             # Keep capacity checks and updates serialized through its commit.
             return await finish_before_cancel(asyncio.to_thread(execute))
 
+    async def read(self, action):
+        return await self.groups.read(action)
+
     async def start(self):
         def initialize(db):
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS group_reports (
-                    group_id TEXT NOT NULL, kind TEXT NOT NULL, start_date TEXT NOT NULL,
-                    end_date TEXT NOT NULL, content TEXT NOT NULL, message_count INTEGER NOT NULL,
-                    sampled_count INTEGER NOT NULL, updated_at TEXT NOT NULL,
-                    PRIMARY KEY(group_id,kind,start_date));
-                CREATE TABLE IF NOT EXISTS group_tool_preferences (
-                    group_id TEXT PRIMARY KEY, auto_reports INTEGER NOT NULL DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS keyword_rules (
-                    id TEXT PRIMARY KEY, group_id TEXT NOT NULL, name TEXT NOT NULL,
-                    keyword TEXT NOT NULL, match_mode TEXT NOT NULL, action TEXT NOT NULL,
-                    reply TEXT NOT NULL, enabled INTEGER NOT NULL, cooldown INTEGER NOT NULL,
-                    last_triggered TEXT NOT NULL DEFAULT '');
-                CREATE INDEX IF NOT EXISTS keyword_rules_group ON keyword_rules(group_id);
-                CREATE TABLE IF NOT EXISTS keyword_hits (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL,
-                    rule_id TEXT NOT NULL, rule_name TEXT NOT NULL, message_key TEXT NOT NULL,
-                    sender TEXT NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL,
-                    created_at TEXT NOT NULL, UNIQUE(group_id,rule_id,message_key));
-                CREATE TABLE IF NOT EXISTS group_tasks (
-                    id TEXT PRIMARY KEY, group_id TEXT NOT NULL, title TEXT NOT NULL,
-                    owner TEXT NOT NULL, due_date TEXT NOT NULL, status TEXT NOT NULL,
-                    source_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-                CREATE INDEX IF NOT EXISTS group_tasks_group ON group_tasks(group_id,status,due_date);
-                CREATE UNIQUE INDEX IF NOT EXISTS group_tasks_source ON group_tasks(group_id,source_id,title)
-                    WHERE source_id IS NOT NULL;
-                CREATE TABLE IF NOT EXISTS group_tool_reminders (
-                    group_id TEXT PRIMARY KEY, reminder_date TEXT NOT NULL, status TEXT NOT NULL);
-            """)
+            # Base tables are created by GroupManager.start through core.schema;
+            # only columns added after the original schema are migrated here.
             columns = {row["name"] for row in db.execute("PRAGMA table_info(group_tool_preferences)")}
             if "task_reminders" not in columns:
                 db.execute("ALTER TABLE group_tool_preferences ADD COLUMN task_reminders INTEGER NOT NULL DEFAULT 0")
@@ -131,7 +107,7 @@ class GroupToolsService:
                 AND substr(message_key,41,1)=':'
                 AND substr(message_key,9,32) NOT GLOB '*[^0-9a-f]*'""")
         await self.db(initialize)
-        self._auto_report_groups = set(await self.db(lambda db: [row[0] for row in db.execute(
+        self._auto_report_groups = set(await self.read(lambda db: [row[0] for row in db.execute(
             "SELECT group_id FROM group_tool_preferences WHERE auto_reports=1")]))
         await self.reminders.start()
         self._worker = asyncio.create_task(self._run_rules())
@@ -170,10 +146,10 @@ class GroupToolsService:
                     t.due_at IS NULL,t.due_at,t.created_at DESC""", (group,))],
                 "today": datetime.now(CHINA).date().isoformat(),
             }
-        return await self.db(read)
+        return await self.read(read)
 
     async def enabled_groups(self):
-        return await self.db(lambda db: {row[0] for row in db.execute("SELECT DISTINCT group_id FROM keyword_rules WHERE enabled=1 UNION SELECT group_id FROM group_tool_preferences WHERE task_reminders=1")})
+        return await self.read(lambda db: {row[0] for row in db.execute("SELECT DISTINCT group_id FROM keyword_rules WHERE enabled=1 UNION SELECT group_id FROM group_tool_preferences WHERE task_reminders=1")})
 
     async def preferences(self, group, enabled=None, reminders=None):
         def save(db):
@@ -203,21 +179,21 @@ class GroupToolsService:
             identity_row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
             identity = identity_row[0] if identity_row else self.chatbot.identity
             where = """group_id=? AND type=1 AND timestamp>=? AND timestamp<?
-                AND (?='' OR sender<>?) AND COALESCE(json_extract(raw_json,'$.is_self'),'') NOT IN (1,'1','true')
+                AND (?='' OR sender<>?) AND is_self=0
                 AND NOT (?<>'' AND sender IN ('',?) AND (instr(content,?||char(58,10))=1 OR instr(content,?||char(58,13,10))=1))"""
             args = (group, int(datetime.combine(start, datetime.min.time(), CHINA).timestamp()),
                     int(datetime.combine(end, datetime.min.time(), CHINA).timestamp()), identity, identity, identity, group, identity, identity)
             total = db.execute("SELECT count(*) FROM chat_messages WHERE " + where, args).fetchone()[0]
             rows = db.execute("SELECT id,sender,timestamp,substr(content,1,1200) AS content FROM chat_messages WHERE " + where + " ORDER BY timestamp DESC,id DESC LIMIT ?", (*args, limit))
             return total, list(reversed([dict(row) for row in rows]))
-        return await self.db(read)
+        return await self.read(read)
 
     async def report(self, group, kind, force=False, automatic=False):
         start, end = report_period(kind)
         async with self._generation_lock:
             if not self.groups.allowed(group) or (automatic and not self.automatic_report_allowed(group)):
                 raise ModelError("此群的 AI 报表已暂停。")
-            cached = await self.db(lambda db: db.execute("SELECT * FROM group_reports WHERE group_id=? AND kind=? AND start_date=?", (group, kind, str(start))).fetchone())
+            cached = await self.read(lambda db: db.execute("SELECT * FROM group_reports WHERE group_id=? AND kind=? AND start_date=?", (group, kind, str(start))).fetchone())
             if cached and not force and cached["message_count"] > 0:
                 return dict(cached)
             count, messages = await self.text_window(group, start, end)
@@ -244,7 +220,7 @@ class GroupToolsService:
     async def scheduled_reports(self):
         if not self.models.settings or not self.chatbot.options.enabled:
             return
-        groups = await self.db(lambda db: [row[0] for row in db.execute("SELECT group_id FROM group_tool_preferences WHERE auto_reports=1")])
+        groups = await self.read(lambda db: [row[0] for row in db.execute("SELECT group_id FROM group_tool_preferences WHERE auto_reports=1")])
         for group in groups:
             if self.automatic_report_allowed(group):
                 for kind in ("week", "month"):
@@ -256,11 +232,11 @@ class GroupToolsService:
     async def due_reminders(self):
         await self.complete_due_tasks()
         today = datetime.now(CHINA).date().isoformat()
-        groups = await self.db(lambda db: [row[0] for row in db.execute("SELECT group_id FROM group_tool_preferences WHERE task_reminders=1")])
+        groups = await self.read(lambda db: [row[0] for row in db.execute("SELECT group_id FROM group_tool_preferences WHERE task_reminders=1")])
         for group in groups:
             if not self.groups.allowed(group):
                 continue
-            if not await self.chatbot.verify_account():
+            if not await self.chatbot.ensure_account():
                 continue
             def claim(db):
                 pref = db.execute("SELECT task_reminders FROM group_tool_preferences WHERE group_id=?", (group,)).fetchone()
@@ -300,7 +276,7 @@ class GroupToolsService:
                                 AND reminder_id IS NULL AND due_at<=?
                                 AND (status='open' OR (status='done' AND completion_reason='deadline'))
                                 ORDER BY due_at,id""", (group, *claimed_ids, datetime.now(CHINA).timestamp()))]
-                        current = await self.db(read)
+                        current = await self.read(read)
                         if not current:
                             return None
                         return ("待办到期提醒（已自动完成）：\n" + "\n".join(
@@ -371,11 +347,11 @@ class GroupToolsService:
         group = event_group(event)
         if not group or event.type != 1 or self.chatbot.own_message(event) or not self.groups.allowed(group, event.sender):
             return
-        rules = await self.db(lambda db: [dict(row) for row in db.execute("SELECT * FROM keyword_rules WHERE group_id=? AND enabled=1 ORDER BY name,id", (group,))])
+        rules = await self.read(lambda db: [dict(row) for row in db.execute("SELECT * FROM keyword_rules WHERE group_id=? AND enabled=1 ORDER BY name,id", (group,))])
         if not rules:
             return
         # Identification is required even for an account that only uses keyword replies.
-        if not await self.chatbot.verify_account() or self.chatbot.own_message(event):
+        if not await self.chatbot.ensure_account() or self.chatbot.own_message(event):
             return
         identity = self.chatbot.identity
         if identity and event.sender in ("", group) and event.content.startswith((identity + ":\n", identity + ":\r\n")):
@@ -430,7 +406,7 @@ class GroupToolsService:
             status = "skipped"
             if self.groups.allowed(group, sender):
                 async def still_enabled():
-                    current = await self.db(lambda db: db.execute(
+                    current = await self.read(lambda db: db.execute(
                         "SELECT enabled,reply,action,keyword,match_mode FROM keyword_rules WHERE group_id=? AND id=?", (group, rule_id)).fetchone())
                     return bool(current and current["enabled"] and current["action"] == "reply"
                                 and all(current[field] == rule[field] for field in ("reply", "keyword", "match_mode"))

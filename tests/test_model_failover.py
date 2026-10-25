@@ -261,3 +261,20 @@ async def test_history_is_refreshed_before_fallback_dispatch(tmp_path):
         assert await state.bot.provider.answer("current", conversation=conversation) == "ok"
         assert "private-old-message" in json.dumps(payloads[0])
         assert "private-old-message" not in json.dumps(payloads[1])
+
+
+async def test_service_failure_skips_a_provider_for_a_short_cooldown(tmp_path):
+    async with context(tmp_path) as state:
+        config, ids = await configure(state, "chat")
+        calls = []
+
+        def respond(request):
+            name = json.loads(request.content)["model"]
+            calls.append(name)
+            return httpx.Response(503) if name == "first" else completion("冷却后成功")
+
+        config.transport = httpx.MockTransport(respond)
+        await invoke(config, "chat")
+        await invoke(config, "chat")
+        assert calls == ["first", "second", "second"]
+        assert ids[0] in config.snapshot()["cooldown"]

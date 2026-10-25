@@ -6,7 +6,7 @@ from wxhook_api.core.config import Settings, load_settings
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = PROJECT_ROOT / "version.yml"
+CONFIG_PATH = PROJECT_ROOT / "version.example.yml"
 
 
 def test_existing_config_separates_hook_and_service_ports():

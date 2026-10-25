@@ -72,21 +72,19 @@ def parse_reminder(question: str, current: datetime) -> tuple[datetime, str] | N
 
 
 class ReminderService:
+    # A minute is enough for task completion and due delivery; the old
+    # one-second tick committed a no-op UPDATE even in an idle group.
+    MAX_IDLE_SECONDS = 60.0
+
     def __init__(self, tools):
         self.tools = tools
         self.chatbot = tools.chatbot
         self._worker = None
+        self._wake = asyncio.Event()
 
     async def start(self):
         def initialize(db):
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS member_reminders (
-                    id TEXT PRIMARY KEY, group_id TEXT NOT NULL, sender TEXT NOT NULL,
-                    message_key TEXT NOT NULL, title TEXT NOT NULL, due_at REAL NOT NULL,
-                    status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    UNIQUE(group_id,message_key));
-                CREATE INDEX IF NOT EXISTS member_reminders_due ON member_reminders(status,due_at);
-            """)
+            # member_reminders is part of the central management schema.
             db.execute("UPDATE member_reminders SET status='unknown',updated_at=? WHERE status='sending'", (now(),))
             for row in db.execute("SELECT * FROM member_reminders").fetchall():
                 self.tools.record_reminder_task(db, row)
@@ -98,11 +96,12 @@ class ReminderService:
             self._worker.cancel()
             await asyncio.gather(self._worker, return_exceptions=True)
             self._worker = None
+        self._wake.set()
 
     async def chat_command(self, question, group, sender, key):
         command = question.strip().rstrip("。！!？?")
         if command in ("我的提醒", "提醒列表"):
-            rows = await self.tools.db(lambda db: db.execute(
+            rows = await self.tools.read(lambda db: db.execute(
                 "SELECT * FROM member_reminders WHERE group_id=? AND sender=? AND status='pending' ORDER BY due_at LIMIT 20",
                 (group, sender)).fetchall())
             return "我的提醒（北京时间）：\n" + "\n".join(
@@ -141,6 +140,7 @@ class ReminderService:
                 self.tools.record_reminder_task(db, item)
                 return item
             item = await self.tools.db(save)
+            self._wake.set()
             due = datetime.fromtimestamp(item['due_at'], CHINA)
             return f"已记录提醒：{item['title']}\n北京时间 {due:%Y-%m-%d %H:%M:%S}，我会在本群@你。\n编号：{item['id']}"
         except ValueError as exc:
@@ -151,11 +151,11 @@ class ReminderService:
         if not self.chatbot._accepting:
             return
         timestamp = (current or datetime.now(CHINA)).timestamp()
-        rows = await self.tools.db(lambda db: db.execute(
+        rows = await self.tools.read(lambda db: db.execute(
             """SELECT r.* FROM member_reminders r JOIN group_tasks t ON t.reminder_id=r.id
                 WHERE r.status='pending' AND (t.status='open' OR (t.status='done' AND t.completion_reason='deadline'))
                 AND r.due_at<=? ORDER BY r.due_at LIMIT 100""", (timestamp,)).fetchall())
-        if not rows or not await self.chatbot.verify_account():
+        if not rows or not await self.chatbot.ensure_account():
             return
         for row in rows:
             group, sender = row['group_id'], row['sender']
@@ -183,11 +183,11 @@ class ReminderService:
                     continue
                 row = claimed
                 status = "skipped"
-                task_active = await self.tools.db(lambda db: db.execute("""SELECT 1 FROM group_tasks WHERE reminder_id=?
+                task_active = await self.tools.read(lambda db: db.execute("""SELECT 1 FROM group_tasks WHERE reminder_id=?
                     AND (status='open' OR (status='done' AND completion_reason='deadline'))""", (row['id'],)).fetchone())
                 if task_active and self.chatbot._accepting and self.chatbot.allowed(group, sender):
                     async def still_active():
-                        active = await self.tools.db(lambda db: db.execute("""SELECT 1 FROM group_tasks t
+                        active = await self.tools.read(lambda db: db.execute("""SELECT 1 FROM group_tasks t
                             JOIN member_reminders r ON r.id=t.reminder_id
                             WHERE r.id=? AND r.status='sending'
                             AND (t.status='open' OR (t.status='done' AND t.completion_reason='deadline'))""", (row['id'],)).fetchone())
@@ -221,8 +221,21 @@ class ReminderService:
 
     async def _run(self):
         while True:
+            self._wake.clear()
+            delay = self.MAX_IDLE_SECONDS
             try:
+                next_due = await self.tools.read(lambda db: db.execute(
+                    "SELECT min(due_at) FROM member_reminders WHERE status='pending'").fetchone()[0])
+                now = datetime.now(CHINA).timestamp()
+                if next_due is not None:
+                    delay = max(1.0, min(self.MAX_IDLE_SECONDS, next_due - now))
                 await self.due_reminders()
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 self.tools.last_error = "无法检查成员提醒，将稍后重试。"
-            await asyncio.sleep(1)
+                delay = 5.0
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass

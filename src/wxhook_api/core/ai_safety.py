@@ -64,6 +64,7 @@ class ModelBudget:
         if any(limit < 1 for limit in self.limits):
             raise ValueError("AI daily limits must be positive")
         self.slots = asyncio.Semaphore(2)
+        self._db_lock = asyncio.Lock()
 
     async def reserve(self):
         group, sender = _scope.get()
@@ -78,6 +79,10 @@ class ModelBudget:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with closing(sqlite3.connect(self.path, timeout=5)) as db, db:
                 db.execute("CREATE TABLE IF NOT EXISTS ai_usage(day TEXT,kind TEXT,group_id TEXT,sender TEXT,used INTEGER NOT NULL,PRIMARY KEY(day,kind,group_id,sender))")
+                db.execute("""CREATE TABLE IF NOT EXISTS ai_tokens(
+                    day TEXT NOT NULL, kind TEXT NOT NULL, group_id TEXT NOT NULL, model TEXT NOT NULL,
+                    prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL, requests INTEGER NOT NULL,
+                    PRIMARY KEY(day,kind,group_id,model))""")
                 db.execute("BEGIN IMMEDIATE")
                 for kind, gid, sid, limit in scopes:
                     row = db.execute("SELECT used FROM ai_usage WHERE day=? AND kind=? AND group_id=? AND sender=?", (day, kind, gid, sid)).fetchone()
@@ -87,9 +92,73 @@ class ModelBudget:
                     db.execute("INSERT INTO ai_usage VALUES (?,?,?,?,1) ON CONFLICT(day,kind,group_id,sender) DO UPDATE SET used=used+1", (day, kind, gid, sid))
                 db.execute("DELETE FROM ai_usage WHERE day<?", (day,))
         try:
-            await asyncio.to_thread(write)
+            async with self._db_lock:
+                await asyncio.to_thread(write)
         except (OSError, sqlite3.Error):
             raise BudgetError("无法保存模型调用额度，本次调用已停止，请检查磁盘权限和空间。") from None
+
+    @staticmethod
+    def _token_count(value):
+        return type(value) is int and 0 <= value <= 10_000_000
+
+    async def record_usage(self, prompt_tokens, completion_tokens, *, model: str = "", kind: str = "chat") -> None:
+        """Best-effort token accounting; it must never fail the answer."""
+        if not self._token_count(prompt_tokens) or not self._token_count(completion_tokens):
+            return
+        group, _ = _scope.get()
+        day = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        model = (model or "")[:128]
+        kind = (kind or "chat")[:16]
+
+        def write():
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(sqlite3.connect(self.path, timeout=5)) as db, db:
+                db.execute("""CREATE TABLE IF NOT EXISTS ai_tokens(
+                    day TEXT NOT NULL, kind TEXT NOT NULL, group_id TEXT NOT NULL, model TEXT NOT NULL,
+                    prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL, requests INTEGER NOT NULL,
+                    PRIMARY KEY(day,kind,group_id,model))""")
+                db.execute("""INSERT INTO ai_tokens VALUES (?,?,?,?,?,?,1)
+                    ON CONFLICT(day,kind,group_id,model) DO UPDATE SET
+                    prompt_tokens=prompt_tokens+excluded.prompt_tokens,
+                    completion_tokens=completion_tokens+excluded.completion_tokens,
+                    requests=requests+1""", (day, kind, group, model, prompt_tokens, completion_tokens))
+                db.execute("DELETE FROM ai_tokens WHERE day<?",
+                           ((datetime.now(timezone(timedelta(hours=8))).date() - timedelta(days=400)).isoformat(),))
+        try:
+            async with self._db_lock:
+                await asyncio.to_thread(write)
+        except (OSError, sqlite3.Error):
+            # Cost statistics are optional; the authoritative call quota was
+            # already reserved before the request.
+            pass
+
+    async def usage_snapshot(self, days: int = 7):
+        days = max(1, min(int(days), 90))
+        today = datetime.now(timezone(timedelta(hours=8))).date()
+        since = (today - timedelta(days=days - 1)).isoformat()
+
+        def read():
+            with closing(sqlite3.connect(self.path, timeout=5)) as db:
+                db.row_factory = sqlite3.Row
+                db.execute("""CREATE TABLE IF NOT EXISTS ai_tokens(
+                    day TEXT NOT NULL, kind TEXT NOT NULL, group_id TEXT NOT NULL, model TEXT NOT NULL,
+                    prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL, requests INTEGER NOT NULL,
+                    PRIMARY KEY(day,kind,group_id,model))""")
+                db.commit()
+                daily = [dict(row) for row in db.execute("""SELECT day,kind,sum(prompt_tokens) AS prompt_tokens,
+                    sum(completion_tokens) AS completion_tokens,sum(requests) AS requests
+                    FROM ai_tokens WHERE day>=? GROUP BY day,kind ORDER BY day,kind""", (since,))]
+                models = [dict(row) for row in db.execute("""SELECT model,sum(prompt_tokens) AS prompt_tokens,
+                    sum(completion_tokens) AS completion_tokens,sum(requests) AS requests
+                    FROM ai_tokens WHERE day>=? GROUP BY model
+                    ORDER BY sum(prompt_tokens+completion_tokens) DESC LIMIT 10""", (since,))]
+                totals = db.execute("""SELECT COALESCE(sum(prompt_tokens),0) AS prompt_tokens,
+                    COALESCE(sum(completion_tokens),0) AS completion_tokens,
+                    COALESCE(sum(requests),0) AS requests FROM ai_tokens WHERE day>=?""", (since,)).fetchone()
+                return {"days": days, "from": since, "to": today.isoformat(),
+                        "daily": daily, "models": models, "totals": dict(totals),
+                        "limits": {"daily": self.limits[0], "group": self.limits[1], "member": self.limits[2]}}
+        return await asyncio.to_thread(read)
 
 
 def bounded_records(records, limit=MAX_DATA_CHARS):

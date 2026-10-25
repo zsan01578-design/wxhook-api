@@ -1,4 +1,5 @@
-# Validated runtime snapshot: Windows / Python 3.12.14 / 2026-10-23.
+# Runtime snapshot: Windows / Python 3.12.14; originally validated 2026-10-23.
+# 2026-10-25: removed the unused pydantic-settings package.
 # Install into a fresh virtual environment; install this project with --no-deps afterward.
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.5
@@ -28,7 +29,6 @@ pillow==13.0.0
 propcache==0.5.4
 pydantic==2.14.1
 pydantic-core==2.50.1
-pydantic-settings==2.16.0
 python-dotenv==1.2.4
 pyyaml==6.0.3
 starlette==1.8.0

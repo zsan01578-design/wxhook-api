@@ -21,6 +21,7 @@ async def ready(request: Request):
     account_blocked = bool(state.groups.account_error)
     tasks = {"media": [state.douyin._worker, state.douyin._notice_worker],
              "group_tools": [state.group_tools._worker, state.group_tools._scheduler, state.group_tools.reminders._worker],
+             "retention": [state.retention._task],
              "summary": [state.chat_summary._task]}
     if state.chatbot.options.enabled:
         tasks["chatbot"] = state.chatbot._workers or [None]
