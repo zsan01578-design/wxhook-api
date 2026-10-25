@@ -19,14 +19,15 @@ import warnings
 
 import httpx
 from PIL import Image, ImageOps
-from pydantic import BaseModel, ConfigDict, SecretStr, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints, field_validator, model_validator
 
 from wxhook_api.core.ai_safety import BudgetError, check_ai_permission
 from wxhook_api.core.bounded_http import ResponseReadError, response_bytes
 from wxhook_api.core.config import PROJECT_ROOT
 from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.core.secrets import reveal_secret
-from wxhook_api.services.chat_model import ChatModelConfiguration, ModelError, ModelSettings
+from wxhook_api.services.chat_model import (ChatModelConfiguration, ModelError, ModelSettings,
+    UpstreamModelError, upstream_failure, validate_fallbacks, run_model_chain)
 from wxhook_api.services.media_cleanup import safe_child
 from wxhook_api.services.storage_guard import StorageGuard
 
@@ -77,12 +78,14 @@ class ImageModelCollection(BaseModel):
     version: int = 1
     active_id: str
     models: list[ImageModelProfile]
+    fallback_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def valid_active(self):
         ids = [profile.id for profile in self.models]
         if self.version != 1 or len(ids) != len(set(ids)) or self.active_id not in ids:
             raise ValueError("Invalid image model collection")
+        validate_fallbacks(self.active_id, ids, self.fallback_ids)
         return self
 
 
@@ -159,6 +162,7 @@ class ImagesProvider:
         headers = {"Accept-Encoding": "identity"}
         if self.settings.api_key:
             headers["Authorization"] = "Bearer " + self.settings.api_key.get_secret_value()
+        generation_accepted = False
         try:
             async with asyncio.timeout(180), self.budget.slots, httpx.AsyncClient(
                     timeout=httpx.Timeout(150, connect=10), transport=self.transport, follow_redirects=False) as client:
@@ -172,9 +176,11 @@ class ImagesProvider:
                                          headers=headers, json=payload) as response:
                     if response.status_code != 200:
                         hints = {400: "生图参数或描述被拒绝，请检查模型、尺寸及返回格式。", 401: "生图 API Key 无效。",
+                                 402: "生图账号余额不足，请充值或更换配置。",
                                  403: "没有生图模型访问权限。", 404: "生图接口或模型不存在，请检查 Base URL 和模型名称。",
                                  429: "生图请求受限或额度不足，请稍后重试。"}
-                        raise ModelError(hints.get(response.status_code, f"生图服务返回 HTTP {response.status_code}，请稍后重试。"))
+                        await upstream_failure(response, hints.get(response.status_code, f"生图服务返回 HTTP {response.status_code}，请稍后重试。"))
+                    generation_accepted = True
                     body = await self._body(response, MAX_JSON_BYTES)
                 try:
                     item = json.loads(body)["data"][0]
@@ -209,6 +215,10 @@ class ImagesProvider:
             raise ModelError(str(exc)) from None
         except ResponseReadError:
             raise ModelError("生图响应过大或传输不完整，已停止读取。") from None
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            if generation_accepted:
+                raise ModelError("图片已经生成，但下载连接失败，请检查图片服务或改用 Base64 返回格式。") from None
+            raise UpstreamModelError("无法连接生图服务，请检查地址、网络和代理设置。") from None
         except (TimeoutError, httpx.TimeoutException):
             raise ModelError("生图超时，请稍后重试；本次请求可能已计费。") from None
         except httpx.RequestError:
@@ -221,6 +231,8 @@ class ImageModelConfiguration:
     _profile = ChatModelConfiguration._profile
     _verify_group_account = ChatModelConfiguration._verify_group_account
     profile_snapshot = ChatModelConfiguration.profile_snapshot
+    set_fallbacks = ChatModelConfiguration.set_fallbacks
+    record_route = ChatModelConfiguration.record_route
 
     def __init__(self, chatbot, *, budget):
         self.chatbot, self.budget = chatbot, budget
@@ -228,6 +240,7 @@ class ImageModelConfiguration:
         self.output_dir = Path(os.getenv("WXHOOK_IMAGE_OUTPUT_DIR") or PROJECT_ROOT / "data" / "generated-images").resolve()
         self.storage = StorageGuard(self.output_dir)
         self.models, self.active_id, self.load_error = {}, "", ""
+        self.fallback_ids, self.last_route = [], {}
         self.transport = None
         self._lock = asyncio.Lock()
         if self.path.is_file():
@@ -242,6 +255,7 @@ class ImageModelConfiguration:
                     self._save(collection)
                 self.models = {profile.id: profile for profile in collection.models}
                 self.active_id = collection.active_id
+                self.fallback_ids = collection.fallback_ids
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 self.load_error = "无法读取本机生图配置，请重新保存。"
 
@@ -251,15 +265,19 @@ class ImageModelConfiguration:
 
     def snapshot(self):
         return {"configured": self.settings is not None, "active_id": self.active_id,
+                "fallback_ids": self.fallback_ids.copy(), "last_route": self.last_route,
                 "models": [self.profile_snapshot(p) for p in self.models.values()], "load_error": self.load_error}
 
     def provider(self, profile):
         return ImagesProvider(profile, transport=self.transport, budget=self.budget, account_check=self._verify_group_account)
 
-    async def _commit(self, models, active_id):
+    async def _commit(self, models, active_id, *, fallback_ids=None):
+        ordered = [key for key in (self.fallback_ids if fallback_ids is None else fallback_ids)
+                   if key in models and key != active_id]
         async def commit():
-            await asyncio.to_thread(self._save, ImageModelCollection(active_id=active_id, models=list(models.values())))
+            await asyncio.to_thread(self._save, ImageModelCollection(active_id=active_id, models=list(models.values()), fallback_ids=ordered))
             self.models, self.active_id, self.load_error = models, active_id, ""
+            self.fallback_ids, self.last_route = ordered, {}
         await finish_before_cancel(commit())
 
     async def save_profile(self, requested, model_id=None):
@@ -275,7 +293,7 @@ class ImageModelConfiguration:
             preview = await asyncio.to_thread(image_png, content, preview=True)
             await self._commit({**self.models, profile.id: profile}, self.active_id or profile.id)
             return {"saved": True, "profile": self.profile_snapshot(profile), "settings": self.snapshot(),
-                    "test": {"ok": True, "message": "生图测试通过，配置已保存。" + ("当前模型已启用。" if profile.id == self.active_id else "可在列表中启用。"),
+                    "test": {"ok": True, "message": "生图测试通过，配置已保存。" + ("当前模型已设为首选。" if profile.id == self.active_id else "可在列表设为首选或加入备用。"),
                              "preview": "data:image/png;base64," + base64.b64encode(preview).decode("ascii")}}
 
     async def activate(self, model_id):
@@ -320,7 +338,9 @@ class ImageModelConfiguration:
             raise ModelError("生图模型尚未配置，请在管理页的 AI 模型中添加生图模型。")
         try:
             await self.storage.ensure(MAX_IMAGE_BYTES)
-            content = await self.provider(self.settings).generate(prompt)
+            profiles = [self.models[key] for key in [self.active_id, *self.fallback_ids]]
+            content = await run_model_chain(profiles, lambda profile: self.provider(profile).generate(prompt),
+                                           self.record_route, timeout=240)
             check_ai_permission()
             await self.storage.ensure(len(content))
             path = await finish_before_cancel(asyncio.to_thread(self._store, content))

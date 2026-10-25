@@ -756,7 +756,9 @@ async function modelSettingsDialog(kind = "chat") {
   const imageTab = button("生图模型", `button small${isImage ? " primary" : ""}`, () => modelSettingsDialog("image"));
   chatTab.setAttribute("aria-pressed", String(!isImage)); imageTab.setAttribute("aria-pressed", String(isImage));
   categories.append(chatTab, imageTab); body.append(categories);
-  body.append(el("p", "modal-copy", isImage ? "生图模型独立于对话模型，可保存多个、启用一个。在已开启 @问答的群内，@机器人 后发送“生图：图片描述”“帮我画一个图：一只猫”“生成一张小猫的图片”或“生成星空壁纸”等绘图请求即可调用。每条消息最多回复一张图片。" : "可保存多个模型配置，同时只启用一个。新增和修改时自动测试；启用其他模型后，后续群内问答使用新模型。"));
+  body.append(el("p", "modal-copy", isImage ? "生图模型独立于对话模型。@机器人 后发送“生图：图片描述”“帮我画一个图：一只猫”等绘图请求即可调用，每条消息最多回复一张图片。" : "可保存多个第三方模型配置。新增和修改时自动测试；普通问答、语义识别和群资料分析共用此处的调用顺序。"));
+  body.append(el("p", "form-note", "每次请求从首选开始，余额不足、密钥失效、限流或服务不可用时按备用顺序切换，成功即停止。最多添加四个备用；未加入备用的配置不参与调用。"));
+  if (isImage) body.append(el("p", "form-note", "生图提交后超时、图片下载失败或返回无效图片时不自动重新生成，避免重复计费。各次尝试使用各自的模型、尺寸和密钥。"));
   if (isImage) body.append(el("p", "form-note", "复杂描述和“刚才那张再亮一点”等后续修改会使用当前对话模型提取需求，多一次对话调用并计入 AI 额度；语义不清时会追问。明确完整的“生图：描述”通常直接生成。实际图片尺寸以此处配置为准。"));
   if (!isImage) {
     const searchCard = el("section", "model-card"), searchCopy = el("div", "model-card-copy");
@@ -778,16 +780,44 @@ async function modelSettingsDialog(kind = "chat") {
   if (settings.load_error) body.append(el("p", "form-error", settings.load_error));
   if (!settings.models.length) body.append(el("p", "modal-copy", "尚未配置模型。添加第一个模型并测试通过后会自动启用。"));
   const result = el("div", "model-test-result"); result.hidden = true; result.setAttribute("role", "status");
-  for (const profile of settings.models) {
+  const fallbackIds = settings.fallback_ids || [];
+  const orderedIds = [settings.active_id, ...fallbackIds].filter(Boolean);
+  const profileName = id => settings.models.find(profile => profile.id === id)?.name || settings.models.find(profile => profile.id === id)?.model || "已删除配置";
+  if (orderedIds.length) body.append(el("p", "form-note", `调用顺序：${orderedIds.map((id, index) => `${index + 1}. ${profileName(id)}`).join(" → ")}`));
+  const route = settings.last_route;
+  if (route?.attempts?.length) {
+    body.append(el("p", "form-note", `最近完成的调用：${route.used_id ? `使用 ${profileName(route.used_id)}` : "未成功"}`));
+    for (const attempt of route.attempts) body.append(el("p", "form-note", `${profileName(attempt.profile_id)}：${attempt.status === "success" ? "成功" : attempt.message || "已停止"}`));
+  }
+  const orderedProfiles = [...orderedIds.map(id => settings.models.find(profile => profile.id === id)).filter(Boolean), ...settings.models.filter(profile => !orderedIds.includes(profile.id))];
+  const saveFallbacks = ids => modelAction(`/api/manage/${kind}-model/fallbacks`, "PUT", "正在保存备用顺序…", "备用顺序已保存", {fallback_ids: ids});
+  for (const profile of orderedProfiles) {
+    const fallbackIndex = fallbackIds.indexOf(profile.id);
     const card = el("section", "model-card"), heading = el("div", "model-card-heading"), copy = el("div", "model-card-copy");
     copy.append(el("h3", "", profile.name || profile.model), el("p", "", profile.model), el("p", "", profile.base_url));
-    heading.append(copy, el("span", profile.active ? "badge" : "badge gray", profile.active ? "已启用" : "未启用"));
+    heading.append(copy, el("span", profile.active || fallbackIndex >= 0 ? "badge" : "badge gray", profile.active ? "首选" : fallbackIndex >= 0 ? `备用 ${fallbackIndex + 1}` : "未参与"));
     const thinking = profile.enable_thinking === false ? "关闭" : profile.enable_thinking === true ? "开启" : "跟随默认";
     card.append(heading, el("p", "form-note", `${isImage ? `尺寸：${profile.size || "跟随默认"} · 返回：${profile.response_format === "default" ? "跟随默认" : profile.response_format}` : `深度思考：${thinking}`} · ${profile.has_api_key ? "已保存 API Key" : "未配置 API Key"}`));
     const actions = el("div", "model-card-actions");
     actions.append(button("查看 / 修改", "button small", () => modelEditorDialog(profile, kind)));
-    const activate = button(profile.active ? "当前使用" : "启用", "button small primary", () => modelAction(`${modelPath}/${profile.id}/activate`, "POST", isImage ? "正在切换生图模型…" : "正在测试并切换模型…", "模型已启用"));
+    const activate = button(profile.active ? "当前首选" : "设为首选", "button small primary", () => modelAction(`${modelPath}/${profile.id}/activate`, "POST", isImage ? "正在切换生图模型…" : "正在测试并切换模型…", "首选已更新；原首选需要手动加入备用"));
     activate.disabled = profile.active; actions.append(activate);
+    if (!profile.active) {
+      const backup = button(fallbackIndex < 0 ? "加入备用" : "移出备用", "button small", () => saveFallbacks(fallbackIndex < 0 ? [...fallbackIds, profile.id] : fallbackIds.filter(id => id !== profile.id)));
+      backup.disabled = fallbackIndex < 0 && fallbackIds.length >= 4;
+      actions.append(backup);
+      if (fallbackIndex >= 0) {
+        for (const [offset, label] of [[-1, "上移"], [1, "下移"]]) {
+          const move = button(label, "button small", () => {
+            const ids = [...fallbackIds], target = fallbackIndex + offset;
+            [ids[fallbackIndex], ids[target]] = [ids[target], ids[fallbackIndex]];
+            return saveFallbacks(ids);
+          });
+          move.disabled = fallbackIndex + offset < 0 || fallbackIndex + offset >= fallbackIds.length;
+          actions.append(move);
+        }
+      }
+    }
     const remove = button("删除", "button small danger", () => {
       const form = el("form");
       body.replaceChildren(el("p", "modal-copy", `确认删除「${profile.name || profile.model}」？此操作只删除本机保存的模型配置。`), form);
@@ -800,14 +830,14 @@ async function modelSettingsDialog(kind = "chat") {
     actions.append(remove); card.append(actions); body.append(card);
   }
   body.append(result);
-  async function modelAction(path, method, pending, success) {
+  async function modelAction(path, method, pending, success, payload = {}) {
     if (modelSaving || mutating) return;
     modelSaving = true; mutating = true;
     const controls = [...body.querySelectorAll("button"), $("close-modal")], disabled = controls.map(node => node.disabled);
     controls.forEach(node => node.disabled = true);
     result.hidden = false; result.className = "model-test-result"; result.textContent = pending;
     try {
-      const data = await api(path, {}, method, 60000);
+      const data = await api(path, payload, method, 60000);
       if (!data.saved) throw new Error(data.test?.message || "操作未完成，请重试。");
       await modelSettingsDialog(kind); toast(success); await refreshState(true);
     } catch (error) { result.classList.add("failed"); result.textContent = error.message; }

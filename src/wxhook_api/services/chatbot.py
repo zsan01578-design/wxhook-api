@@ -392,7 +392,7 @@ class MentionChatService:
             conversation = self.conversations.view(turn, provider,
                 allowed_sender=lambda member: self.groups.allowed(turn.group, member))
         try:
-            async with asyncio.timeout(60):
+            async with asyncio.timeout(getattr(provider, "request_timeout", 60)):
                 with_search = getattr(provider, "answer_with_search", None)
                 if callable(with_search):
                     if conversation is not None:

@@ -80,7 +80,7 @@ async page => {
   await page.waitForFunction(() => !modelSaving);
   assert(saves.at(-1).method === "PUT" && saves.at(-1).payload.api_key === null, "Editing did not use existing profile");
   await page.getByRole("button",{name:"返回模型列表",exact:true}).click();
-  await page.locator(".model-card").filter({has:page.getByRole("heading",{name:"修改后的生图模型",exact:true})}).getByRole("button",{name:"启用",exact:true}).click();
+  await page.locator(".model-card").filter({has:page.getByRole("heading",{name:"修改后的生图模型",exact:true})}).getByRole("button",{name:"设为首选",exact:true}).click();
   await page.waitForFunction(() => !modelSaving);
   assert(activeId === "2", "Switch did not activate image profile");
   await page.locator(".model-card").filter({has:page.getByRole("heading",{name:"主生图模型",exact:true})}).getByRole("button",{name:"删除",exact:true}).click();

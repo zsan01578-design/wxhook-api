@@ -10,7 +10,7 @@ from typing import Annotated, Callable
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel, ConfigDict, SecretStr, StrictBool, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, StringConstraints, field_validator, model_validator
 
 from wxhook_api.core.config import PROJECT_ROOT
 from wxhook_api.core.persistence import finish_before_cancel
@@ -73,6 +73,76 @@ class ModelError(RuntimeError):
     """Safe, user-facing diagnostics without upstream bodies or credentials."""
 
 
+class UpstreamModelError(ModelError):
+    """An upstream failure for which the next configured provider may be tried."""
+
+
+class ModelFallbacks(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fallback_ids: list[Annotated[str, StringConstraints(pattern=r"^[a-zA-Z0-9_-]{1,64}$")]] = Field(default_factory=list, max_length=4)
+
+
+def validate_fallbacks(active_id, models, fallback_ids):
+    if (len(fallback_ids) > 4 or len(set(fallback_ids)) != len(fallback_ids)
+            or active_id in fallback_ids or any(key not in models for key in fallback_ids)):
+        raise ValueError("备用配置须为最多四个不同的已保存配置，且不能包含首选配置")
+
+
+async def upstream_failure(response, message):
+    retryable = response.status_code in {401, 402, 403, 404, 408, 429} or 500 <= response.status_code <= 599
+    # Some compatible gateways report exhausted balances as HTTP 400. Inspect
+    # only bounded, machine-readable codes; never expose their response body.
+    if response.status_code == 400:
+        body = bytearray()
+        async for chunk in response.aiter_bytes():
+            if len(body) + len(chunk) > 16384:
+                break
+            body.extend(chunk)
+        else:
+            try:
+                data = json.loads(body)
+                error = data.get("error", data)
+                codes = {str(error.get(key, "")).lower() for key in ("code", "type")}
+                retryable = bool(codes & {"insufficient_quota", "insufficient_balance", "balance_insufficient",
+                    "quota_exceeded", "credit_balance_too_low", "insufficient_credits"})
+            except (ValueError, AttributeError, TypeError):
+                pass
+    raise (UpstreamModelError if retryable else ModelError)(message)
+
+
+async def run_model_chain(profiles, operation, report, *, timeout):
+    attempts = []
+    try:
+        async with asyncio.timeout(timeout):
+            for profile in profiles:
+                check_ai_permission()
+                attempt = {"profile_id": profile.id, "status": "running"}
+                attempts.append(attempt)
+                try:
+                    result = await operation(profile)
+                except UpstreamModelError as exc:
+                    attempt.update(status="failed", message=str(exc))
+                    continue
+                except ModelError as exc:
+                    attempt.update(status="stopped", message=str(exc))
+                    raise
+                attempt["status"] = "success"
+                report({"used_id": profile.id, "attempts": attempts})
+                return result
+            if len(attempts) == 1:
+                raise ModelError(attempts[0]["message"])
+            raise ModelError(f"按顺序尝试的 {len(attempts)} 个模型配置均不可用，请检查余额、密钥或服务状态。")
+    except (TimeoutError, BudgetError) as exc:
+        message = str(exc) if isinstance(exc, BudgetError) else "模型切换等待超时，本次调用已停止。"
+        if attempts and attempts[-1]["status"] == "running":
+            attempts[-1].update(status="stopped", message=message)
+        report({"used_id": "", "attempts": attempts})
+        raise ModelError(message) from None
+    except ModelError:
+        report({"used_id": "", "attempts": attempts})
+        raise
+
+
 class ModelDefinition(ModelSettings):
     name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=80)] = ""
 
@@ -86,12 +156,14 @@ class ModelCollection(BaseModel):
     version: int = 2
     active_id: str
     models: list[ModelProfile]
+    fallback_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def valid_active(self):
         ids = [model.id for model in self.models]
         if self.version != 2 or len(ids) != len(set(ids)) or self.active_id not in ids:
             raise ValueError("Invalid active model collection")
+        validate_fallbacks(self.active_id, ids, self.fallback_ids)
         return self
 
 
@@ -117,7 +189,7 @@ class ChatCompletionsProvider:
         try:
             return parse_image_intent(answer)
         except (ValueError, TypeError):
-            raise ModelError("无法确认本次生图需求，请重新 @并发送“生图：完整图片描述”。") from None
+            raise UpstreamModelError("无法确认本次生图需求，请重新 @并发送“生图：完整图片描述”。") from None
 
     @staticmethod
     def _messages(question: str, context: str | None, system: str | None,
@@ -206,6 +278,13 @@ class ChatCompletionsProvider:
                 payload["messages"] = self._messages(question, context, system, current_history, participant)
                 async with client.stream("POST", self.settings.base_url + "/chat/completions", headers=headers,
                                          json=payload) as response:
+                    if response.status_code != 200:
+                        hints = {401: "API Key 无效，请检查密钥。", 402: "模型账号余额不足，请充值或更换配置。",
+                                 403: "没有模型访问权限，请检查账号和密钥权限。",
+                                 404: "接口或模型不存在，请检查 Base URL（通常包含 /v1）和模型名称。",
+                                 429: "请求受限或额度不足，请检查模型服务的额度和限流。"}
+                        await upstream_failure(response, hints.get(response.status_code,
+                            f"模型服务返回 HTTP {response.status_code}，请检查模型名称与服务状态。"))
                     body = bytearray()
                     if response.status_code == 200:
                         async for chunk in response.aiter_bytes():
@@ -215,29 +294,56 @@ class ChatCompletionsProvider:
         except BudgetError as exc:
             raise ModelError(str(exc)) from None
         except (httpx.TimeoutException, TimeoutError):
-            raise ModelError("模型响应超时，请检查网络或稍后重试。") from None
+            raise UpstreamModelError("模型响应超时，请检查网络或稍后重试。") from None
         except httpx.RequestError:
-            raise ModelError("无法连接模型服务，请检查 Base URL、网络和代理设置。") from None
-        hints = {401: "API Key 无效，请检查密钥。", 403: "没有模型访问权限，请检查账号和密钥权限。",
-                 404: "接口或模型不存在，请检查 Base URL（通常包含 /v1）和模型名称。",
-                 429: "请求受限或额度不足，请检查模型服务的额度和限流。"}
-        if response.status_code != 200:
-            raise ModelError(hints.get(response.status_code, f"模型服务返回 HTTP {response.status_code}，请检查模型名称与服务状态。"))
+            raise UpstreamModelError("无法连接模型服务，请检查 Base URL、网络和代理设置。") from None
         try:
             choice = json.loads(body)["choices"][0]
             if not isinstance(choice, dict):
                 raise ValueError
             finish_reason = choice.get("finish_reason")
             if finish_reason in {"length", "max_tokens"}:
-                raise ModelError("模型输出因长度限制被截断，本次未采用。请缩短问题或记录范围后重试。")
+                raise UpstreamModelError("模型输出因长度限制被截断，本次未采用。请缩短问题或记录范围后重试。")
             if finish_reason not in {None, "stop"}:
                 raise ModelError("模型未完整结束回答，本次未采用。请检查模型配置后重试。")
             answer = choice["message"]["content"]
             if not isinstance(answer, str) or not answer.strip():
                 raise ValueError
         except (ValueError, KeyError, IndexError, TypeError):
-            raise ModelError("模型未返回有效文本，请确认服务支持 Chat Completions 接口。") from None
+            raise UpstreamModelError("模型未返回有效文本，请确认服务支持 Chat Completions 接口。") from None
         return answer.strip()
+
+
+class OrderedChatProvider(ChatCompletionsProvider):
+    request_timeout = 125
+
+    def __init__(self, config):
+        super().__init__(config.settings, config.transport, budget=config.budget, account_check=config._verify_group_account)
+        self.config = config
+        self.profiles = [config.models[key] for key in [config.active_id, *config.fallback_ids]]
+
+    async def _run(self, operation):
+        return await run_model_chain(self.profiles, lambda profile: operation(ChatCompletionsProvider(
+            profile, self.config.transport, budget=self.budget, account_check=self.account_check)),
+            self.config.record_route, timeout=120)
+
+    async def answer(self, question, context=None, **kwargs):
+        search = kwargs.get("search_service")
+        if search is not None:
+            class OnceSearch:
+                done = False
+                value = None
+
+                async def context(self, question):
+                    if not self.done:
+                        self.done = True
+                        self.value = await search.context(question)
+                    return self.value
+            kwargs["search_service"] = OnceSearch()
+        return await self._run(lambda provider: provider.answer(question, context, **kwargs))
+
+    async def extract_image_intent(self, question, *, context):
+        return await self._run(lambda provider: provider.extract_image_intent(question, context=context))
 
 
 class ChatModelConfiguration:
@@ -246,6 +352,8 @@ class ChatModelConfiguration:
         self.path = Path(os.getenv("WXHOOK_CHAT_MODEL_CONFIG") or PROJECT_ROOT / "data" / "chat-model.local.json")
         self.models: dict[str, ModelProfile] = {}
         self.active_id = ""
+        self.fallback_ids = []
+        self.last_route = {}
         self.transport: httpx.AsyncBaseTransport | None = None
         self.budget = ModelBudget()
         self._lock = asyncio.Lock()
@@ -273,7 +381,8 @@ class ChatModelConfiguration:
                     self._save(collection)
                 self.models = {model.id: model for model in collection.models}
                 self.active_id = collection.active_id
-                chatbot.provider = ChatCompletionsProvider(self.settings, budget=self.budget, account_check=self._verify_group_account)
+                self.fallback_ids = collection.fallback_ids
+                chatbot.provider = OrderedChatProvider(self)
             except (OSError, ValueError, TypeError):
                 self.load_error = "无法读取本机模型配置，请重新保存。"
 
@@ -291,7 +400,22 @@ class ChatModelConfiguration:
                 "enable_thinking": active.enable_thinking if active else None,
                 "has_api_key": bool(active and active.api_key), "configured": active is not None,
                 "active_id": self.active_id, "models": [self.profile_snapshot(p) for p in self.models.values()],
+                "fallback_ids": self.fallback_ids.copy(), "last_route": self.last_route,
                 "load_error": self.load_error}
+
+    def record_route(self, route):
+        self.last_route = route
+
+    async def set_fallbacks(self, fallback_ids):
+        async with self._lock:
+            if self.settings is None:
+                raise ModelError("请先保存一个首选模型配置。")
+            try:
+                validate_fallbacks(self.active_id, self.models, fallback_ids)
+            except ValueError as exc:
+                raise ModelError(str(exc)) from None
+            await self._commit(self.models.copy(), self.active_id, fallback_ids=fallback_ids)
+            return {"saved": True, "settings": self.snapshot()}
 
     def _save(self, collection: ModelCollection) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -322,12 +446,17 @@ class ChatModelConfiguration:
                 raise ModelError("无法确认微信账号或账号已变化，本次模型请求已停止。")
 
     async def _commit(self, models: dict[str, ModelProfile], active_id: str,
-                      provider: ChatCompletionsProvider | None = None) -> None:
+                      provider: ChatCompletionsProvider | None = None, *, fallback_ids=None) -> None:
+        ordered = [key for key in (self.fallback_ids if fallback_ids is None else fallback_ids)
+                   if key in models and key != active_id]
+        refresh = provider is not None or bool(self.fallback_ids) or fallback_ids is not None
         async def commit():
-            await asyncio.to_thread(self._save, ModelCollection(active_id=active_id, models=list(models.values())))
+            await asyncio.to_thread(self._save, ModelCollection(active_id=active_id, models=list(models.values()), fallback_ids=ordered))
             self.models, self.active_id = models, active_id
-            if provider is not None:
-                self.chatbot.provider = provider
+            self.fallback_ids = ordered
+            self.last_route = {}
+            if refresh:
+                self.chatbot.provider = OrderedChatProvider(self)
                 self.chatbot.last_error = ""
             self.load_error = ""
         await finish_before_cancel(commit())
@@ -352,7 +481,7 @@ class ChatModelConfiguration:
                 answer = answer.replace(item.api_key.get_secret_value(), "[已隐藏密钥]")
         return {"saved": True, "profile": self.profile_snapshot(profile), "settings": self.snapshot(),
                 "test": {"ok": True, "message": "模型连接正常，配置已保存。" +
-                         ("当前模型已启用。" if active_id == profile.id else "点击启用后用于群内问答。"), "reply": answer[:500]}}
+                         ("当前模型已设为首选。" if active_id == profile.id else "可在列表设为首选或加入备用。"), "reply": answer[:500]}}
 
     async def configure(self, requested: ModelSettings) -> dict:
         # Preserve the original single-model API for existing clients.
@@ -383,7 +512,7 @@ class ChatModelConfiguration:
     async def answer(self, question: str, *, system: str | None = None, group: str = "") -> str:
         if not self.settings:
             raise ModelError("AI 模型尚未配置。")
-        provider = ChatCompletionsProvider(self.settings, self.transport, budget=self.budget, account_check=self._verify_group_account)
+        provider = OrderedChatProvider(self)
         if group:
             with ai_scope(group):
                 return await provider.answer(question, system=system)
