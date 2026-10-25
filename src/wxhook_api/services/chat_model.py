@@ -326,14 +326,16 @@ class ChatCompletionsProvider:
                    "max_tokens": MAX_OUTPUT_TOKENS}
         if self.settings.enable_thinking is not None:
             payload["enable_thinking"] = self.settings.enable_thinking
+        timeout_seconds = 100 if image_data_url else (60 if search_service is not None else 45)
+        request_timeout = httpx.Timeout(100 if image_data_url else 40, connect=10)
         try:
             async with AsyncExitStack() as stack:
-                await stack.enter_async_context(asyncio.timeout(60 if search_service is not None else 45))
+                await stack.enter_async_context(asyncio.timeout(timeout_seconds))
                 await stack.enter_async_context(self.budget.slots)
                 if self.client is None:
                     client = await stack.enter_async_context(httpx.AsyncClient(
-                        timeout=httpx.Timeout(40, connect=10), transport=self.transport,
-                        follow_redirects=False, trust_env=False))
+                        timeout=request_timeout, transport=self.transport,
+                        follow_redirects=False, trust_env=True))
                 else:
                     client = self.client
                 check_ai_permission()
@@ -359,7 +361,7 @@ class ChatCompletionsProvider:
                     question = question_factory()
                 payload["messages"] = self._messages(question, context, system, current_history, participant, image_data_url)
                 async with client.stream("POST", self.settings.base_url + "/chat/completions", headers=headers,
-                                         json=payload) as response:
+                                         json=payload, timeout=request_timeout) as response:
                     if response.status_code != 200:
                         hints = {401: "API Key 无效，请检查密钥。", 402: "模型账号余额不足，请充值或更换配置。",
                                  403: "没有模型访问权限，请检查账号和密钥权限。",
@@ -377,7 +379,9 @@ class ChatCompletionsProvider:
         except BudgetError as exc:
             raise ModelError(str(exc)) from None
         except (httpx.TimeoutException, TimeoutError):
-            raise ProviderUnavailable("模型响应超时，请检查网络或稍后重试。") from None
+            message = ("图片分析超时（约 100 秒），请检查网络、模型是否支持图片输入，或改用视觉模型。"
+                       if image_data_url else "模型响应超时，请检查网络或稍后重试。")
+            raise ProviderUnavailable(message) from None
         except httpx.RequestError:
             raise ProviderUnavailable("无法连接模型服务，请检查 Base URL、网络和代理设置。") from None
         usage = None
@@ -420,12 +424,12 @@ class OrderedChatProvider(ChatCompletionsProvider):
         self.config = config
         self.profiles = [config.models[key] for key in [config.active_id, *config.fallback_ids]]
 
-    async def _run(self, operation, *, profiles=None):
+    async def _run(self, operation, *, profiles=None, timeout=120):
         selected = self.profiles if profiles is None else profiles
         return await run_model_chain(selected, lambda profile: operation(ChatCompletionsProvider(
             profile, self.config.transport, budget=self.budget, account_check=self.account_check,
             client=self.config.http_client())),
-            self.config.record_route, timeout=120, cooldown=self.config.cooldown)
+            self.config.record_route, timeout=timeout, cooldown=self.config.cooldown)
 
     async def answer(self, question, context=None, **kwargs):
         image_data_url = kwargs.get("image_data_url")
@@ -446,7 +450,9 @@ class OrderedChatProvider(ChatCompletionsProvider):
                         self.value = await search.context(question)
                     return self.value
             kwargs["search_service"] = OnceSearch()
-        return await self._run(lambda provider: provider.answer(question, context, **kwargs), profiles=profiles)
+        timeout = 180 if image_data_url else 120
+        return await self._run(lambda provider: provider.answer(question, context, **kwargs),
+                               profiles=profiles, timeout=timeout)
 
     async def extract_image_intent(self, question, *, context):
         return await self._run(lambda provider: provider.extract_image_intent(question, context=context))
@@ -505,7 +511,7 @@ class ChatModelConfiguration:
             return None
         if self._client is None:
             self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(40, connect=10), follow_redirects=False, trust_env=False)
+                timeout=httpx.Timeout(40, connect=10), follow_redirects=False, trust_env=True)
         return self._client
 
     async def aclose(self) -> None:

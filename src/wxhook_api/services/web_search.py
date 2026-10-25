@@ -129,7 +129,7 @@ class DeepSeekSearchProvider:
                         timeout=httpx.Timeout(self.timeout, connect=min(4.0, self.timeout)),
                         transport=self.transport,
                         follow_redirects=False,
-                        trust_env=False,
+                        trust_env=True,
                     ))
                 else:
                     client = self.client
@@ -316,7 +316,7 @@ class WebSearchConfiguration:
             return None
         if self._client is None:
             self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(10, connect=4), follow_redirects=False, trust_env=False)
+                timeout=httpx.Timeout(10, connect=4), follow_redirects=False, trust_env=True)
         return self._client
 
     async def aclose(self) -> None:

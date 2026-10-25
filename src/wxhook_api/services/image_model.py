@@ -172,7 +172,7 @@ class ImagesProvider:
                 if self.client is None:
                     client = await stack.enter_async_context(httpx.AsyncClient(
                         timeout=httpx.Timeout(150, connect=10), transport=self.transport,
-                        follow_redirects=False, trust_env=False))
+                        follow_redirects=False, trust_env=True))
                 else:
                     client = self.client
                 check_ai_permission()
@@ -203,7 +203,7 @@ class ImagesProvider:
                         async with AsyncExitStack() as download_stack:
                             if self.client is None:
                                 download = await download_stack.enter_async_context(httpx.AsyncClient(
-                                    timeout=30, transport=self.transport, follow_redirects=False, trust_env=False))
+                                    timeout=30, transport=self.transport, follow_redirects=False, trust_env=True))
                             else:
                                 download = self.client
                             for _ in range(4):
@@ -291,7 +291,7 @@ class ImageModelConfiguration:
             return None
         if self._client is None:
             self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(150, connect=10), follow_redirects=False, trust_env=False)
+                timeout=httpx.Timeout(150, connect=10), follow_redirects=False, trust_env=True)
         return self._client
 
     async def aclose(self) -> None:

@@ -547,7 +547,8 @@ class MentionChatService:
                 allowed_sender=lambda member: self.groups.allowed(turn.group, member))
         prompt = question.strip() or DEFAULT_VISION_QUESTION
         try:
-            async with asyncio.timeout(getattr(provider, "request_timeout", 120)):
+            # Vision inference plus upload needs more room than ordinary text.
+            async with asyncio.timeout(190):
                 answer = await provider.answer(prompt, system=VISION_SYSTEM, conversation=conversation,
                                                image_data_url=image_url)
             if not isinstance(answer, str) or not answer.strip():
