@@ -6,7 +6,7 @@ import pytest
 from tests.test_chatbot import context, event
 from wxhook_api.core.chatbot_config import ChatbotOptions
 from wxhook_api.services.chatbot import MentionChatService
-from wxhook_api.services.chat_model import ChatModelConfiguration, ChatCompletionsProvider, ModelDefinition
+from wxhook_api.services.chat_model import ChatModelConfiguration, ChatCompletionsProvider, ModelDefinition, ModelError, ModelSettings
 from wxhook_api.core.secrets import reveal_secret
 
 
@@ -342,3 +342,40 @@ async def test_usage_is_recorded_and_exposed_without_keys(tmp_path):
         assert response.status_code == 200
         assert response.json()["totals"]["completion_tokens"] == 14
         assert "test-private-key" not in response.text
+
+
+async def test_vision_payload_requires_an_enabled_vision_profile():
+    payloads = []
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        return completion("我看到图片了")
+
+    vision = ChatCompletionsProvider(
+        ModelSettings(base_url="https://model.test/v1", model="vision", supports_vision=True),
+        httpx.MockTransport(respond),
+    )
+    answer = await vision.answer("看看这张图", image_data_url="data:image/jpeg;base64,AAAA")
+    assert answer == "我看到图片了"
+    content = payloads[0]["messages"][0]["content"]
+    assert content[0] == {"type": "text", "text": "看看这张图"}
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+    text_only = ChatCompletionsProvider(
+        ModelSettings(base_url="https://model.test/v1", model="text-only"),
+        httpx.MockTransport(respond),
+    )
+    with pytest.raises(ModelError, match="图片理解"):
+        await text_only.answer("看看这张图", image_data_url="data:image/jpeg;base64,AAAA")
+
+
+async def test_vision_capability_is_saved_and_restored(tmp_path):
+    async with context(tmp_path) as state:
+        config = state.app.state.chat_model
+        config.transport = httpx.MockTransport(lambda request: completion())
+        response = await state.client.post("/api/manage/chat-model", json={**CONFIG, "supports_vision": True})
+        assert response.json()["saved"]
+        assert response.json()["profile"]["supports_vision"] is True
+        restarted = ChatModelConfiguration(MentionChatService(ChatbotOptions()))
+        assert restarted.settings.supports_vision is True

@@ -42,6 +42,7 @@ class ModelSettings(BaseModel):
     model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
     api_key: SecretStr | None = None
     enable_thinking: StrictBool | None = None
+    supports_vision: StrictBool = False
 
     @field_validator("base_url")
     @classmethod
@@ -213,6 +214,10 @@ class ModelCollection(BaseModel):
 
 
 class ChatCompletionsProvider:
+    @property
+    def supports_vision(self) -> bool:
+        return bool(self.settings.supports_vision)
+
     def __init__(self, settings: ModelSettings, transport: httpx.AsyncBaseTransport | None = None, *, budget=None,
                  account_check=None, client: httpx.AsyncClient | None = None):
         self.settings = settings
@@ -222,8 +227,9 @@ class ChatCompletionsProvider:
         self.client = client
 
     async def answer_with_search(self, question: str, search_service, *, history: list[dict] | None = None,
-                                 conversation: ConversationView | None = None) -> str:
-        return await self.answer(question, search_service=search_service, history=history, conversation=conversation)
+                                 conversation: ConversationView | None = None, image_data_url: str | None = None) -> str:
+        return await self.answer(question, search_service=search_service, history=history,
+                                 conversation=conversation, image_data_url=image_data_url)
 
     async def extract_image_intent(self, question: str, *, context: Callable[[], dict]) -> ImageIntent:
         def current_input():
@@ -239,8 +245,18 @@ class ChatCompletionsProvider:
             raise UpstreamModelError("无法确认本次生图需求，请重新 @并发送“生图：完整图片描述”。") from None
 
     @staticmethod
-    def _messages(question: str, context: str | None, system: str | None,
-                  history: list[dict] | None = None, participant: str | None = None) -> list[dict]:
+    def _content_chars(content) -> int:
+        if isinstance(content, str):
+            return len(content)
+        if isinstance(content, list):
+            return sum(len(part.get("text", "")) for part in content
+                       if isinstance(part, dict) and part.get("type") == "text")
+        return 0
+
+    @classmethod
+    def _messages(cls, question: str, context: str | None, system: str | None,
+                  history: list[dict] | None = None, participant: str | None = None,
+                  image_data_url: str | None = None) -> list[dict]:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -259,8 +275,14 @@ class ChatCompletionsProvider:
             if context:
                 frame["search_results"] = context
             question = json.dumps(frame, ensure_ascii=False)
-        messages.append({"role": "user", "content": question})
-        if sum(len(item["content"]) for item in messages) > MAX_INPUT_CHARS:
+        content = question
+        if image_data_url:
+            content = [
+                {"type": "text", "text": question},
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ]
+        messages.append({"role": "user", "content": content})
+        if sum(cls._content_chars(item["content"]) for item in messages) > MAX_INPUT_CHARS:
             raise ModelError("模型输入过长，请缩短问题或减少记录范围。")
         if history:
             if (len(history) % 2 or any(not isinstance(item, dict)
@@ -268,7 +290,7 @@ class ChatCompletionsProvider:
                     or not isinstance(item.get("content"), str) or not item["content"].strip()
                     for index, item in enumerate(history))):
                 raise ModelError("聊天上下文格式无效，请清空本群上下文后重试。")
-            remaining = MAX_INPUT_CHARS - sum(len(item["content"]) for item in messages)
+            remaining = MAX_INPUT_CHARS - sum(cls._content_chars(item["content"]) for item in messages)
             selected = []
             for index in range(len(history) - 2, -1, -2):
                 pair = []
@@ -288,13 +310,19 @@ class ChatCompletionsProvider:
 
     async def answer(self, question: str, context: str | None = None, *, system: str | None = None,
                      search_service=None, history: list[dict] | None = None,
-                     conversation: ConversationView | None = None, question_factory: Callable[[], str] | None = None) -> str:
+                     conversation: ConversationView | None = None, question_factory: Callable[[], str] | None = None,
+                     image_data_url: str | None = None) -> str:
+        if image_data_url:
+            if not self.settings.supports_vision:
+                raise ModelError("当前模型未启用图片理解，请在 AI 模型中勾选“支持图片理解”并选择支持图片输入的模型。")
+            if (not image_data_url.startswith("data:image/") or len(image_data_url) > 4 * 1024 * 1024):
+                raise ModelError("图片数据格式无效或过大，无法发送给模型。")
         headers = {"Accept-Encoding": "gzip, deflate"}
         if self.settings.api_key:
             headers["Authorization"] = "Bearer " + self.settings.api_key.get_secret_value()
         participant = conversation.participant if conversation is not None else None
         payload = {"model": self.settings.model, "messages": self._messages(question, context, system,
-                   None if conversation is not None else history, participant), "stream": False,
+                   None if conversation is not None else history, participant, image_data_url), "stream": False,
                    "max_tokens": MAX_OUTPUT_TOKENS}
         if self.settings.enable_thinking is not None:
             payload["enable_thinking"] = self.settings.enable_thinking
@@ -329,7 +357,7 @@ class ChatCompletionsProvider:
                 current_history = conversation.history() if conversation is not None else history
                 if question_factory is not None:
                     question = question_factory()
-                payload["messages"] = self._messages(question, context, system, current_history, participant)
+                payload["messages"] = self._messages(question, context, system, current_history, participant, image_data_url)
                 async with client.stream("POST", self.settings.base_url + "/chat/completions", headers=headers,
                                          json=payload) as response:
                     if response.status_code != 200:
@@ -383,18 +411,29 @@ class ChatCompletionsProvider:
 class OrderedChatProvider(ChatCompletionsProvider):
     request_timeout = 125
 
+    @property
+    def supports_vision(self) -> bool:
+        return any(profile.supports_vision for profile in self.profiles)
+
     def __init__(self, config):
         super().__init__(config.settings, config.transport, budget=config.budget, account_check=config._verify_group_account)
         self.config = config
         self.profiles = [config.models[key] for key in [config.active_id, *config.fallback_ids]]
 
-    async def _run(self, operation):
-        return await run_model_chain(self.profiles, lambda profile: operation(ChatCompletionsProvider(
+    async def _run(self, operation, *, profiles=None):
+        selected = self.profiles if profiles is None else profiles
+        return await run_model_chain(selected, lambda profile: operation(ChatCompletionsProvider(
             profile, self.config.transport, budget=self.budget, account_check=self.account_check,
             client=self.config.http_client())),
             self.config.record_route, timeout=120, cooldown=self.config.cooldown)
 
     async def answer(self, question, context=None, **kwargs):
+        image_data_url = kwargs.get("image_data_url")
+        profiles = None
+        if image_data_url:
+            profiles = [profile for profile in self.profiles if profile.supports_vision]
+            if not profiles:
+                raise ModelError("当前没有启用图片理解的对话模型，请在 AI 模型中勾选“支持图片理解”并配置支持图片输入的模型。")
         search = kwargs.get("search_service")
         if search is not None:
             class OnceSearch:
@@ -407,7 +446,7 @@ class OrderedChatProvider(ChatCompletionsProvider):
                         self.value = await search.context(question)
                     return self.value
             kwargs["search_service"] = OnceSearch()
-        return await self._run(lambda provider: provider.answer(question, context, **kwargs))
+        return await self._run(lambda provider: provider.answer(question, context, **kwargs), profiles=profiles)
 
     async def extract_image_intent(self, question, *, context):
         return await self._run(lambda provider: provider.extract_image_intent(question, context=context))

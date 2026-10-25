@@ -245,7 +245,7 @@ function renderFeatures(group) {
   const knownNames = chat?.mention_names?.length ? chat.mention_names : recent?.mention_names;
   const names = knownNames?.length ? knownNames.join("、") : "尚未识别";
   const route = {image: "生图模型", chat: "文字问答 / 群工具", image_intent: "正在理解生图需求", image_clarification: "生图需求待补充，已停止生成", image_intent_error: "生图意图识别失败，已停止生成", image_mention_unresolved: "绘图请求的 @位置无法确认，已停止调用模型"}[recent?.model_route];
-  const version = state.runtime?.revision ? `服务版本：${state.runtime.revision.slice(0, 12)} · 生图识别：${chat?.image_routing_version || "旧版，请更新重启"}` : "当前服务未返回版本信息，请运行一键更新重启。";
+  const version = state.runtime?.revision ? `服务版本：${state.runtime.revision.slice(0, 12)} · 图片路由：${chat?.image_routing_version || "旧版，请更新重启"}` : "当前服务未返回版本信息，请运行一键更新重启。";
   const intentSource = {semantic: "对话模型提取", command: "直接生图指令", keyword: "关键词识别"}[recent?.image_intent_source];
   diagnostic.append(el("p", "", `当前识别的机器人称呼：${names}\n${version}\n${recent ? `最近实时消息：${dateText(recent.received_at)}\n${route ? `处理分支：${route}\n` : ""}${intentSource ? `图片需求：${intentSource}，描述 ${recent.image_prompt_chars} 字\n` : ""}处理状态：${recent.message}` : "本次启动尚未收到此群的实时消息。历史同步显示的消息不会触发问答。"}`), button("配置机器人群内显示名", "button small", mentionSettingsDialog));
   const runtime = el("div", "feature-footnote"), media = state.media;
@@ -768,6 +768,9 @@ async function modelSettingsDialog(kind = "chat") {
   body.append(el("p", "form-note", "每次请求从首选开始，余额不足、密钥失效、限流或服务不可用时按备用顺序切换，成功即停止。最多添加四个备用；未加入备用的配置不参与调用。"));
   if (isImage) body.append(el("p", "form-note", "生图提交后超时、图片下载失败或返回无效图片时不自动重新生成，避免重复计费。各次尝试使用各自的模型、尺寸和密钥。"));
   if (isImage) body.append(el("p", "form-note", "复杂描述和“刚才那张再亮一点”等后续修改会使用当前对话模型提取需求，多一次对话调用并计入 AI 额度；语义不清时会追问。明确完整的“生图：描述”通常直接生成。实际图片尺寸以此处配置为准。"));
+  if (!isImage && !settings.models.some(profile => profile.supports_vision)) {
+    body.append(el("p", "form-note", "当前没有启用图片理解的对话模型。群成员发送的图片只会暂存，后续带图提问会提示先启用视觉模型。"));
+  }
   if (!isImage) {
     const searchCard = el("section", "model-card"), searchCopy = el("div", "model-card-copy");
     searchCopy.append(
@@ -823,7 +826,8 @@ async function modelSettingsDialog(kind = "chat") {
     copy.append(el("h3", "", profile.name || profile.model), el("p", "", profile.model), el("p", "", profile.base_url));
     heading.append(copy, el("span", profile.active || fallbackIndex >= 0 ? "badge" : "badge gray", profile.active ? "首选" : fallbackIndex >= 0 ? `备用 ${fallbackIndex + 1}` : "未参与"));
     const thinking = profile.enable_thinking === false ? "关闭" : profile.enable_thinking === true ? "开启" : "跟随默认";
-    card.append(heading, el("p", "form-note", `${isImage ? `尺寸：${profile.size || "跟随默认"} · 返回：${profile.response_format === "default" ? "跟随默认" : profile.response_format}` : `深度思考：${thinking}`} · ${profile.has_api_key ? "已保存 API Key" : "未配置 API Key"}`));
+    const vision = isImage ? "" : ` · 图片理解：${profile.supports_vision ? "开启" : "关闭"}`;
+    card.append(heading, el("p", "form-note", `${isImage ? `尺寸：${profile.size || "跟随默认"} · 返回：${profile.response_format === "default" ? "跟随默认" : profile.response_format}` : `深度思考：${thinking}${vision}`} · ${profile.has_api_key ? "已保存 API Key" : "未配置 API Key"}`));
     const actions = el("div", "model-card-actions");
     actions.append(button("查看 / 修改", "button small", () => modelEditorDialog(profile, kind)));
     const activate = button(profile.active ? "当前首选" : "设为首选", "button small primary", () => modelAction(`${modelPath}/${profile.id}/activate`, "POST", isImage ? "正在切换生图模型…" : "正在测试并切换模型…", "首选已更新；原首选需要手动加入备用"));
@@ -939,7 +943,14 @@ function modelEditorDialog(settings = {}, kind = "chat") {
     const option = el("option", "", text); option.value = value; thinking.append(option);
   });
   thinking.value = settings.enable_thinking === false ? "off" : settings.enable_thinking === true ? "on" : "default";
-  if (!isImage) form.append(thinkingLabel, thinking, el("p", "form-note", "硅基流动支持切换思考模式的模型可选择关闭；其他服务或不支持切换的模型请选择“跟随模型默认”。"));
+  let vision = null;
+  if (!isImage) {
+    const visionRow = el("label", "tool-check");
+    vision = el("input"); vision.type = "checkbox"; vision.checked = Boolean(settings.supports_vision);
+    visionRow.append(vision, document.createTextNode("支持图片理解（多模态）"));
+    form.append(thinkingLabel, thinking, el("p", "form-note", "硅基流动支持切换思考模式的模型可选择关闭；其他服务或不支持切换的模型请选择“跟随模型默认”。"));
+    form.append(visionRow, el("p", "form-note", "仅在服务商的对话模型支持图片输入时勾选。勾选后，群成员发送图片或针对最近图片的提问会把图片发送给该模型服务商。"));
+  }
   let size, responseFormat;
   if (isImage) {
     size = formField(form, "图片尺寸", "例如 1024x1024；也可填写 auto 或留空", settings.size ?? "1024x1024", false, 20);
@@ -962,7 +973,7 @@ function modelEditorDialog(settings = {}, kind = "chat") {
   form.addEventListener("submit", async event => {
     event.preventDefault(); if (modelSaving || mutating) return;
     modelSaving = true; mutating = true;
-    const fields = [name, base, model, thinking, key, size, responseFormat, ...body.querySelectorAll("button"), $("close-modal")].filter(Boolean);
+    const fields = [name, base, model, thinking, vision, key, size, responseFormat, ...body.querySelectorAll("button"), $("close-modal")].filter(Boolean);
     fields.forEach(node => node.disabled = true);
     footer.submit.textContent = "正在测试…"; footer.error.textContent = "";
     result.hidden = false; result.className = "model-test-result";
@@ -971,7 +982,8 @@ function modelEditorDialog(settings = {}, kind = "chat") {
       const path = `/api/manage/${kind}-models${settings.id ? `/${settings.id}` : ""}`;
       const payload = {name: name.value.trim(), base_url: base.value.trim(), model: model.value.trim(), api_key: key.value.trim() || null};
       if (isImage) Object.assign(payload, {size: size.value.trim(), response_format: responseFormat.value});
-      else payload.enable_thinking = thinking.value === "default" ? null : thinking.value === "on";
+      else Object.assign(payload, {enable_thinking: thinking.value === "default" ? null : thinking.value === "on",
+                                   supports_vision: Boolean(vision?.checked)});
       const data = await api(path, payload, settings.id ? "PUT" : "POST", isImage ? 210000 : 60000);
       if (!data.saved || !data.test?.ok) {
         result.classList.add("failed"); result.textContent = `测试未通过：${data.test?.message || "请检查模型配置。"}\n原有配置保持生效，请修改后重试。`;
@@ -981,6 +993,7 @@ function modelEditorDialog(settings = {}, kind = "chat") {
       $("modal-title").textContent = `修改${label}`;
       key.value = ""; key.placeholder = settings.has_api_key ? "已保存密钥；留空沿用，更换地址时请重新填写" : "本地免密服务可留空";
       base.value = settings.base_url; name.value = settings.name;
+      if (vision) vision.checked = Boolean(settings.supports_vision);
       result.classList.add("passed"); result.textContent = isImage ? data.test.message : `${data.test.message}\n模型回复：${data.test.reply}`;
       if (isImage && data.test.preview?.startsWith("data:image/png;base64,")) {
         const preview = el("img", "image-model-preview"); preview.alt = "生图连接测试预览";

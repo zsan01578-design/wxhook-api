@@ -38,7 +38,7 @@ def event(content="@机器人\u2005你好", msgid=1, **extra):
 
 
 @asynccontextmanager
-async def context(tmp_path, *, provider=None, bot_options=None, hook=None, profile=None, image_hook=None):
+async def context(tmp_path, *, provider=None, bot_options=None, hook=None, profile=None, image_hook=None, image_path=None):
     state = SimpleNamespace(sends=[], image_sends=[], hook_calls=[], media_calls=[])
 
     async def hook_response(request):
@@ -46,6 +46,9 @@ async def context(tmp_path, *, provider=None, bot_options=None, hook=None, profi
         state.hook_calls.append(request.url.path)
         if request.url.path == "/GetSelfProfile":
             return httpx.Response(200, json=profile or {"wxid": BOT, "nickname": "机器人"})
+        if request.url.path == "/GetMessagePic":
+            assert image_path is not None, "Unexpected image read"
+            return httpx.Response(200, json={"ret": 0, "data": {"path": str(image_path)}})
         if request.url.path == "/SendImgMsg" and image_hook is not None:
             state.image_sends.append(body)
             return await image_hook(request)

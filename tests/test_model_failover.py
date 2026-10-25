@@ -278,3 +278,31 @@ async def test_service_failure_skips_a_provider_for_a_short_cooldown(tmp_path):
         await invoke(config, "chat")
         assert calls == ["first", "second", "second"]
         assert ids[0] in config.snapshot()["cooldown"]
+
+
+async def test_image_request_uses_only_vision_capable_profiles(tmp_path):
+    async with context(tmp_path) as state:
+        config = state.app.state.chat_model
+        calls = []
+
+        def respond(request):
+            name = json.loads(request.content)["model"]
+            calls.append(name)
+            return completion("看到图片了")
+
+        config.transport = httpx.MockTransport(respond)
+        ids = []
+        for name, vision in (("text", False), ("vision", True)):
+            response = await state.client.post("/api/manage/chat-models", json={
+                "name": name, "model": name, "base_url": f"https://{name}.test/v1",
+                "api_key": f"{name}-key", "supports_vision": vision,
+            })
+            assert response.json()["saved"], response.text
+            ids.append(response.json()["profile"]["id"])
+        response = await state.client.put("/api/manage/chat-model/fallbacks", json={"fallback_ids": [ids[1]]})
+        assert response.json()["saved"]
+        assert config.active_id == ids[0]
+        calls.clear()
+        answer = await state.bot.provider.answer("看看这张图", image_data_url="data:image/jpeg;base64,AAAA")
+        assert answer == "看到图片了"
+        assert calls == ["vision"]
