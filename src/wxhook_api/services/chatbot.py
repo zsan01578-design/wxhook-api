@@ -139,6 +139,7 @@ class MentionChatService:
     def __init__(self, options: ChatbotOptions, *, provider: AnswerProvider | None = None):
         self.options = options
         self.provider = provider
+        self.vision_provider = None
         self.groups: GroupManager | None = None
         self.default_group_enabled: Callable[[str, str], bool] = lambda group, sender: False
         self._client: HookClient | None = None
@@ -180,7 +181,7 @@ class MentionChatService:
         return {"enabled": self.options.enabled, "answer_configured": self.provider is not None,
                 "image_routing_version": 4,
                 "image_configured": bool(self.image_service and self.image_service.settings),
-                "vision_configured": bool(self.provider and getattr(self.provider, "supports_vision", False)),
+                "vision_configured": bool(self.vision_provider or self.provider and getattr(self.provider, "supports_vision", False)),
                 "identity_known": bool(self._identity and self._profile_valid and not (self.groups and self.groups.account_error)), "mention_names": list(self._names),
                 "account_error": self.groups.account_error if self.groups else "",
                 "configured_mention_names": list(self.options.mention_names),
@@ -522,14 +523,12 @@ class MentionChatService:
 
     async def _vision_answer(self, question: str, group: str, *, sender: str | None,
                              image_msgid: str, turn: ConversationTurn | None) -> str:
-        if self.provider is None:
-            return "问答接口尚未配置，请联系管理员。"
+        provider = self.vision_provider or self.provider
+        if provider is None or hasattr(provider, "supports_vision") and not provider.supports_vision:
+            return "视觉模型尚未配置，请在 AI 模型 → 视觉模型中添加支持图片输入的模型。"
         if self._image_reader is None:
             self.last_error = "图片读取服务尚未初始化，请重启服务。"
             return self.last_error
-        provider = self.provider
-        if hasattr(provider, "supports_vision") and not provider.supports_vision:
-            return "当前对话模型未启用图片理解，请在 AI 模型中勾选“支持图片理解”并配置支持图片输入的模型。"
         try:
             image_url = await self._image_reader.data_url(image_msgid)
         except VisionError as exc:

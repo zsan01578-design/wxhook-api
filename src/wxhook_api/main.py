@@ -29,6 +29,7 @@ from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.chatbot import MentionChatService
 from wxhook_api.services.chat_model import ChatModelConfiguration
 from wxhook_api.services.image_model import ImageModelConfiguration
+from wxhook_api.services.vision_model import VisionModelConfiguration
 from wxhook_api.services.chat_summary import ChatSummaryService
 from wxhook_api.services.douyin_delivery import DouyinMessenger
 from wxhook_api.services.events import EventDispatcher
@@ -58,6 +59,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     douyin_worker.account_check = chatbot.verify_account
     douyin_worker.own_message_check = chatbot.own_message
     model_configuration = ChatModelConfiguration(chatbot)
+    vision_configuration = VisionModelConfiguration(chatbot, budget=model_configuration.budget)
     image_configuration = ImageModelConfiguration(chatbot, budget=model_configuration.budget)
     chatbot.image_service = image_configuration
     search_configuration = WebSearchConfiguration(chatbot=chatbot)
@@ -75,6 +77,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
         "parse-video.local.yml": parser_config_path(),
         "chat-model.local.json": model_configuration.path, "search.local.json": search_configuration.path,
         "image-model.local.json": image_configuration.path,
+        "vision-model.local.json": vision_configuration.path,
     }, databases={"ai-usage.sqlite3": model_configuration.budget.path})
 
     async def archive_event(event):
@@ -116,6 +119,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             cleanup.push_async_callback(close_owned_client)
             cleanup.push_async_callback(model_configuration.aclose)
             cleanup.push_async_callback(image_configuration.aclose)
+            cleanup.push_async_callback(vision_configuration.aclose)
             cleanup.push_async_callback(search_configuration.aclose)
             cleanup.callback(setattr, douyin_worker, "messenger", None)
             cleanup.push_async_callback(douyin_worker.stop)
@@ -163,6 +167,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.chatbot = chatbot
     app.state.chat_model = model_configuration
     app.state.image_model = image_configuration
+    app.state.vision_model = vision_configuration
     app.state.chat_search = search_configuration
     app.state.chat_summary = summary_service
     app.state.group_tools = tools_service

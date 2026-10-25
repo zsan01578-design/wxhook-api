@@ -459,9 +459,11 @@ class OrderedChatProvider(ChatCompletionsProvider):
 
 
 class ChatModelConfiguration:
-    def __init__(self, chatbot: MentionChatService):
+    def __init__(self, chatbot: MentionChatService, *, path: Path | None = None,
+                 provider_attribute: str = "provider", budget=None):
         self.chatbot = chatbot
-        self.path = Path(os.getenv("WXHOOK_CHAT_MODEL_CONFIG") or PROJECT_ROOT / "data" / "chat-model.local.json")
+        self.provider_attribute = provider_attribute
+        self.path = path if path is not None else Path(os.getenv("WXHOOK_CHAT_MODEL_CONFIG") or PROJECT_ROOT / "data" / "chat-model.local.json")
         self.models: dict[str, ModelProfile] = {}
         self.active_id = ""
         self.fallback_ids = []
@@ -469,7 +471,7 @@ class ChatModelConfiguration:
         self.cooldown = ModelCooldown()
         self.transport: httpx.AsyncBaseTransport | None = None
         self._client: httpx.AsyncClient | None = None
-        self.budget = ModelBudget()
+        self.budget = budget if budget is not None else ModelBudget()
         self._lock = asyncio.Lock()
         self.load_error = ""
         if self.path.is_file():
@@ -496,7 +498,7 @@ class ChatModelConfiguration:
                 self.models = {model.id: model for model in collection.models}
                 self.active_id = collection.active_id
                 self.fallback_ids = collection.fallback_ids
-                chatbot.provider = OrderedChatProvider(self)
+                setattr(chatbot, self.provider_attribute, OrderedChatProvider(self))
             except (OSError, ValueError, TypeError):
                 self.load_error = "无法读取本机模型配置，请重新保存。"
 
@@ -586,7 +588,7 @@ class ChatModelConfiguration:
             self.last_route = {}
             self.cooldown.clear()
             if refresh:
-                self.chatbot.provider = OrderedChatProvider(self)
+                setattr(self.chatbot, self.provider_attribute, OrderedChatProvider(self))
                 self.chatbot.last_error = ""
             self.load_error = ""
         await finish_before_cancel(commit())
@@ -603,7 +605,7 @@ class ChatModelConfiguration:
                                name=settings.name or settings.model[:80], id=model_id or uuid4().hex)
         provider = ChatCompletionsProvider(profile, self.transport, budget=self.budget,
                                            account_check=self._verify_group_account, client=self.http_client())
-        answer = await provider.answer("你好，这是连接测试。请简短回复：模型连接正常。")
+        answer = await self._test_provider(provider)
         models = {**self.models, profile.id: profile}
         active_id = self.active_id or profile.id
         await self._commit(models, active_id, provider if active_id == profile.id else None)
@@ -620,6 +622,9 @@ class ChatModelConfiguration:
             name = self.settings.name if self.settings else ""
             return await self._configure(ModelDefinition(**requested.model_dump(), name=name), self.active_id or None)
 
+    async def _test_provider(self, provider: ChatCompletionsProvider) -> str:
+        return await provider.answer("你好，这是连接测试。请简短回复：模型连接正常。")
+
     async def save_profile(self, requested: ModelDefinition, model_id: str | None = None) -> dict:
         async with self._lock:
             return await self._configure(requested, model_id)
@@ -629,7 +634,7 @@ class ChatModelConfiguration:
             profile = self._profile(model_id)
             provider = ChatCompletionsProvider(profile, self.transport, budget=self.budget,
                                                account_check=self._verify_group_account, client=self.http_client())
-            await provider.answer("你好，这是连接测试。请简短回复：模型连接正常。")
+            await self._test_provider(provider)
             await self._commit(self.models.copy(), model_id, provider)
             return {"saved": True, "settings": self.snapshot(), "test": {"ok": True, "message": "模型测试通过，已启用。"}}
 

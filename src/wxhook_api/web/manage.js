@@ -68,7 +68,7 @@ async function api(path, body, method = "POST", timeout = 15000) {
   if (!response.ok) {
     let message = data.error?.message || data.detail || `请求失败（${response.status}）`;
     if (path.includes("/tools") && (Array.isArray(message) || data.error?.code === "validation_error")) message = "请检查必填内容、日期与冷却时间，固定回复规则需要填写回复内容。";
-    else if (Array.isArray(message) || (data.error?.code === "validation_error" && !path.startsWith("/api/manage/chat-model") && path !== "/api/manage/chatbot/mentions")) message = "请检查填写内容：群 ID 须以 @chatroom 结尾，成员须填写真实 wxid，名称最多 80 字。";
+    else if (Array.isArray(message) || (data.error?.code === "validation_error" && !["/api/manage/chat-model", "/api/manage/vision-model"].some(prefix => path.startsWith(prefix)) && path !== "/api/manage/chatbot/mentions")) message = "请检查填写内容：群 ID 须以 @chatroom 结尾，成员须填写真实 wxid，名称最多 80 字。";
     throw new Error(message);
   }
   return data;
@@ -747,31 +747,34 @@ function mentionSettingsDialog() {
 }
 
 async function modelSettingsDialog(kind = "chat") {
-  const isImage = kind === "image";
-  kind = isImage ? "image" : "chat";
+  kind = ["image", "vision"].includes(kind) ? kind : "chat";
+  const isImage = kind === "image", isVision = kind === "vision", isChat = kind === "chat";
+  const modelLabel = isImage ? "生图" : isVision ? "视觉" : "对话";
   const modelPath = `/api/manage/${kind}-models`;
-  const body = showDialog(isImage ? "AI 生图模型" : "AI 对话模型", "机器人 · 全部群共用");
+  const body = showDialog(`AI ${modelLabel}模型`, "机器人 · 全部群共用");
   const version = dialogVersion;
   const active = () => $("modal").open && dialogVersion === version;
   body.append(el("p", "form-note", "正在读取模型配置…"));
   let settings, search;
-  try { [settings, search] = await Promise.all([api(`/api/manage/${kind}-model`), isImage ? Promise.resolve(null) : api("/api/manage/chat-search")]); }
+  try { [settings, search] = await Promise.all([api(`/api/manage/${kind}-model`), isChat ? api("/api/manage/chat-search") : Promise.resolve(null)]); }
   catch (error) { if (active()) body.replaceChildren(el("p", "form-error", error.message)); return; }
   if (!active()) return;
   body.replaceChildren();
   const categories = el("div", "model-card-actions");
-  const chatTab = button("对话模型", `button small${isImage ? "" : " primary"}`, () => modelSettingsDialog());
+  const chatTab = button("对话模型", `button small${isChat ? " primary" : ""}`, () => modelSettingsDialog());
   const imageTab = button("生图模型", `button small${isImage ? " primary" : ""}`, () => modelSettingsDialog("image"));
-  chatTab.setAttribute("aria-pressed", String(!isImage)); imageTab.setAttribute("aria-pressed", String(isImage));
-  categories.append(chatTab, imageTab); body.append(categories);
-  body.append(el("p", "modal-copy", isImage ? "生图模型独立于对话模型。@机器人 后发送“生图：图片描述”“帮我画一个图：一只猫”等绘图请求即可调用，每条消息最多回复一张图片。" : "可保存多个第三方模型配置。新增和修改时自动测试；普通问答、语义识别和群资料分析共用此处的调用顺序。"));
+  const visionTab = button("视觉模型", `button small${isVision ? " primary" : ""}`, () => modelSettingsDialog("vision"));
+  chatTab.setAttribute("aria-pressed", String(isChat)); imageTab.setAttribute("aria-pressed", String(isImage)); visionTab.setAttribute("aria-pressed", String(isVision));
+  categories.append(chatTab, imageTab, visionTab); body.append(categories);
+  body.append(el("p", "modal-copy", isImage ? "生图模型独立于对话模型。@机器人 后发送“生图：图片描述”“帮我画一个图：一只猫”等绘图请求即可调用，每条消息最多回复一张图片。" : isVision ? "视觉模型独立配置，专门用于图片理解和最近图片的追问。群成员发送图片并 @机器人，或发图后 @机器人 提问，即可调用。普通文字问答继续使用对话模型。" : "可保存多个第三方模型配置。新增和修改时自动测试；普通问答、语义识别和群资料分析共用此处的调用顺序。"));
+  if (isVision) body.append(el("p", "form-note", "图片会压缩后发送给视觉模型服务商；与对话、生图共用每日 AI 调用额度。未配置独立视觉模型时，兼容原有已开启图片理解的对话模型。"));
   body.append(el("p", "form-note", "每次请求从首选开始，余额不足、密钥失效、限流或服务不可用时按备用顺序切换，成功即停止。最多添加四个备用；未加入备用的配置不参与调用。"));
   if (isImage) body.append(el("p", "form-note", "生图提交后超时、图片下载失败或返回无效图片时不自动重新生成，避免重复计费。各次尝试使用各自的模型、尺寸和密钥。"));
   if (isImage) body.append(el("p", "form-note", "复杂描述和“刚才那张再亮一点”等后续修改会使用当前对话模型提取需求，多一次对话调用并计入 AI 额度；语义不清时会追问。明确完整的“生图：描述”通常直接生成。实际图片尺寸以此处配置为准。"));
-  if (!isImage && !settings.models.some(profile => profile.supports_vision)) {
-    body.append(el("p", "form-note", "当前没有启用图片理解的对话模型。群成员发送的图片只会暂存，后续带图提问会提示先启用视觉模型。"));
+  if (isChat) {
+    body.append(el("p", "form-note", "图片理解可在“视觉模型”中单独添加和管理；原有已开启图片理解的对话模型仍可兼容使用。"));
   }
-  if (!isImage) {
+  if (isChat) {
     const searchCard = el("section", "model-card"), searchCopy = el("div", "model-card-copy");
     searchCopy.append(
       el("h3", "", "联网搜索"),
@@ -800,7 +803,7 @@ async function modelSettingsDialog(kind = "chat") {
     });
   }
   const toolbar = el("div", "model-list-toolbar");
-  toolbar.append(el("span", "form-note", `已保存 ${settings.models.length} 个${isImage ? "生图" : "对话"}模型`), button(isImage ? "添加生图模型" : "添加模型", "button primary", () => modelEditorDialog({}, kind)));
+  toolbar.append(el("span", "form-note", `已保存 ${settings.models.length} 个${modelLabel}模型`), button(isChat ? "添加模型" : `添加${modelLabel}模型`, "button primary", () => modelEditorDialog({}, kind)));
   body.append(toolbar);
   if (settings.load_error) body.append(el("p", "form-error", settings.load_error));
   if (!settings.models.length) body.append(el("p", "modal-copy", "尚未配置模型。添加第一个模型并测试通过后会自动启用。"));
@@ -867,7 +870,7 @@ async function modelSettingsDialog(kind = "chat") {
     controls.forEach(node => node.disabled = true);
     result.hidden = false; result.className = "model-test-result"; result.textContent = pending;
     try {
-      const data = await api(path, payload, method, 60000);
+      const data = await api(path, payload, method, isVision ? 120000 : 60000);
       if (!data.saved) throw new Error(data.test?.message || "操作未完成，请重试。");
       await modelSettingsDialog(kind); toast(success); await refreshState(true);
     } catch (error) { result.classList.add("failed"); result.textContent = error.message; }
@@ -926,12 +929,12 @@ function searchSettingsDialog(settings = {}) {
   });
 }
 function modelEditorDialog(settings = {}, kind = "chat") {
-  const isImage = kind === "image", label = isImage ? "生图模型" : " AI 模型";
+  const isImage = kind === "image", isVision = kind === "vision", label = isImage ? "生图模型" : isVision ? "视觉模型" : " AI 模型";
   const body = showDialog(`${settings.id ? "修改" : "添加"}${label}`, "机器人 · 全部群共用");
   body.append(button("返回模型列表", "text-link", () => modelSettingsDialog(kind)));
   const form = el("form");
-  form.append(el("p", "modal-copy", isImage ? "保存时实际生成一张测试图片，可能产生服务商费用，最多等待 3 分钟。测试通过后保存，第一个生图模型自动启用；切换已保存的生图模型不会额外生成测试图片。" : "保存时自动发送一条测试消息。第一个模型会自动启用；其他新增模型测试通过后，可在列表中点击启用。"));
-  const name = formField(form, "配置名称", isImage ? "例如：主生图模型" : "例如：硅基流动 DeepSeek", settings.name || "", false, 80);
+  form.append(el("p", "modal-copy", isImage ? "保存时实际生成一张测试图片，可能产生服务商费用，最多等待 3 分钟。测试通过后保存，第一个生图模型自动启用；切换已保存的生图模型不会额外生成测试图片。" : isVision ? "保存时自动发送一张内置色块图片，测试图片输入与文字回复，可能产生服务商费用。测试通过后保存，第一个视觉模型自动启用。" : "保存时自动发送一条测试消息。第一个模型会自动启用；其他新增模型测试通过后，可在列表中点击启用。"));
+  const name = formField(form, "配置名称", isImage ? "例如：主生图模型" : isVision ? "例如：主视觉模型" : "例如：硅基流动 DeepSeek", settings.name || "", false, 80);
   const base = formField(form, "Base URL", "例如 https://api.siliconflow.cn/v1", settings.base_url, false, 2048);
   base.required = true; base.type = "url";
   form.append(el("p", "form-note", isImage ? "使用兼容 OpenAI Images 的服务，地址通常以 /v1 结尾；也可填写完整的 /images/generations 地址。" : "使用兼容 OpenAI 的 Chat Completions 服务，地址通常以 /v1 结尾。"));
@@ -945,11 +948,14 @@ function modelEditorDialog(settings = {}, kind = "chat") {
   thinking.value = settings.enable_thinking === false ? "off" : settings.enable_thinking === true ? "on" : "default";
   let vision = null;
   if (!isImage) {
-    const visionRow = el("label", "tool-check");
-    vision = el("input"); vision.type = "checkbox"; vision.checked = Boolean(settings.supports_vision);
-    visionRow.append(vision, document.createTextNode("支持图片理解（多模态）"));
     form.append(thinkingLabel, thinking, el("p", "form-note", "硅基流动支持切换思考模式的模型可选择关闭；其他服务或不支持切换的模型请选择“跟随模型默认”。"));
-    form.append(visionRow, el("p", "form-note", "仅在服务商的对话模型支持图片输入时勾选。勾选后，群成员发送图片或针对最近图片的提问会把图片发送给该模型服务商。"));
+    if (isVision) form.append(el("p", "form-note", "请选择支持 OpenAI 兼容 image_url 图片输入的多模态模型。群内图片及相关上下文会发送给此服务商。"));
+    else {
+      const visionRow = el("label", "tool-check");
+      vision = el("input"); vision.type = "checkbox"; vision.checked = Boolean(settings.supports_vision);
+      visionRow.append(vision, document.createTextNode("支持图片理解（多模态）"));
+      form.append(visionRow, el("p", "form-note", "兼容原有图片理解配置。建议在“视觉模型”中单独添加；未配置独立视觉模型时，带图提问可使用此处已开启图片理解的模型。"));
+    }
   }
   let size, responseFormat;
   if (isImage) {
@@ -977,14 +983,14 @@ function modelEditorDialog(settings = {}, kind = "chat") {
     fields.forEach(node => node.disabled = true);
     footer.submit.textContent = "正在测试…"; footer.error.textContent = "";
     result.hidden = false; result.className = "model-test-result";
-    result.textContent = isImage ? "正在生成测试图片，请稍候（最多 3 分钟）…" : "正在向模型发送测试消息，请稍候…";
+    result.textContent = isImage ? "正在生成测试图片，请稍候（最多 3 分钟）…" : isVision ? "正在发送内置图片测试视觉模型，请稍候…" : "正在向模型发送测试消息，请稍候…";
     try {
       const path = `/api/manage/${kind}-models${settings.id ? `/${settings.id}` : ""}`;
       const payload = {name: name.value.trim(), base_url: base.value.trim(), model: model.value.trim(), api_key: key.value.trim() || null};
       if (isImage) Object.assign(payload, {size: size.value.trim(), response_format: responseFormat.value});
       else Object.assign(payload, {enable_thinking: thinking.value === "default" ? null : thinking.value === "on",
-                                   supports_vision: Boolean(vision?.checked)});
-      const data = await api(path, payload, settings.id ? "PUT" : "POST", isImage ? 210000 : 60000);
+                                   supports_vision: isVision || Boolean(vision?.checked)});
+      const data = await api(path, payload, settings.id ? "PUT" : "POST", isImage ? 210000 : isVision ? 120000 : 60000);
       if (!data.saved || !data.test?.ok) {
         result.classList.add("failed"); result.textContent = `测试未通过：${data.test?.message || "请检查模型配置。"}\n原有配置保持生效，请修改后重试。`;
         return;

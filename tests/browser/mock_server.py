@@ -15,6 +15,7 @@ for name, filename in {
     "WXHOOK_MANAGEMENT_DB": "management.sqlite3",
     "WXHOOK_CHAT_MODEL_CONFIG": "model.json",
     "WXHOOK_IMAGE_MODEL_CONFIG": "image-model.json",
+    "WXHOOK_VISION_MODEL_CONFIG": "vision-model.json",
     "WXHOOK_SEARCH_CONFIG": "search.json",
     "WXHOOK_CHATBOT_CONFIG": "chatbot.yml",
     "WXHOOK_DOUYIN_CONFIG": "media.yml",

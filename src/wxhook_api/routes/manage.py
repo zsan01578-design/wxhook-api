@@ -9,6 +9,7 @@ from wxhook_api.core.chatbot_config import MentionSettings
 from wxhook_api.services.groups import GROUP_PATTERN
 from wxhook_api.services.chat_model import ModelDefinition, ModelError, ModelSettings, ModelFallbacks
 from wxhook_api.services.image_model import ImageModelDefinition
+from wxhook_api.services.vision_model import VisionModelDefinition
 from wxhook_api.services.web_search import SearchError, SearchSettings
 from wxhook_api.services.wechat_sync import SyncError, records
 from wxhook_api.services.chat_summary import local_date
@@ -100,6 +101,36 @@ async def get_ai_usage(request: Request, days: int = Query(7, ge=1, le=90)):
 @router.get("/image-model")
 async def get_image_model(request: Request):
     return JSONResponse(request.app.state.image_model.snapshot(), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/vision-model")
+async def get_vision_model(request: Request):
+    return JSONResponse(request.app.state.vision_model.snapshot(), headers={"Cache-Control": "no-store"})
+
+
+@router.put("/vision-model/fallbacks")
+async def configure_vision_fallbacks(body: ModelFallbacks, request: Request):
+    return await model_mutation(request.app.state.vision_model.set_fallbacks(body.fallback_ids))
+
+
+@router.post("/vision-models")
+async def add_vision_model(body: VisionModelDefinition, request: Request):
+    return await model_mutation(request.app.state.vision_model.save_profile(body))
+
+
+@router.put("/vision-models/{model_id}")
+async def update_vision_model(model_id: str, body: VisionModelDefinition, request: Request):
+    return await model_mutation(request.app.state.vision_model.save_profile(body, model_id))
+
+
+@router.post("/vision-models/{model_id}/activate")
+async def activate_vision_model(model_id: str, request: Request):
+    return await model_mutation(request.app.state.vision_model.activate(model_id))
+
+
+@router.delete("/vision-models/{model_id}")
+async def delete_vision_model(model_id: str, request: Request):
+    return await model_mutation(request.app.state.vision_model.delete(model_id))
 
 
 @router.put("/chat-model/fallbacks")

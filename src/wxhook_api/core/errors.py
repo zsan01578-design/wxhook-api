@@ -50,7 +50,8 @@ def install_exception_handlers(app: FastAPI) -> None:
                 return JSONResponse(status_code=422, content={"error": {"code": "validation_error", "message": "Hook callback fields are incompatible", "fields": result["fields"]}})
         if invalid_json:
             return invalid_json_response()
-        if request.url.path in {"/api/manage/chat-model", "/api/manage/chat-search"} or request.url.path.startswith("/api/manage/chat-models"):
+        if (request.url.path in {"/api/manage/chat-model", "/api/manage/chat-search"}
+                or request.url.path.startswith(("/api/manage/chat-models", "/api/manage/vision-model"))):
             return error_response(422, "validation_error", "请检查名称、Base URL、模型名称、额度及 API Key 格式；远程地址须为 HTTPS，HTTP 仅允许本机，不能包含账号或查询参数。")
         if request.url.path.startswith("/api/manage/image-model"):
             return error_response(422, "validation_error", "请检查生图名称、Base URL、模型名称、尺寸、返回格式及 API Key；远程地址须为 HTTPS，尺寸为宽x高（边长不超过 4096）、auto 或留空。")
