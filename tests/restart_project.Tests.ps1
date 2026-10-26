@@ -30,7 +30,7 @@ $script:current.CreationDate = 'reused-pid'
 Assert-True (-not (Test-SameProcess $snapshot[0])) 'PID reuse was accepted.'
 Write-Output 'PID reuse protection: passed'
 
-function Invoke-Checked { param($File, $Arguments) throw 'simulated failed pull' }
+function Update-ProjectCode { param($Root) throw 'simulated failed pull' }
 function Stop-ProjectService { param($Root) throw 'BUG: stopped service after failed pull' }
 function Start-ProjectService { param($Root, $Python, $Configuration) throw 'BUG: started service after failed pull' }
 try { Restart-Project $root; throw 'Expected failed pull' } catch {
@@ -62,12 +62,12 @@ $script:events = @()
 $script:failDependencies = $false
 function Invoke-Checked {
     param($File, $Arguments)
-    if ($File -eq 'git.exe') { $script:events += 'pull' }
     if (($Arguments -join ' ') -eq '-m pip check') {
         $script:events += 'dependencies'
         if ($script:failDependencies) { throw 'simulated dependency failure' }
     }
 }
+function Update-ProjectCode { param($Root) $script:events += 'pull' }
 function Stop-ProjectService { param($Root) $script:events += 'stop' }
 function Start-ProjectService { param($Root, $Python, $Configuration) $script:events += 'start' }
 Restart-Project $scratch

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([switch]$Local)
 
 $ErrorActionPreference = 'Stop'
@@ -7,6 +7,120 @@ function Invoke-Checked {
     param([string]$File, [string[]]$Arguments)
     & $File @Arguments | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Command failed ($LASTEXITCODE): $File" }
+}
+
+function Invoke-UpdateGit {
+    param([string]$Root, [string[]]$Arguments)
+    # Drain both streams concurrently: redirected Git output can fill either
+    # pipe. A child-only locale keeps diagnostics stable without changing Git
+    # configuration, credentials, or the calling console's encoding.
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = 'git.exe'
+    $start.WorkingDirectory = $Root
+    $start.Arguments = ($Arguments -join ' ')
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    $start.StandardErrorEncoding = New-Object System.Text.UTF8Encoding($false)
+    $start.EnvironmentVariables['LC_ALL'] = 'C'
+    $start.EnvironmentVariables['LANG'] = 'C'
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $start
+    try {
+        if (-not $process.Start()) { throw 'Cannot start git.exe.' }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        return [pscustomobject]@{ExitCode=$process.ExitCode; Stdout=$stdout.Result; Stderr=$stderr.Result}
+    } finally { $process.Dispose() }
+}
+
+function Get-GitUpdateDiagnostic {
+    param([string]$Text)
+    $files = New-Object 'System.Collections.Generic.List[object]'
+    $kind = ''
+    foreach ($line in ($Text -split '\r?\n')) {
+        if ($line -match 'local changes to the following files would be overwritten') { $kind = 'modified'; continue }
+        if ($line -match 'untracked working tree files would be (overwritten|removed)') { $kind = 'untracked'; continue }
+        if ($line -match '(?:unable to (?:create file|unlink old)|cannot (?:stat|unlink)|unable to read) [''"](?<path>.+?)[''"]') {
+            $files.Add([pscustomobject]@{Kind='access'; Path=$Matches['path']})
+            $kind = ''; continue
+        }
+        if ($line -match 'unable to create file (?<path>.+): (?:Permission denied|Invalid argument)') {
+            $files.Add([pscustomobject]@{Kind='access'; Path=$Matches['path']})
+            $kind = ''; continue
+        }
+        if ($kind -and $line -match '^\s+\S') {
+            $path = $line.Trim()
+            if ($path.StartsWith('"')) {
+                try { $path = ConvertFrom-Json $path -ErrorAction Stop } catch { }
+            }
+            $files.Add([pscustomobject]@{Kind=$kind; Path=$path})
+        } else { $kind = '' }
+    }
+    $reason = 'unknown'
+    if ($files.Count) { $reason = 'files' }
+    elseif ($Text -match 'unmerged files|unresolved conflict|needs merge') { $reason = 'unmerged' }
+    elseif ($Text -match 'not possible to fast-forward|divergent branches|refusing to merge unrelated histories') { $reason = 'diverged' }
+    elseif ($Text -match 'Authentication failed|Permission denied \(publickey\)|could not read Username|terminal prompts disabled|repository .*not found|repository not found|returned error: (401|403)') { $reason = 'authentication' }
+    elseif ($Text -match 'Could not resolve host|Failed to connect|Connection (was )?(reset|timed out|refused)|Recv failure|SSL (certificate|connect)|unable to access|Operation timed out') { $reason = 'network' }
+    elseif ($Text -match 'index\.lock|another git process') { $reason = 'locked' }
+    return [pscustomobject]@{Reason=$reason; Files=@($files.ToArray())}
+}
+
+function Update-ProjectCode {
+    param([string]$Root)
+    $result = Invoke-UpdateGit $Root @('-c', 'core.quotepath=false', '-c', 'color.ui=false', 'pull', '--ff-only')
+    # Preserve the original Git output as well as the readable summary.
+    if ($result.Stdout) { Write-Host $result.Stdout.TrimEnd() }
+    if ($result.Stderr) { Write-Host $result.Stderr.TrimEnd() }
+    if ($result.ExitCode -eq 0) { return }
+
+    $detail = Get-GitUpdateDiagnostic ($result.Stdout + "`n" + $result.Stderr)
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    $lines.Add('[更新失败] 拉取代码未完成，旧服务保持运行。')
+    switch ($detail.Reason) {
+        'files' {
+            $lines.Add('原因：本地文件冲突或读写失败。出问题的文件（相对于项目目录）：')
+            foreach ($file in $detail.Files) {
+                $label = switch ($file.Kind) {
+                    'modified' { '本地已修改' }
+                    'untracked' { '本地未跟踪，同名文件阻止更新' }
+                    default { '文件读写失败' }
+                }
+                $lines.Add("  [$label] $($file.Path)")
+            }
+            $lines.Add('处理：先备份并核对以上文件的本地改动，再更新。脚本不会自动删除或覆盖这些文件。')
+        }
+        'network' { $lines.Add('原因：连接远程仓库失败，请检查网络、代理或稍后重试。本次没有确认到文件冲突。') }
+        'authentication' { $lines.Add('原因：仓库认证失败或没有访问权限，请检查 Git 登录和仓库地址。') }
+        'diverged' { $lines.Add('原因：本地与远程提交无法直接快进，请先核对提交历史并处理分叉。') }
+        'locked' { $lines.Add('原因：Git 工作区被锁定，请确认是否有其他 Git 更新任务正在运行。') }
+        'unmerged' {
+            $lines.Add('原因：工作区存在尚未解决的合并冲突，请先处理以下文件：')
+            try {
+                $unmerged = Invoke-UpdateGit $Root @('-c', 'core.quotepath=false', 'diff', '--name-only', '--diff-filter=U')
+                if ($unmerged.ExitCode -eq 0 -and $unmerged.Stdout.Trim()) {
+                    foreach ($path in ($unmerged.Stdout.TrimEnd() -split '\r?\n')) { $lines.Add("  [未解决合并冲突] $path") }
+                } else { $lines.Add('未能列出文件，请运行 git status 查看。') }
+            } catch { $lines.Add('未能列出文件，请运行 git status 查看。') }
+        }
+        default { $lines.Add('原因：Git 返回失败，未能识别具体文件，请查看上方 Git 原始错误。') }
+    }
+    $lines.Add('只想重启现有版本，可双击 start-local.bat。')
+    foreach ($line in $lines) { Write-Host $line -ForegroundColor Yellow }
+    # Store filenames and diagnosis only, never file contents or raw output
+    # that might contain credential-bearing repository URLs.
+    try {
+        $report = Join-Path $Root 'data\update-last-error.log'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $report) -Force | Out-Null
+        $stamp = [DateTimeOffset]::Now.ToString('yyyy-MM-dd HH:mm:ss zzz')
+        [IO.File]::WriteAllLines($report, @("时间：$stamp", "项目目录：$Root") + $lines.ToArray(), (New-Object System.Text.UTF8Encoding($true)))
+        Write-Host "错误摘要已保存：$report"
+    } catch { Write-Host '无法写入错误摘要文件，请复制上面的提示信息。' -ForegroundColor Yellow }
+    throw "Git update failed (exit $($result.ExitCode)). See the file list and diagnosis above."
 }
 
 function Get-ProjectProcesses {
@@ -111,7 +225,7 @@ function Restart-Project {
     param([string]$Root, [switch]$SkipUpdate)
     Write-Host '[1/4] Updating code...'
     if (-not $SkipUpdate) {
-        Invoke-Checked 'git.exe' @('pull', '--ff-only')
+        Update-ProjectCode $Root
     } else { Write-Host 'Local restart selected; Git update skipped.' }
 
     Write-Host '[2/4] Preparing dependencies; the old service is still running...'

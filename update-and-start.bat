@@ -9,6 +9,8 @@ if /I "%~1"=="--local" (
 )
 if errorlevel 1 (
     echo [ERROR] Restart failed. See the details above.
+    echo If Git update failed, copy the diagnosis and file list shown above.
+    echo Error summary, when available: "%~dp0data\update-last-error.log"
     pause
     exit /b 1
 )
