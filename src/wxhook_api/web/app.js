@@ -14,14 +14,13 @@ function feedback(id, text, kind = "") {
 }
 
 async function api(path, body) {
-  const options = { cache: "no-store", signal: AbortSignal.timeout(15000) };
+  const options = { cache: "no-store" };
   if (body !== undefined) {
     options.method = "POST";
     options.headers = { "Content-Type": "application/json" };
     options.body = JSON.stringify(body);
   }
-  const response = await fetch(path, options);
-  const data = await response.json();
+  const { response, data } = await fetchJSON(path, options);
   if (!response.ok) {
     throw new Error(data.error?.message || data.retmsg || data.msg || `请求失败（HTTP ${response.status}）`);
   }
@@ -49,11 +48,11 @@ async function checkStatus() {
     await loadSettings();
     const result = await api("/QueryDB/status");
     const state = result.IsLogin ?? result.data?.IsLogin;
-    if (String(state) === "1") {
+    if (state === true || String(state) === "1") {
       $("hook-status").textContent = "微信已登录";
       $("status-dot").className = "dot online";
     } else {
-      $("hook-status").textContent = String(state) === "0" ? "Hook 已连接，微信未登录" : "Hook 已响应，登录状态未知";
+      $("hook-status").textContent = state === false || String(state) === "0" ? "Hook 已连接，微信未登录" : "Hook 已响应，登录状态未知";
       $("status-dot").className = "dot offline";
     }
   } catch (error) {
@@ -71,8 +70,8 @@ $("setup-callback").addEventListener("click", async () => {
   feedback("callback-status", "正在设置消息回调…");
   try {
     await loadSettings();
-    // The Hook and this service run on the same test computer.
-    const url = `http://127.0.0.1:${new URL(window.location.href).port || (window.location.protocol === "https:" ? "443" : "80")}/receiveChatBotMsg`;
+    // Use the service listener, including IPv6 and its actual backend port.
+    const url = settings.callback_url;
     const result = await api("/set_callback", { url });
     businessSuccess(result);
     feedback("callback-status", "消息接收已启用。请让另一个微信账号给当前账号发送消息，验证是否收到。", "success");

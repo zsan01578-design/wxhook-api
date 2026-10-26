@@ -262,7 +262,7 @@ class ImageModelConfiguration:
         self._lock = asyncio.Lock()
         if self.path.is_file():
             try:
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                raw = json.loads(self.path.read_text(encoding="utf-8-sig"))
                 migrated = False
                 for row in raw["models"]:
                     migrated |= bool(os.name == "nt" and row.get("api_key") and not str(row["api_key"]).startswith("dpapi:v1:"))

@@ -62,10 +62,9 @@ function toast(text, error = false) {
   toastTimer = setTimeout(() => $("toast").hidden = true, error ? 6500 : 3000);
 }
 async function api(path, body, method = "POST", timeout = 15000) {
-  const options = { cache: "no-store", signal: AbortSignal.timeout(timeout) };
+  const options = { cache: "no-store" };
   if (body !== undefined) Object.assign(options, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const response = await fetch(path, options);
-  const data = await response.json();
+  const { response, data } = await fetchJSON(path, options, timeout);
   if (!response.ok) {
     let message = data.error?.message || data.detail || `请求失败（${response.status}）`;
     if (path.includes("/favorites") && (Array.isArray(message) || data.error?.code === "validation_error")) message = "请检查链接和标题；最多 12 个标签，每个不超过 24 字，备注最多 1000 字。";

@@ -11,7 +11,10 @@ router = APIRouter()
 
 @router.get("/health")
 async def health(request: Request, settings: Settings = Depends(get_settings)):
-    return {"status": "ok", "hook_base_url": settings.hook_base_url, "hook_port": urlsplit(settings.hook_base_url).port, "runtime_revision": request.app.state.runtime_revision}
+    return {"status": "ok", "hook_base_url": settings.hook_base_url,
+            "hook_port": urlsplit(settings.hook_base_url).port,
+            "callback_url": settings.service_base_url + "/receiveChatBotMsg",
+            "runtime_revision": request.app.state.runtime_revision}
 
 
 @router.get("/ready")

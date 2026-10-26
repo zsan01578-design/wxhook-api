@@ -48,12 +48,7 @@ def load_launcher_settings(path: Path | None = None) -> LauncherSettings:
 
 
 def service_url(settings: Settings) -> str:
-    host = settings.host.strip("[]")
-    if host in {"0.0.0.0", "::"}:
-        host = "127.0.0.1" if host == "0.0.0.0" else "::1"
-    if ":" in host:
-        host = f"[{host}]"
-    return f"http://{host}:{settings.port}"
+    return settings.service_base_url
 
 
 def wechat_is_running(executable: Path) -> bool:

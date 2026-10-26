@@ -160,6 +160,10 @@ class GroupManager:
             try:
                 if not fts_enabled:
                     raise sqlite3.OperationalError("FTS disabled")
+                # IF NOT EXISTS on a persisted virtual table is not a feature
+                # probe: its module/tokenizer may be missing in this runtime.
+                db.execute("CREATE VIRTUAL TABLE temp.wxhook_fts_probe USING fts5(content, tokenize='trigram')")
+                db.execute("DROP TABLE temp.wxhook_fts_probe")
                 db.executescript("""
                     CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(
                         content, content='chat_messages', content_rowid='id', tokenize='trigram');
@@ -179,7 +183,14 @@ class GroupManager:
                     db.execute("INSERT INTO sync_metadata(key,value) VALUES ('fts_backfill_v1',?)", (now(),))
                 fts_available = True
             except sqlite3.OperationalError:
-                # Older SQLite builds may lack FTS5/trigram; search falls back to instr().
+                # A database moved from a newer SQLite may still have triggers
+                # referencing an unavailable FTS5/trigram table. Detach them so
+                # inserts, edits and retention continue to work with instr().
+                for trigger in ("chat_messages_fts_ai", "chat_messages_fts_ad", "chat_messages_fts_au"):
+                    db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                # Writes during fallback are absent from the index. Rebuild it
+                # before using FTS again, including after an explicit disable.
+                db.execute("DELETE FROM sync_metadata WHERE key='fts_backfill_v1'")
                 fts_available = False
             return fts_available
         self.fts_available = await self._write_policy(initialize)

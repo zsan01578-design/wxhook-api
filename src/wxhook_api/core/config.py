@@ -66,6 +66,15 @@ class Settings:
     allowed_callback_urls: tuple[str, ...] = ()
     callback_workers: int = 4
 
+    @property
+    def service_base_url(self) -> str:
+        host = self.host.strip("[]")
+        if host in {"0.0.0.0", "::"}:
+            host = "127.0.0.1" if host == "0.0.0.0" else "::1"
+        if ":" in host:
+            host = f"[{host}]"
+        return f"http://{host}:{self.port}"
+
     @classmethod
     def from_environment(cls, config_path: str | Path | None = None) -> "Settings":
         selected_path = Path(config_path or os.getenv("WXHOOK_CONFIG") or DEFAULT_CONFIG_PATH).expanduser().resolve()

@@ -124,7 +124,7 @@ async def test_task_candidates_need_save_and_keep_only_current_group_sources(tmp
         _, rows = await tools.text_window(GROUP, datetime.now(CHINA).date(), datetime.now(CHINA).date() + timedelta(days=1))
         source_id = rows[0]["id"]
         tools.models = Models(json.dumps([
-            dict(title="提交报告", owner="小王", due_date="2026-10-18", source_id=source_id),
+            dict(title="提交报告", owner="小王", due_date=(datetime.now(CHINA).date() + timedelta(days=1)).isoformat(), source_id=source_id),
             dict(title="伪造来源", source_id=9999),
             dict(title="无效截止日", due_date="bad", source_id=source_id),
         ]))

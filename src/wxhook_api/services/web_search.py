@@ -205,7 +205,7 @@ class WebSearchConfiguration:
         if not self.path.is_file():
             return
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            raw = json.loads(self.path.read_text(encoding="utf-8-sig"))
             if not isinstance(raw, dict):
                 raise ValueError("search config must be an object")
             settings = {key: raw.get(key) for key in ("enabled", "base_url", "api_key", "result_count", "daily_limit")}

@@ -4,6 +4,8 @@
 
 目标微信版本为 **WeChat 4.1.10.27**；接口契约见 [`默认模块(1).md`](默认模块(1).md)。
 
+兼容性边界：Windows 10/11；Python 最低 3.11，本机验证环境为 3.12，CI 配置了 3.11–3.14 矩阵。页面需要支持原生 `dialog`、`fetch`、`AbortController` 和可选链语法的浏览器，不依赖 `AbortSignal.timeout`；不支持 IE。对话、视觉、生图和搜索配置支持 UTF-8 有无 BOM 两种编码。SQLite 缺少 FTS5/trigram 或关闭全文索引时自动使用普通搜索，并在恢复支持后重建索引。其他微信/Hook 版本仍须按接口契约实机验证。
+
 ## 快速开始
 
 Windows 10/11，Python 3.11 或更高版本（已验证 3.12）：
@@ -67,7 +69,7 @@ FastAPI 8000 ── Access/BodyLimit → 持久化收件 → 会话有序分发
 .\.venv\Scripts\ruff.exe check src
 ```
 
-当前后端回归 **1292 项通过、1 项跳过（260.48 秒）**；跳过项是测试机无法创建 Windows 重解析点的文件系统测试。`tests/browser/` 另有 9 组 Playwright 脚本，需本机安装 Playwright CLI 和 Chrome。CI 配置见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。
+2026-10-26 本机 Python 3.12 后端回归 **1315 项通过、1 项跳过（239.94 秒）**；跳过项是测试机无法创建 Windows 重解析点的文件系统测试。`tests/browser/` 的 **13 组 Playwright 脚本全部通过**，包含移除 `AbortSignal.timeout` 的兼容性模拟；运行需本机安装 Playwright CLI 和 Chrome。启动/更新脚本回归、静态检查、依赖检查及 wheel 页面资源完整性检查也已通过。CI 配置见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。
 
 测试使用临时数据库、模拟 Hook 和模拟模型，不发送真实微信消息，也不调用真实模型/搜索服务。真实微信、IPv6 Hook、目标机长时间运行仍需实机验收。
 

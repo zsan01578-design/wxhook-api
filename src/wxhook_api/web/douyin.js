@@ -17,14 +17,13 @@ function message(id, text, error = false) {
 }
 
 async function request(path, body) {
-  const options = { cache: "no-store", signal: AbortSignal.timeout(15000) };
+  const options = { cache: "no-store" };
   if (body !== undefined) {
     options.method = "POST";
     options.headers = { "Content-Type": "application/json" };
     options.body = JSON.stringify(body);
   }
-  const response = await fetch(path, options);
-  const data = await response.json();
+  const { response, data } = await fetchJSON(path, options);
   if (!response.ok) {
     if (data.error?.code === "validation_error" && data.error.message === "request validation failed") {
       throw new Error("后台拒绝此配置。请先停止旧服务并重新运行 main.py，再刷新页面；同时确认填写的是群 ID，不能填群昵称。");

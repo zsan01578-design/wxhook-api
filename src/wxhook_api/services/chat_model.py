@@ -476,7 +476,7 @@ class ChatModelConfiguration:
         self.load_error = ""
         if self.path.is_file():
             try:
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                raw = json.loads(self.path.read_text(encoding="utf-8-sig"))
                 if not isinstance(raw, dict):
                     raise ValueError("Invalid model collection")
                 migrated = False

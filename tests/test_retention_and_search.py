@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -8,6 +9,54 @@ from tests.test_douyin import GROUP
 from wxhook_api.core.douyin_config import GroupSettings
 from wxhook_api.services.groups import GroupManager
 from wxhook_api.services.retention import RetentionService
+
+
+@pytest.mark.parametrize("fallback", ["disabled", "missing_module"])
+async def test_existing_fts_database_can_fall_back_and_rebuild(tmp_path, monkeypatch, fallback):
+    monkeypatch.setenv("WXHOOK_FTS_ENABLED", "true")
+    path = tmp_path / "portable.sqlite3"
+    manager = GroupManager(path)
+    await manager.start([])
+    if not manager.fts_available:
+        pytest.skip("SQLite FTS5 trigram is unavailable")
+    await manager.add_group(GROUP, "兼容群")
+    await manager.import_history(GROUP, [
+        {"msgid": 1, "timestamp": 1000, "type": 1, "sender": "a", "content": "original message"},
+        {"msgid": 2, "timestamp": 1001, "type": 1, "sender": "a", "content": "removed message"},
+    ])
+    connect = sqlite3.connect
+
+    class WithoutFTS(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if "USING fts5" in sql:
+                raise sqlite3.OperationalError("no such module: fts5")
+            return super().execute(sql, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        if fallback == "disabled":
+            patch.setenv("WXHOOK_FTS_ENABLED", "false")
+        else:
+            patch.setattr(sqlite3, "connect", lambda *a, **kw: connect(*a, **kw, factory=WithoutFTS))
+        manager = GroupManager(path)
+        await manager.start([])
+        assert not manager.fts_available
+        with manager._connect() as db:
+            assert not db.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'chat_messages_fts_%'").fetchall()
+            assert not db.execute("SELECT 1 FROM sync_metadata WHERE key='fts_backfill_v1'").fetchone()
+            db.execute("UPDATE chat_messages SET content='changed message' WHERE msgid='1'")
+            db.execute("DELETE FROM chat_messages WHERE msgid='2'")
+        await manager.import_history(GROUP, [
+            {"msgid": 3, "timestamp": 1002, "type": 1, "sender": "a", "content": "inserted message"},
+        ])
+        assert (await manager.messages(GROUP, query="inserted"))["total"] == 1
+
+    manager = GroupManager(path)
+    await manager.start([])
+    assert manager.fts_available
+    for query, total in [("original", 0), ("removed", 0), ("changed", 1), ("inserted", 1)]:
+        assert (await manager.messages(GROUP, query=query))["total"] == total
+    with manager._connect() as db:
+        db.execute("INSERT INTO chat_messages_fts(chat_messages_fts, rank) VALUES('integrity-check', 1)")
 
 
 async def test_fts_search_handles_substrings_wildcards_and_short_queries(tmp_path, monkeypatch):
