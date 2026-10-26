@@ -1,6 +1,7 @@
 import asyncio
 import html
 import json
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from xml.etree import ElementTree as ET
@@ -14,6 +15,7 @@ from tests.test_vision import make_image
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.quoted_message import MAX_QUOTE_CHARS, MAX_QUOTE_XML_CHARS, parse_quoted_reply
 from wxhook_api.services.relationship_advisor import HELP
+from wxhook_api.services import relationship_advisor
 
 
 AUTHOR = "wxid_quoted_author"
@@ -105,6 +107,39 @@ async def test_text_quote_is_separate_evidence_without_stale_images_or_tools(tmp
         with state.app.state.groups._connect() as db:
             row = db.execute("SELECT type,content,sender FROM chat_messages WHERE group_id=? AND msgid='1'", (GROUP,)).fetchone()
         assert row["type"] == 49 and row["content"] == original["content"] and row["sender"] == MEMBER
+
+
+async def test_quoted_advisor_accepts_comma_with_actual_group_alias_and_thin_space(tmp_path):
+    calls = []
+    async with context(tmp_path, profile={"wxid": BOT, "nickname": "吊毛"}) as state:
+        await configure(state, calls)
+        await state.submit(quote_event("@吊毛\u2005军师，这种怎么回", content="今晚有点忙"))
+        assert len(calls) == len(state.sends) == 1
+        assert current_question(calls[0])["current_question"] == "这种怎么回"
+        assert current_question(calls[0])["quoted_message"]["content"] == "今晚有点忙"
+
+
+@pytest.mark.parametrize("legacy", [True, False], ids=["old-prefix-skips", "fixed-prefix-replies"])
+async def test_native_quote_with_xml_declaration_and_empty_roomid(tmp_path, monkeypatch, legacy):
+    if legacy:
+        monkeypatch.setattr(relationship_advisor, "PREFIX", re.compile(
+            r"^(?:狗头军师|军师)(?:分析)?(?=$|[\s:：])\s*[:：]?\s*(.*)$", re.S))
+    raw = '<?xml version="1.0"?>\n' + quoted_xml(
+        "@吊毛\u2005军师，这种怎么回", content="开始解析", author=BOT, name="吊毛")
+    raw = raw.replace("</refermsg>", "<msgsource>&lt;msgsource&gt;&lt;silence&gt;1&lt;/silence&gt;&lt;/msgsource&gt;</msgsource></refermsg>")
+    calls = []
+    async with context(tmp_path, profile={"wxid": BOT, "nickname": "吊毛"}) as state:
+        await configure(state, calls)
+        await state.submit(event(raw, type=49, roomid=""))
+        if legacy:
+            assert not calls and not state.sends
+            assert state.bot.snapshot()["recent_events"][-1]["status"] == "quote_ignored"
+        else:
+            assert len(calls) == len(state.sends) == 1
+            frame = current_question(calls[0])
+            assert frame["current_question"] == "这种怎么回"
+            assert frame["quoted_message"]["content"] == "开始解析"
+            assert state.sends[0]["wxidorgid"] == GROUP
 
 
 @pytest.mark.parametrize("title,extra", [

@@ -21,7 +21,7 @@ from wxhook_api.services.relationship_advisor import (
 )
 
 
-@pytest.mark.parametrize("prefix", ["军师：", "军师: ", "军师分析：", "狗头军师：", "军师 ", "狗头军师分析\n"])
+@pytest.mark.parametrize("prefix", ["军师：", "军师: ", "军师，", "军师, ", "军师分析：", "狗头军师：", "军师 ", "狗头军师分析\n"])
 def test_explicit_commands_preserve_question(prefix):
     request = parse_command(prefix + "这句话怎么回？\n她说：晚安！")
     assert request.question == "这句话怎么回？\n她说：晚安！" and not request.clear
