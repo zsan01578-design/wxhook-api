@@ -13,6 +13,7 @@ let wordCloud = null, chatSummary = null, chatRadar = null;
 let insightRequest = null;
 let groupTools = null, radarDays = 14;
 let taskView = "open", taskPage = 1;
+let favoritesData = null, favoriteQuery = "", favoritePage = 1, favoriteSearch = null;
 const chatSignatures = new WeakMap();
 const taskCandidates = new Map();
 
@@ -67,7 +68,8 @@ async function api(path, body, method = "POST", timeout = 15000) {
   const data = await response.json();
   if (!response.ok) {
     let message = data.error?.message || data.detail || `请求失败（${response.status}）`;
-    if (path.includes("/tools") && (Array.isArray(message) || data.error?.code === "validation_error")) message = "请检查必填内容、日期与冷却时间，固定回复规则需要填写回复内容。";
+    if (path.includes("/favorites") && (Array.isArray(message) || data.error?.code === "validation_error")) message = "请检查链接和标题；最多 12 个标签，每个不超过 24 字，备注最多 1000 字。";
+    else if (path.includes("/tools") && (Array.isArray(message) || data.error?.code === "validation_error")) message = "请检查必填内容、日期与冷却时间，固定回复规则需要填写回复内容。";
     else if (Array.isArray(message) || (data.error?.code === "validation_error" && !["/api/manage/chat-model", "/api/manage/vision-model"].some(prefix => path.startsWith(prefix)) && path !== "/api/manage/chatbot/mentions")) message = "请检查填写内容：群 ID 须以 @chatroom 结尾，成员须填写真实 wxid，名称最多 80 字。";
     throw new Error(message);
   }
@@ -162,6 +164,7 @@ function renderList() {
   $("group-list").replaceChildren(...(nodes.length ? nodes : [el("div", "list-empty", state.groups.length ? "没有符合条件的群聊" : "还没有群聊\n点击 + 添加，或等待群消息自动发现")]));
 }
 function selectGroup(id) {
+  favoriteQuery = ""; favoritePage = 1; favoriteSearch = null; favoritesData = null;
   taskView = "open"; taskPage = 1;
   selectedId = id; tab = "messages"; memberQuery = ""; messagePage = 1; messageQuery = ""; view = "groups"; detailVersion = ""; resetChatScroll = true;
   document.body.classList.add("mobile-detail");
@@ -348,6 +351,106 @@ async function toolsAction(source, group, path, body, method = "POST", message =
 }
 function toolCard(title, description) {
   const card = el("section", "tool-card"); card.append(el("h3", "", title), el("p", "tool-description", description)); return card;
+}
+
+const favoritesPath = group => `${groupPath(group)}/favorites`;
+const favoriteFile = (group, item, file) => `${favoritesPath(group)}/${encodeURIComponent(item.id)}/files/${encodeURIComponent(file.name)}`;
+async function loadFavorites(group) {
+  const key = JSON.stringify([group, favoriteQuery, favoritePage]);
+  if (favoriteSearch?.key === key && performance.now() < favoriteSearch.expires) return favoriteSearch.data;
+  return api(`${favoritesPath(group)}?q=${encodeURIComponent(favoriteQuery)}&page=${favoritePage}`);
+}
+async function reloadFavorites(group) {
+  favoriteSearch = null; detailVersion = "";
+  if (selectedId === group && tab === "favorites") await loadDetail();
+}
+function favoriteDialog(group, item = {}) {
+  const body = showDialog(item.id ? "编辑收藏" : "添加群收藏"), form = el("form");
+  const text = item.id ? null : formField(form, "分享链接或分享文案", "粘贴一条分享内容", "", true, 8192);
+  const title = formField(form, "收藏标题", item.id ? "填写标题" : "可留空，解析后自动填写", item.title || "", false, 220);
+  const tags = formField(form, "标签（用逗号分隔）", "例如：美食, 红烧肉", (item.tags || []).join(", "), false, 320);
+  const notes = formField(form, "收藏备注", "写下为什么想收藏它", item.notes || "", true, 1000);
+  if (text) text.required = true; else title.required = true;
+  if (!item.id) form.append(el("p", "form-note", "抖音、小红书和 B站会尝试保存文案与媒体；其他文章链接保存为书签。保存媒体可能需要几分钟。"));
+  const footer = formFooter(form, item.id ? "保存修改" : "加入收藏"); body.append(form);
+  bindForm(form, footer, async () => {
+    const data = {title:title.value,tags:tags.value.split(/[,，\n]/).map(value => value.trim()).filter(Boolean),notes:notes.value};
+    if (text) data.text = text.value;
+    const result = await api(`${favoritesPath(group)}${item.id ? `/${item.id}` : ""}`, data, item.id ? "PUT" : "POST", 210000);
+    favoriteSearch = null;
+    if (result.item?.status === "partial") toast(result.item.error, true);
+  });
+}
+function renderFavorites(group) {
+  const root = $("tab-content"), data = favoritesData;
+  if (!data || data.group_id !== group.id) { root.replaceChildren(empty("收藏暂时无法加载", "请刷新重试。", "folder")); return; }
+  if (data.error) { root.replaceChildren(empty("收藏暂时无法加载", data.error, "folder")); return; }
+  const focused = document.activeElement?.id === "favorite-query", draft = focused ? document.activeElement.value : favoriteQuery, selection = focused ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
+  const heading = el("div", "section-heading"), copy = el("div");
+  copy.append(el("h3", "", "群收藏"), el("p", "", "让分享留下来，也让它更容易被找到。"));
+  heading.append(copy, button("添加收藏", "button primary small", () => favoriteDialog(group.id), "plus"));
+  const hint = el("p", "tool-description", "群里发送“收藏＋链接”，或发完分享后在 10 分钟内说“收藏”。查找时可以问“上次那个红烧肉教程在哪”。群内命令需要启用 @问答；资料仅在当前群内检索。"), search = el("form", "favorite-search"), input = el("input");
+  input.id = "favorite-query"; input.type = "search"; input.maxLength = 300; input.value = draft;
+  input.placeholder = "上次那个红烧肉教程在哪"; input.setAttribute("aria-label", "搜索群收藏");
+  const submit = button("搜索", "button small primary"); submit.type = "submit";
+  const smart = button("AI 扩展搜索", "button small", async event => {
+    const query = input.value.trim(); if (!query) return;
+    const source = event.currentTarget; source.disabled = true; source.textContent = "正在查找…";
+    favoriteQuery = query; favoritePage = 1;
+    const key = JSON.stringify([group.id, query, 1]);
+    try {
+      const result = await api(`${favoritesPath(group.id)}/search`, {query}, "POST", 25000);
+      if (group.id !== selectedId || favoriteQuery !== query || tab !== "favorites") return;
+      favoriteSearch = {key, data:result, expires:performance.now()+60000}; favoritesData = result; detailVersion = ""; renderFavorites(current());
+    } catch (error) { toast(error.message, true); }
+    finally { source.disabled = false; source.textContent = "AI 扩展搜索"; }
+  });
+  search.append(input, submit, smart);
+  search.addEventListener("submit", event => { event.preventDefault(); favoriteQuery = input.value.trim(); favoritePage = 1; reloadFavorites(group.id).catch(error => toast(error.message, true)); });
+  const meta = el("div", "favorite-result-meta", `${data.total} 条收藏${data.search_mode === "semantic" ? " · 已扩展同义关键词" : " · 本地关键词检索"}`);
+  const grid = el("div", "favorite-grid");
+  (data.items || []).forEach(item => {
+    const card = el("article", "favorite-card"), preview = el("div", "favorite-preview"), files = item.files || [];
+    const image = files.find(file => file.kind === "image"), video = files.find(file => file.kind === "video");
+    if (image) { const node = el("img"); node.src = favoriteFile(group.id,item,image); node.alt = ""; node.loading = "lazy"; preview.append(node); }
+    else preview.append(icon(video ? "video" : "folder"));
+    const content = el("div", "favorite-copy"), tags = el("div", "favorite-tags"), actions = el("div", "tool-actions");
+    content.append(el("h4", "", item.title), el("p", "favorite-meta", `${({douyin:"抖音",xiaohongshu:"小红书",bilibili:"B站",link:"链接书签"})[item.platform] || item.platform}${item.author ? ` · ${item.author}` : ""} · ${dateText(item.created_at,true)}`));
+    (item.tags || []).forEach(tag => tags.append(el("span", "favorite-tag", tag))); content.append(tags);
+    if (item.notes) content.append(el("p", "favorite-notes", item.notes));
+    content.append(el("p", "favorite-meta", `${files.length} 个本地媒体 · ${item.status === "saving" ? "正在保存" : item.status === "partial" ? "媒体未完整保存" : "已收藏"}`));
+    if (item.error) content.append(el("p", "favorite-warning", item.error));
+    const source = el("a", "button small", "原始分享");
+    try { const url = new URL(item.source_url); if (["http:","https:"].includes(url.protocol)) source.href = url.href; } catch {}
+    source.target = "_blank"; source.rel = "noopener noreferrer";
+    actions.append(source, button("查看", "button small", () => favoriteDetail(group.id,item)), button("编辑", "button small", () => favoriteDialog(group.id,item)));
+    if (item.status === "partial") actions.append(button("重试媒体", "button small", async event => {
+      const source = event.currentTarget; source.disabled = true;
+      try { const result = await api(`${favoritesPath(group.id)}/${item.id}/retry`, {}, "POST", 210000); await reloadFavorites(group.id); toast(result.item.error || "媒体已保存", Boolean(result.item.error)); }
+      catch (error) { toast(error.message,true); } finally { source.disabled = false; }
+    }));
+    actions.append(button("删除", "text-link", () => confirmDialog("删除这条收藏？", "同时删除这条收藏的本地媒体副本。原分享和聊天记录会保留。", async () => { await api(`${favoritesPath(group.id)}/${item.id}`, {}, "DELETE"); await reloadFavorites(group.id); }, "删除收藏", true)));
+    content.append(actions); card.append(preview,content); grid.append(card);
+  });
+  if (!data.items?.length) grid.append(empty(favoriteQuery ? "没有找到相关收藏" : "把喜欢的分享收在这里", favoriteQuery ? "换个关键词，或尝试 AI 扩展搜索。" : "点击“添加收藏”，或者在群里发送“收藏＋链接”。", "folder"));
+  const pages = el("div", "task-pagination"), previous = button("上一页", "button small", () => { favoritePage--; reloadFavorites(group.id).catch(error => toast(error.message,true)); }), next = button("下一页", "button small", () => { favoritePage++; reloadFavorites(group.id).catch(error => toast(error.message,true)); });
+  previous.disabled = favoritePage <= 1; next.disabled = !data.has_more;
+  pages.append(previous,el("span","",`第 ${favoritePage} 页`),next);
+  root.replaceChildren(heading,hint,search,meta,grid,pages);
+  if (focused) { input.focus(); try { input.setSelectionRange(...selection); } catch {} }
+}
+function favoriteDetail(group, item) {
+  const body = showDialog(item.title, "群收藏"), description = el("p","tool-source",item.source_text || item.title);
+  body.append(description);
+  (item.files || []).forEach(file => {
+    const url = favoriteFile(group,item,file), media = el(file.kind === "image" ? "img" : "video", "favorite-full-media");
+    media.src = url;
+    if (file.kind === "image") { media.alt = item.title; media.loading = "lazy"; }
+    else { media.controls = true; media.preload = "metadata"; }
+    const link = el("a","text-link",`下载 ${file.name}（${formatBytes(file.size)}）`); link.href = `${url}?download=true`;
+    body.append(media,link);
+  });
+  if (!item.files?.length) body.append(el("p","form-note","此收藏没有本地媒体，请通过原始分享链接查看。"));
 }
 function taskDateText(timestamp) {
   if (!timestamp) return "未设置截止时间";
@@ -653,14 +756,16 @@ function loadInsights(group, force = false) {
 async function loadDetail(force = false) {
   const group = current();
   if (!group || view !== "groups") return;
+  if (force) favoriteSearch = null;
   const token = ++detailToken, requestedTab = tab, requestedPage = messagePage, requestedQuery = messageQuery;
-  const [people, inbox, history, insights, summaryResponse, toolsResponse] = await Promise.all([
+  const [people, inbox, history, insights, summaryResponse, toolsResponse, favoritesResponse] = await Promise.all([
     api(`${groupPath(group.id)}/members`),
     requestedTab === "messages" ? api(`${groupPath(group.id)}/messages?page=${requestedPage}&q=${encodeURIComponent(requestedQuery)}`) : Promise.resolve(null),
     requestedTab === "audit" ? api(`/api/manage/audit?group=${encodeURIComponent(group.id)}`) : Promise.resolve(null),
     loadInsights(group, force),
     api(`${groupPath(group.id)}/summary`).catch(() => ({summary: null})),
-    requestedTab === "tools" ? api(toolsPath(group.id)).catch(error => ({group_id: group.id, error: error.message})) : Promise.resolve(null)
+    requestedTab === "tools" ? api(toolsPath(group.id)).catch(error => ({group_id: group.id, error: error.message})) : Promise.resolve(null),
+    requestedTab === "favorites" ? loadFavorites(group.id).catch(error => ({group_id:group.id,error:error.message})) : Promise.resolve(null)
   ]);
   const [cloud, radarResponse] = insights;
   if (token !== detailToken || group.id !== selectedId || requestedTab !== tab || view !== "groups") return;
@@ -669,10 +774,11 @@ async function loadDetail(force = false) {
   chatSummary = summaryResponse.summary;
   chatRadar = radarResponse;
   groupTools = toolsResponse;
+  favoritesData = favoritesResponse;
   messages = inbox?.messages || [];
   if (inbox) messageMeta = inbox;
   audit = history?.events || [];
-  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, cloud, chatSummary, chatRadar, groupTools, tab, state.media, ownWxid, state.chatbot]);
+  const version = JSON.stringify([current(), members, messages, messageMeta.total, requestedPage, requestedQuery, audit, cloud, chatSummary, chatRadar, groupTools, favoritesData, tab, state.media, ownWxid, state.chatbot]);
   if (version === detailVersion) return;
   detailVersion = version;
   renderHeader(current()); renderInspector(current());
@@ -681,6 +787,7 @@ async function loadDetail(force = false) {
   else if (tab === "messages") renderMessages();
   else if (tab === "radar") renderRadarPage(current());
   else if (tab === "tools") renderTools(current());
+  else if (tab === "favorites") renderFavorites(current());
   else renderAudit();
 }
 

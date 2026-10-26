@@ -83,6 +83,16 @@ CREATE TABLE IF NOT EXISTS member_reminders (
     status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     UNIQUE(group_id,message_key));
 CREATE INDEX IF NOT EXISTS member_reminders_due ON member_reminders(status,due_at);
+CREATE TABLE IF NOT EXISTS group_favorites (
+    id TEXT PRIMARY KEY, group_id TEXT NOT NULL, source_key TEXT NOT NULL,
+    source_url TEXT NOT NULL, source_text TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL, author TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL DEFAULT 'link',
+    kind TEXT NOT NULL DEFAULT 'link', tags TEXT NOT NULL DEFAULT '[]', notes TEXT NOT NULL DEFAULT '',
+    assets TEXT NOT NULL DEFAULT '[]', files TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'saving', error TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(group_id,source_key));
+CREATE INDEX IF NOT EXISTS group_favorites_recent ON group_favorites(group_id,created_at DESC,id);
 """
 
 

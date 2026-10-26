@@ -24,7 +24,7 @@ from wxhook_api.core.douyin_config import load_douyin_options
 from wxhook_api.core.errors import AccountMismatchError, HookTransportError, install_exception_handlers
 from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.core.runtime import source_revision
-from wxhook_api.routes import account, callbacks, contacts, douyin, group_tools, health, history, manage, media, messages, parse, querydb, ui
+from wxhook_api.routes import account, callbacks, contacts, douyin, favorites, group_tools, health, history, manage, media, messages, parse, querydb, ui
 from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.chatbot import MentionChatService
 from wxhook_api.services.chat_model import ChatModelConfiguration
@@ -39,6 +39,7 @@ from wxhook_api.services.parse_video import parser_config_path
 from wxhook_api.services.retention import RetentionService
 from wxhook_api.services.groups import GroupManager, event_group
 from wxhook_api.services.group_tools import GroupToolsService
+from wxhook_api.services.favorites import FavoritesService
 from wxhook_api.services.inbox import MessageInbox
 from wxhook_api.services.wechat_sync import SyncOptions, WeChatSync
 from wxhook_api.services.web_search import WebSearchConfiguration
@@ -67,6 +68,8 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     chatbot.summary_service = summary_service
     tools_service = GroupToolsService(groups, model_configuration, chatbot)
     chatbot.tools_service = tools_service
+    favorites_service = FavoritesService(tools_service, douyin_worker)
+    chatbot.favorites_service = favorites_service
     retention = RetentionService(groups, tools_service)
     backups = BackupService(groups, {
         "version.yml": settings.config_path,
@@ -144,6 +147,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             await douyin_worker.start()
             await chatbot.start(app.state.hook_client)
             await tools_service.start()
+            await favorites_service.start()
             await retention.start()
             summary_service.bot_wxid = chatbot.identity
             await summary_service.start()
@@ -171,6 +175,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.chat_search = search_configuration
     app.state.chat_summary = summary_service
     app.state.group_tools = tools_service
+    app.state.favorites = favorites_service
     app.state.retention = retention
     app.state.runtime_revision = source_revision()
     app.state.backups = backups
@@ -179,7 +184,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.add_middleware(AccessMiddleware)
     install_exception_handlers(app)
     app.add_exception_handler(sqlite3.Error, manage.storage_error)
-    for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router, douyin.router, parse.router, manage.router, group_tools.router):
+    for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router, douyin.router, parse.router, manage.router, group_tools.router, favorites.router):
         app.include_router(router)
     app.mount("/ui/assets", StaticFiles(directory=ui.WEB_ROOT), name="message-assets")
     return app

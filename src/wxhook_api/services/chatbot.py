@@ -168,6 +168,7 @@ class MentionChatService:
         self._profile_names: tuple[str, ...] = ()
         self.summary_service = None
         self.tools_service = None
+        self.favorites_service = None
         self.search_service = None
         self.image_service = None
         self.conversations = GroupConversations()
@@ -396,6 +397,13 @@ class MentionChatService:
             report.update(status="identity", message=self.last_error)
             return True
         ids, structured = mention_ids(event)
+        if not ids and not image_event and self.favorites_service:
+            from wxhook_api.services.favorites import is_favorite_command
+            if is_favorite_command(event_text(event)):
+                if not await self.ensure_account() or self.own_message(event):
+                    return True
+                report["model_route"] = "favorites"
+                return self._enqueue_job(event, group, event_text(event).strip(), report)
         if not ids and "@" not in event.content:
             if image_event:
                 self._remember_recent_image(event)
@@ -460,6 +468,13 @@ class MentionChatService:
             return "本群对话上下文已清空。"
         if image_ambiguous:
             return "已识别到绘图请求，但暂时无法确认正文中哪个称呼是机器人。请单独 @机器人并在后面发送“生图：图片描述”，或在管理页配置机器人群内显示名。"
+        if self.favorites_service and sender is not None:
+            try:
+                result = await self.favorites_service.chat_command(question, group, sender, key)
+                if result is not None:
+                    return result
+            except Exception:
+                return "收藏操作暂时失败，请在管理页的“群收藏”检查记录或稍后重试。"
         if self.tools_service and sender is not None:
             result = await self.tools_service.reminders.chat_command(question, group, sender, key)
             if result is not None:
