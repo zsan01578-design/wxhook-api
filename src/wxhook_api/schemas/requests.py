@@ -48,6 +48,18 @@ class CallbackRequest(BaseModel):
     url: str
 
 
+class ParseLinkRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+
+    @field_validator("url")
+    @classmethod
+    def normalize_url(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("url must not be empty")
+        return value
+
+
 class ExecuteQueryRequest(BaseModel):
     optDbName: str
     SQL: str

@@ -24,7 +24,7 @@ from wxhook_api.core.douyin_config import load_douyin_options
 from wxhook_api.core.errors import AccountMismatchError, HookTransportError, install_exception_handlers
 from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.core.runtime import source_revision
-from wxhook_api.routes import account, callbacks, contacts, douyin, group_tools, health, history, manage, media, messages, querydb, ui
+from wxhook_api.routes import account, callbacks, contacts, douyin, group_tools, health, history, manage, media, messages, parse, querydb, ui
 from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.chatbot import MentionChatService
 from wxhook_api.services.chat_model import ChatModelConfiguration
@@ -174,11 +174,12 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.retention = retention
     app.state.runtime_revision = source_revision()
     app.state.backups = backups
+    parse.attach(app)
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
     app.add_middleware(AccessMiddleware)
     install_exception_handlers(app)
     app.add_exception_handler(sqlite3.Error, manage.storage_error)
-    for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router, douyin.router, manage.router, group_tools.router):
+    for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router, douyin.router, parse.router, manage.router, group_tools.router):
         app.include_router(router)
     app.mount("/ui/assets", StaticFiles(directory=ui.WEB_ROOT), name="message-assets")
     return app
