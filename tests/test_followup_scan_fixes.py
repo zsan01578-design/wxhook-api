@@ -151,7 +151,7 @@ async def test_cancelled_cleanup_keeps_backup_lock_until_pruning_finishes(tmp_pa
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-async def test_backup_restores_effective_parser_file_and_cookie(tmp_path, monkeypatch, explicit):
+async def test_backup_excludes_effective_parser_file_and_cookie(tmp_path, monkeypatch, explicit):
     monkeypatch.setattr("wxhook_api.main.PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(parse_video, "PROJECT_ROOT", tmp_path)
     monkeypatch.setenv("WXHOOK_BACKUP_DIR", str(tmp_path / "backups"))
@@ -170,12 +170,13 @@ async def test_backup_restores_effective_parser_file_and_cookie(tmp_path, monkey
                      douyin_service=DouyinService(options(tmp_path)))
     await app.state.groups.start([])
     archive = await app.state.backups.run_once()
-    restored = tmp_path / "restored-parser.yml"
     with ZipFile(archive) as bundle:
         manifest = json.loads(bundle.read("manifest.json"))
-        assert manifest["sources"]["config/parse-video.local.yml"] == str(parser_config.resolve())
-        restored.write_bytes(bundle.read("config/parse-video.local.yml"))
-    monkeypatch.setenv("WXHOOK_PARSE_VIDEO_CONFIG", str(restored))
+        assert "config/parse-video.local.yml" not in bundle.namelist()
+        assert str(parser_config.resolve()) not in manifest["sources"].values()
+        assert all(b"synthetic-cookie-value" not in bundle.read(name) for name in bundle.namelist())
+        assert "config/version.yml" in bundle.namelist()
+    assert parser_config.is_file()
     assert parse_video._local_xhs_cookie() == "synthetic-cookie-value"
 
 

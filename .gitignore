@@ -11,7 +11,8 @@ dist/
 .tools/
 weixin_4.1.10.27.exe
 douyin.local.yml
-parse-video.local.yml
+# Local parser cookies, including alternate extensions and backup copies.
+parse-video.local*
 chatbot.local.yml
 downloads/
 .playwright-cli/

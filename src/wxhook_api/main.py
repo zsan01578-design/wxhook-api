@@ -35,7 +35,6 @@ from wxhook_api.services.douyin_delivery import DouyinMessenger
 from wxhook_api.services.events import EventDispatcher
 from wxhook_api.services.callback_store import CallbackStore
 from wxhook_api.services.backups import BackupService
-from wxhook_api.services.parse_video import parser_config_path
 from wxhook_api.services.retention import RetentionService
 from wxhook_api.services.groups import GroupManager, event_group
 from wxhook_api.services.group_tools import GroupToolsService
@@ -80,7 +79,6 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
         "chatbot.yml": PROJECT_ROOT / "chatbot.yml",
         "chatbot.local.yml": Path(os.getenv("WXHOOK_CHATBOT_CONFIG") or PROJECT_ROOT / "chatbot.local.yml"),
         "launcher.yml": Path(os.getenv("WXHOOK_LAUNCHER_CONFIG") or PROJECT_ROOT / "launcher.yml"),
-        "parse-video.local.yml": parser_config_path(),
         "chat-model.local.json": model_configuration.path, "search.local.json": search_configuration.path,
         "image-model.local.json": image_configuration.path,
         "vision-model.local.json": vision_configuration.path,
