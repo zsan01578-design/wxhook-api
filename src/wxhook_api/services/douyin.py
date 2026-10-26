@@ -346,9 +346,22 @@ class DouyinService:
                         raise DouyinError("当前解析来源仅支持抖音，请在资源页选择 parse-video-py 并保存后重新发送链接")
                     if config.parser_provider == "parse_video":
                         parser = ParseVideoParser(transport=self._transport)
+                        try:
+                            parsed = await parser.parse(job["source_url"])
+                        except DouyinError as primary_error:
+                            # The upstream library cannot read Douyin image notes;
+                            # retry those through the optional third-party endpoint.
+                            if job["platform"] != "douyin" or not config.parser_api_url:
+                                raise
+                            try:
+                                parsed = await DouyinAPIParser(self._client, config.parser_api_url).parse(job["source_url"])
+                            except DouyinError as fallback_error:
+                                detail = f"parse-video-py 解析失败：{str(primary_error)[:200]}；备用接口也失败：{str(fallback_error)[:200]}"
+                                raise DouyinError(detail) from fallback_error
+                            job.update(parser_provider="api", parser_fallback=True)
                     else:
                         parser = DouyinAPIParser(self._client, config.parser_api_url) if config.parser_provider == "api" else DouyinParser(self._client)
-                    parsed = await parser.parse(job["source_url"])
+                        parsed = await parser.parse(job["source_url"])
                     job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind, assets=parsed.assets, platform=parsed.platform)
                     if not self.allowed(job["group_id"], job["sender"]):
                         raise DouyinError("群聊或成员已被限制，或解析功能已停用")

@@ -19,10 +19,10 @@
           <label for="parser-provider">解析来源</label>
           <select id="parser-provider"><option value="parse_video">parse-video-py（抖音 / 小红书 / B站）</option><option value="api">指定解析接口（仅抖音）</option><option value="builtin">原公开分享页解析（仅抖音）</option></select>
           <p class="field-note">默认直接在本项目中解析，无需另开服务或填写接口地址。小红书要求登录时，可在本机 parse-video.local.yml 配置本人 Cookie；失败原因会显示在下方记录中。</p>
-          <div id="api-settings" hidden>
-          <label for="parser-api-url" class="api-url-label">完整接口地址</label>
+          <div id="api-settings">
+          <label for="parser-api-url" class="api-url-label">第三方解析接口（可选）</label>
           <input id="parser-api-url" type="url" placeholder="https://jk.y-l.cc/api/dsp/接口标识/用户ID/" autocomplete="off" spellcheck="false">
-          <p class="field-note">填写接口方提供的完整地址，不要附加 ?url= 参数。地址含账号标识，只保存到本机配置；接口失败时会提示原因。</p>
+          <p class="field-note">选择“指定解析接口”时必填；选择 parse-video-py 时作为抖音解析失败后的备用接口。不要附加 ?url= 参数，地址含账号标识，只保存到本机配置。</p>
           </div>
           <label class="check-label"><input id="enabled" type="checkbox">启用群聊分享解析</label>
           <label for="groups">群 ID，每行一个</label>
