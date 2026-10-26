@@ -654,7 +654,7 @@ class GroupManager:
         def read(db):
             row = db.execute("SELECT value FROM sync_metadata WHERE key='account'").fetchone()
             account = row[0] if row else bot_wxid
-            rows = db.execute(f"""SELECT sender,timestamp,substr(content,1,1200) AS content,is_self
+            rows = db.execute(f"""SELECT group_id,sender,timestamp,substr(content,1,1200) AS content,is_self
                 FROM chat_messages WHERE group_id=? AND type=1
                 AND timestamp>=? AND timestamp<? AND (?='' OR sender<>?)
                 AND is_self=0 AND NOT ({SELF_MESSAGE_SQL})

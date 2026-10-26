@@ -167,6 +167,7 @@ class MentionChatService:
         self._names_lock = asyncio.Lock()
         self._profile_names: tuple[str, ...] = ()
         self.summary_service = None
+        self.insights_service = None
         self.tools_service = None
         self.favorites_service = None
         self.search_service = None
@@ -365,7 +366,7 @@ class MentionChatService:
             self._queue.put_nowait({
                 "group": group, "sender": event.sender, "key": key, "question": question,
                 "image_question": image_question, "image_ambiguous": image_ambiguous,
-                "image_msgid": image_msgid, "report": report,
+                "image_msgid": image_msgid, "report": report, "incoming_msgid": str(event.msgid),
             })
             self._pending_groups[group] += 1
             self._pending_members[(group, event.sender)] += 1
@@ -456,7 +457,7 @@ class MentionChatService:
 
     async def _answer(self, question: str, group: str = "", *, sender: str | None = None, key: str = "",
                       turn: ConversationTurn | None = None, image_question: str | None = None,
-                      image_ambiguous: bool = False, image_msgid: str | None = None) -> str | Path:
+                      image_ambiguous: bool = False, image_msgid: str | None = None, incoming_msgid: str = "") -> str | Path:
         if not question:
             return "我在，请在 @ 后写下你的问题。"
         if len(question) > 8000:
@@ -468,6 +469,16 @@ class MentionChatService:
             return "本群对话上下文已清空。"
         if image_ambiguous:
             return "已识别到绘图请求，但暂时无法确认正文中哪个称呼是机器人。请单独 @机器人并在后面发送“生图：图片描述”，或在管理页配置机器人群内显示名。"
+        if self.insights_service:
+            try:
+                result = await self.insights_service.chat_command(question, group, key=key, turn=turn,
+                                                                  exclude_msgid=incoming_msgid)
+                if result is not None:
+                    return result
+            except Exception as exc:
+                from wxhook_api.services.chat_model import ModelError
+                self.last_error = str(exc) if isinstance(exc, ModelError) else "群聊趣味工具暂时失败，请稍后重试。"
+                return self.last_error
         if self.favorites_service and sender is not None:
             try:
                 result = await self.favorites_service.chat_command(question, group, sender, key)
@@ -489,7 +500,11 @@ class MentionChatService:
                 return "暂时无法读取群工具结果，请在管理页检查模型配置和群工具。"
         if re.fullmatch(r"(?:今天|今日)?(?:聊天)?总结[。！!？?]?", compact_question) and self.summary_service:
             try:
-                result = await self.summary_service.get(group)
+                # An explicit in-group request must rebuild from this group's
+                # records, rather than keep repeating a stale daily snapshot.
+                result = await self.summary_service.get(group, force=True)
+                if result.get("group_id") != group:
+                    raise ValueError("总结结果与当前群不一致，已停止返回，请刷新本群总结。")
                 return result["summary"]
             except Exception as exc:
                 self.last_error = str(exc)
@@ -673,7 +688,7 @@ class MentionChatService:
                 with ai_scope(job["group"], job["sender"]), ai_permission(lambda: self._accepting and self.allowed(job["group"], job["sender"])):
                     answer = await self._answer(job["question"], job["group"], sender=job["sender"], key=job["key"], turn=turn,
                                                 image_question=job["image_question"], image_ambiguous=job["image_ambiguous"],
-                                                image_msgid=job.get("image_msgid"))
+                                                image_msgid=job.get("image_msgid"), incoming_msgid=job.get("incoming_msgid", ""))
                 limit = self.options.max_reply_chars
                 is_image = isinstance(answer, Path)
                 if not is_image and len(answer) > limit:

@@ -69,6 +69,7 @@ async function api(path, body, method = "POST", timeout = 15000) {
   if (!response.ok) {
     let message = data.error?.message || data.detail || `请求失败（${response.status}）`;
     if (path.includes("/favorites") && (Array.isArray(message) || data.error?.code === "validation_error")) message = "请检查链接和标题；最多 12 个标签，每个不超过 24 字，备注最多 1000 字。";
+    else if (path.includes("/insights/") && (Array.isArray(message) || data.error?.code === "validation_error")) message = "请检查梗关键词、时间范围和消息编号；漫画最多100条，爬楼最多200条。";
     else if (path.includes("/tools") && (Array.isArray(message) || data.error?.code === "validation_error")) message = "请检查必填内容、日期与冷却时间，固定回复规则需要填写回复内容。";
     else if (Array.isArray(message) || (data.error?.code === "validation_error" && !["/api/manage/chat-model", "/api/manage/vision-model"].some(prefix => path.startsWith(prefix)) && path !== "/api/manage/chatbot/mentions")) message = "请检查填写内容：群 ID 须以 @chatroom 结尾，成员须填写真实 wxid，名称最多 80 字。";
     throw new Error(message);
@@ -533,9 +534,62 @@ function renderTools(group) {
   const hits = toolCard("最近关键词命中", "显示最近 30 条触发记录，重复回调不会重复回复。");
   data.hits.forEach(hit => { const row = el("div", "tool-hit"); row.append(el("strong", "", `${hit.rule_name} · ${{recorded:"已记录",sending:"发送中 / 未确认",sent:"已发送",unknown:"发送未确认",skipped:"已停止"}[hit.status] || hit.status}`), el("p", "", hit.content), el("small", "", `${hit.sender} · ${dateText(hit.created_at, true)}`)); hits.append(row); });
   if (!data.hits.length) hits.append(el("p", "tool-description", "暂无命中记录。"));
-  root.replaceChildren(tasks, reports, rules, hits);
+  const insights = toolCard("群聊趣味工具", "从本群归档找梗、快速补课，或把聊天改编成四格漫画。仅在点击生成时调用模型，网页结果可查看来源；不会自动发送到微信群。");
+  const insightActions = el("div", "tool-actions");
+  [["meme", "群聊梗百科"], ["catchup", "爬楼助手"], ["comic", "聊天变漫画"]].forEach(([kind, label]) => insightActions.append(button(label, "button small", () => insightDialog(group, kind))));
+  insights.append(insightActions, el("p", "tool-description", "群内可发送：@机器人 梗百科：关键词 / 爬楼 最近2小时 / 聊天变漫画 最近30条。"));
+  root.replaceChildren(insights, tasks, reports, rules, hits);
   root.scrollTop = oldScroll;
   updateTaskCountdowns();
+}
+function insightDialog(group, kind) {
+  const titles = {meme: "群聊梗百科", catchup: "爬楼助手", comic: "聊天变漫画"};
+  const body = showDialog(titles[kind], nameOf(group)), version = dialogVersion;
+  const form = el("form"), result = el("section", "insight-result");
+  result.setAttribute("aria-live", "polite");
+  form.append(el("p", "modal-copy", kind === "meme" ? "查找本群归档中的关键词和早期上下文，解释含义并附原话。最早归档记录不等于真正起源。" : kind === "comic" ? "将选取的成员聊天改编成一张四格漫画。会调用对话模型和生图模型，可能需要数分钟；结果在这里预览和下载。" : "按话题整理结论、待办和未解决问题，并附来源消息。时间按北京时间，最多读取最近7天。"));
+  let term, windowInput, limit, after, ids;
+  if (kind === "meme") term = formField(form, "梗关键词", "例如：周三战神", "", false, 80);
+  else {
+    windowInput = selectField(form, "聊天范围（北京时间）", [["今天", "今天"], ["最近2小时", "最近2小时"], ["最近24小时", "最近24小时"], ["最近3天", "最近3天"], ["最近7天", "最近7天"]], "今天");
+    limit = formField(form, "最多选取条数", kind === "comic" ? "1～100" : "1～200", kind === "comic" ? "50" : "200", false, 3);
+    limit.type = "number"; limit.min = "1"; limit.max = kind === "comic" ? "100" : "200"; limit.required = true;
+    after = formField(form, "从消息编号之后（可选）", "例如：123，仍受上述时间范围限制", "", false, 19);
+    ids = formField(form, "仅选这些消息编号（可选）", "例如：123,124,130；不能与起始编号同时填写", "", false, 2100);
+  }
+  if (term) term.required = true;
+  const footer = formFooter(form, kind === "comic" ? "生成四格漫画" : kind === "meme" ? "查找这个梗" : "开始爬楼");
+  form.addEventListener("submit", async event => {
+    event.preventDefault(); if (footer.submit.disabled) return;
+    const payload = kind === "meme" ? {term: term.value.trim()} : {window: windowInput.value, limit: Number(limit.value)};
+    if (after?.value.trim()) payload.after_id = Number(after.value.trim());
+    if (ids?.value.trim()) payload.message_ids = ids.value.trim().split(/[,，\s]+/).map(Number);
+    const numbers = [...(payload.message_ids || []), ...(payload.after_id === undefined ? [] : [payload.after_id])];
+    if (numbers.some(value => !Number.isSafeInteger(value) || value < 1)) { footer.error.textContent = "消息编号必须为有效的正整数。"; return; }
+    footer.submit.disabled = true; footer.error.textContent = "";
+    result.replaceChildren(el("p", "tool-description", kind === "comic" ? "正在创作分镜和漫画，请稍候…" : "正在分析本群记录…"));
+    try {
+      const data = await api(`${groupPath(group.id)}/insights/${kind}`, payload, "POST", kind === "comic" ? 390000 : 140000);
+      if (dialogVersion !== version || !$("modal").open) return;
+      result.replaceChildren(el("p", "insight-text", data.text), el("p", "tool-description", `选取 ${data.sampled_count} 条 / 匹配 ${data.message_count} 条成员文本`));
+      if (data.image_data_url) {
+        const image = el("img", "favorite-full-media"); image.alt = "由本群聊天改编的四格漫画"; image.src = data.image_data_url;
+        const download = el("a", "button small", "下载漫画"); download.href = data.image_data_url; download.download = "群聊四格漫画.png";
+        result.append(image, download, el("p", "tool-description", "群聊创意改编，人物和对白不代表事实复现。"));
+      }
+      if (data.sources.length) {
+        const sources = el("details", "insight-sources"); sources.open = true; sources.append(el("summary", "", "来源原话"));
+        data.sources.forEach(source => {
+          const quote = el("blockquote");
+          quote.append(el("p", "tool-description", `#${source.id} · ${dateText(source.timestamp * 1000)} · ${source.name}`), el("p", "insight-text", source.content));
+          sources.append(quote);
+        }); result.append(sources);
+      }
+    } catch (error) {
+      if (dialogVersion === version && $("modal").open) { result.replaceChildren(); footer.error.textContent = error.message; }
+    } finally { footer.submit.disabled = false; }
+  });
+  body.append(form, result);
 }
 function selectField(form, label, values, value) {
   const caption = el("label", "form-label", label), select = el("select", "form-input");
@@ -713,6 +767,7 @@ function renderMessages() {
     const row = el("div", `chat-message${self ? " is-self" : ""}`), body = el("div", "chat-message-body"), meta = el("div", "chat-meta");
     row.dataset.messageId = String(message.id);
     meta.append(el("span", "", self ? "我" : person.name || person.id), el("time", "", new Date(message.timestamp * 1000).toLocaleTimeString("zh-CN", {hour: "2-digit", minute: "2-digit", hour12: false})));
+    meta.append(el("span", "message-number", `#${message.id}`));
     if (person.blocked) meta.append(badge("已拉黑", "red"));
     body.append(meta, el("div", "chat-bubble", message.content || "（空消息）"));
     if (message.type !== 1 || message.truncated) body.append(el("p", "form-note", `${message.type !== 1 ? `类型 ${message.type} · 展示原始内容` : ""}${message.truncated ? " · 内容过长已截断" : ""}`));
