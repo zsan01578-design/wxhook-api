@@ -175,5 +175,8 @@ class RecentImageMemory:
             if key[:2] == (account, group):
                 self._items.pop(key, None)
 
+    def clear_member(self, account: str, group: str, sender: str):
+        self._items.pop(self._key(account, group, sender), None)
+
     def clear(self):
         self._items.clear()

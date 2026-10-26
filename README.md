@@ -41,6 +41,7 @@ FastAPI 8000 ── Access/BodyLimit → 持久化收件 → 会话有序分发
 - 群聊/成员同步、聊天记录归档、黑名单与群开关
 - @机器人问答：多轮上下文、成员隔离、联网搜索、token 用量统计
 - 图片理解：@机器人发图或对最近图片追问（需在 AI 模型勾选“支持图片理解”）
+- 军师模式：`@机器人 军师：这句话怎么回？`，支持微信引用消息、截图分析、成员独立上下文和按需知识加载（[使用说明](docs/GUIDE.md#军师模式)）
 - 生图：独立模型配置、语义识别、图片回传
 - 群工具：周报/月报、关键词规则、待办与群提醒
 - 群聊梗百科、附来源的爬楼助手、聊天改编四格漫画
@@ -66,7 +67,7 @@ FastAPI 8000 ── Access/BodyLimit → 持久化收件 → 会话有序分发
 .\.venv\Scripts\ruff.exe check src
 ```
 
-当前后端回归 **1138 项通过、1 项跳过（239.45 秒）**；跳过项是测试机无法创建 Windows 重解析点的文件系统测试。`tests/browser/` 另有 9 组 Playwright 脚本，需本机安装 Playwright CLI 和 Chrome。CI 配置见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。
+当前后端回归 **1292 项通过、1 项跳过（260.48 秒）**；跳过项是测试机无法创建 Windows 重解析点的文件系统测试。`tests/browser/` 另有 9 组 Playwright 脚本，需本机安装 Playwright CLI 和 Chrome。CI 配置见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。
 
 测试使用临时数据库、模拟 Hook 和模拟模型，不发送真实微信消息，也不调用真实模型/搜索服务。真实微信、IPv6 Hook、目标机长时间运行仍需实机验收。
 

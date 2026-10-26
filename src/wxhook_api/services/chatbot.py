@@ -21,6 +21,9 @@ from wxhook_api.services.chat_context import ConversationTurn, GroupConversation
 from wxhook_api.services.image_intent import (EXPLICIT_IMAGE_COMMAND, IMAGE_FOLLOWUP, NON_GENERATION, SIMPLE_IMAGE_REQUEST,
                                              VISUAL_TOPIC, ImageIntent, ImagePromptMemory)
 from wxhook_api.services.vision import ImageReader, RecentImageMemory, VisionError
+from wxhook_api.services.quoted_message import QuotedReply, parse_quoted_reply
+from wxhook_api.services.relationship_advisor import (HELP as ADVISOR_HELP, AdvisorRequest,
+    RelationshipAdvisorService, parse_command as advisor_command, refers_to_image, system_prompt)
 
 
 class AnswerProvider(Protocol):
@@ -173,6 +176,7 @@ class MentionChatService:
         self.search_service = None
         self.image_service = None
         self.conversations = GroupConversations()
+        self.advisor = RelationshipAdvisorService()
         self.image_prompts = ImagePromptMemory()
 
     @property
@@ -256,6 +260,7 @@ class MentionChatService:
         self._pending_groups.clear()
         self._pending_members.clear()
         self.conversations.clear()
+        self.advisor.conversations.clear()
         self.image_prompts.clear()
         self.recent_images.clear()
 
@@ -335,13 +340,16 @@ class MentionChatService:
             self.recent_images.remember(self._identity, group, event.sender, msgid)
 
     def _should_attach_image(self, question: str) -> bool:
+        request = advisor_command(question)
+        if request is not None:
+            return refers_to_image(request)
         if not question or IMAGE_REQUEST.search(question) or EXPLICIT_IMAGE_COMMAND.match(question.strip()):
             return False
         return bool(VISION_REFERENCE.search(question))
 
     def _enqueue_job(self, event: CallbackEvent, group: str, question: str, report: dict, *,
                      image_msgid: str | None = None, image_question: str | None = None,
-                     image_ambiguous: bool = False) -> bool:
+                     image_ambiguous: bool = False, quoted_reply: QuotedReply | None = None) -> bool:
         msgid = str(event.msgid)
         if msgid not in {"", "0"}:
             key = "msg:" + (msgid if len(msgid) <= 128 else hashlib.sha256(msgid.encode()).hexdigest())
@@ -367,6 +375,7 @@ class MentionChatService:
                 "group": group, "sender": event.sender, "key": key, "question": question,
                 "image_question": image_question, "image_ambiguous": image_ambiguous,
                 "image_msgid": image_msgid, "report": report, "incoming_msgid": str(event.msgid),
+                "quoted_reply": quoted_reply,
             })
             self._pending_groups[group] += 1
             self._pending_members[(group, event.sender)] += 1
@@ -388,7 +397,12 @@ class MentionChatService:
         if not self._accepting:
             report.update(status="disabled", message="@问答全局开关已关闭")
             return False
-        if event.type != 1 and not image_event:
+        quoted_reply = parse_quoted_reply(event)
+        if quoted_reply is not None:
+            # Archive/identity normalization already used the original callback.
+            # Routing must see only this reply's title, never the quoted body.
+            event = event.model_copy(update={"content": quoted_reply.title})
+        if event.type != 1 and not image_event and quoted_reply is None:
             report.update(status="nontext", message="此消息不是文本或图片，不触发问答")
             return False
         if not self.allowed(group, event.sender):
@@ -398,7 +412,7 @@ class MentionChatService:
             report.update(status="identity", message=self.last_error)
             return True
         ids, structured = mention_ids(event)
-        if not ids and not image_event and self.favorites_service:
+        if not ids and not image_event and quoted_reply is None and self.favorites_service:
             from wxhook_api.services.favorites import is_favorite_command
             if is_favorite_command(event_text(event)):
                 if not await self.ensure_account() or self.own_message(event):
@@ -417,6 +431,13 @@ class MentionChatService:
             return self.own_message(event)
         names = await self._group_names(group)
         report["mention_names"] = list(names)
+        if quoted_reply is not None:
+            question = addressed_question(event, self._identity, names, after_mention=True)
+            if question is None or advisor_command(question) is None:
+                report.update(status="quote_ignored", message="引用消息需在当前提问中 @机器人并填写军师指令")
+                return True
+            report.update(model_route="advisor", mention_source="wxid" if ids else "display_name")
+            return self._enqueue_job(event, group, question, report, quoted_reply=quoted_reply)
         if image_event:
             msgid = str(event.msgid)
             if msgid in {"", "0"}:
@@ -430,7 +451,9 @@ class MentionChatService:
             if not addressed:
                 report.update(status="image_not_addressed", message="图片未 @当前机器人，已暂存；同群 @机器人 询问时会参考")
                 return True
-            question = self._image_caption(event) or DEFAULT_VISION_QUESTION
+            caption = self._image_caption(event)
+            question = (addressed_question(event, self._identity, names, after_mention=True) or caption
+                        if caption else DEFAULT_VISION_QUESTION)
             report["model_route"] = "vision"
             report["mention_source"] = "wxid" if structured else "display_name"
             return self._enqueue_job(event, group, question, report, image_msgid=msgid)
@@ -457,16 +480,22 @@ class MentionChatService:
 
     async def _answer(self, question: str, group: str = "", *, sender: str | None = None, key: str = "",
                       turn: ConversationTurn | None = None, image_question: str | None = None,
-                      image_ambiguous: bool = False, image_msgid: str | None = None, incoming_msgid: str = "") -> str | Path:
+                      image_ambiguous: bool = False, image_msgid: str | None = None, incoming_msgid: str = "",
+                      quoted_reply: QuotedReply | None = None) -> str | Path:
         if not question:
             return "我在，请在 @ 后写下你的问题。"
         if len(question) > 8000:
             return "问题太长了，请缩短后重新 @ 我。"
         if re.sub(r"\s+", "", question).rstrip("。！!？?") in {"清空上下文", "重置对话"}:
             self.conversations.clear_group(self.identity, group)
+            self.advisor.conversations.clear_group(self.identity, group)
             self.image_prompts.clear_group(self.identity, group)
             self.recent_images.clear_group(self.identity, group)
             return "本群对话上下文已清空。"
+        request = advisor_command(question)
+        if request is not None:
+            return await self._advisor_answer(request, group, sender=sender, turn=turn, image_msgid=image_msgid,
+                                              quoted_reply=quoted_reply)
         if image_ambiguous:
             return "已识别到绘图请求，但暂时无法确认正文中哪个称呼是机器人。请单独 @机器人并在后面发送“生图：图片描述”，或在管理页配置机器人群内显示名。"
         if self.insights_service:
@@ -551,8 +580,80 @@ class MentionChatService:
             self.last_error = "问答接口返回失败或超时，请检查接口配置"
             return "暂时无法回答，请稍后重新 @ 我。"
 
+    async def _advisor_answer(self, request: AdvisorRequest, group: str, *, sender: str | None,
+                              turn: ConversationTurn | None, image_msgid: str | None,
+                              quoted_reply: QuotedReply | None = None) -> str:
+        conversations = self.advisor.conversations
+        if conversations.participant_id(self.identity, group, sender or "") == "unknown":
+            return "无法确认提问成员，已停止军师分析；请用本人账号重新 @机器人提问。"
+        if request.clear:
+            conversations.clear_member(self.identity, group, sender)
+            self.recent_images.clear_member(self.identity, group, sender)
+            return "你在本群的军师上下文和最近图片已清空。"
+        if not request.question and not image_msgid and quoted_reply is None:
+            return ADVISOR_HELP
+        question = request.question or ("请分析被引用的消息，帮我判断关系并给出下一步建议。" if quoted_reply
+                                        else "请分析这张聊天截图，帮我判断关系并给出下一步建议。")
+        source_senders = frozenset({quoted_reply.sender}) if quoted_reply and quoted_reply.sender else frozenset()
+        if quoted_reply is not None:
+            if quoted_reply.source_group and quoted_reply.source_group != group:
+                return "引用来源与本群不一致，已停止分析；请在原群重新引用。"
+            if quoted_reply.error:
+                return quoted_reply.error
+            if any(not self.groups.allowed(group, member) for member in source_senders):
+                return "引用消息的来源成员当前不可用于 AI 分析，已停止处理。"
+        if turn is not None:
+            turn.mode = "advisor"
+            turn.source_senders = source_senders
+            turn.allowed_sender = lambda member: self.groups.allowed(group, member)
+        knowledge_question = question
+        if quoted_reply is not None:
+            knowledge_question += "\n" + quoted_reply.content
+            question = quoted_reply.question(question, sender)
+        if turn is not None:
+            turn.question = question
+        try:
+            if quoted_reply is not None and quoted_reply.message_type == "3":
+                if not quoted_reply.message_id or not quoted_reply.sender:
+                    return "无法定位被引用的图片，请直接发送原图再 @机器人提问。"
+                def locate(db):
+                    return db.execute("SELECT 1 FROM chat_messages WHERE group_id=? AND msg_key=? AND msgid=? AND sender=? AND type=3",
+                                      (group, "server:" + quoted_reply.message_id,
+                                       quoted_reply.message_id, quoted_reply.sender)).fetchone() is not None
+                if not await self.groups.read(locate):
+                    return "本群归档中找不到这张被引用的图片，请直接发送原图再 @机器人提问。"
+                image_msgid = quoted_reply.message_id
+            system = system_prompt(knowledge_question, image=bool(image_msgid))
+            provider = self.provider
+            if not image_msgid and provider is None:
+                return "问答接口尚未配置，请联系管理员。"
+            with ai_permission(lambda: all(self.groups.allowed(group, member) for member in source_senders)):
+                if image_msgid:
+                    return await self._vision_answer(question, group, sender=sender, image_msgid=image_msgid,
+                                                     turn=turn, system=system + VISION_SYSTEM,
+                                                     conversations=conversations)
+                conversation = None
+                if turn is not None:
+                    turn.provider = provider
+                    conversation = conversations.view(turn, provider,
+                        allowed_sender=lambda member: self.groups.allowed(group, member))
+                async with asyncio.timeout(getattr(provider, "request_timeout", 120)):
+                    answer = await provider.answer(question, system=system, conversation=conversation)
+            if not isinstance(answer, str) or not answer.strip():
+                raise ValueError
+            if turn is not None:
+                turn.generated = True
+            self._recent_requests.get(group, {}).update(model_route="advisor")
+            self.last_error = ""
+            return answer.strip()
+        except Exception as exc:
+            from wxhook_api.services.chat_model import ModelError
+            self.last_error = str(exc) if isinstance(exc, ModelError) else "军师分析失败，请稍后重试或检查模型配置。"
+            return self.last_error
+
     async def _vision_answer(self, question: str, group: str, *, sender: str | None,
-                             image_msgid: str, turn: ConversationTurn | None) -> str:
+                             image_msgid: str, turn: ConversationTurn | None, system: str = VISION_SYSTEM,
+                             conversations: GroupConversations | None = None) -> str:
         provider = self.vision_provider or self.provider
         if provider is None or hasattr(provider, "supports_vision") and not provider.supports_vision:
             return "视觉模型尚未配置，请在 AI 模型 → 视觉模型中添加支持图片输入的模型。"
@@ -568,17 +669,18 @@ class MentionChatService:
             self.last_error = "无法读取这张图片，请稍后重试。"
             return self.last_error
         report = self._recent_requests.get(group, {})
-        report.update(model_route="vision", vision_ready=True)
+        report.update(model_route="advisor_vision" if turn is not None and turn.mode == "advisor" else "vision",
+                      vision_ready=True)
         conversation = None
         if turn is not None:
             turn.provider = provider
-            conversation = self.conversations.view(turn, provider,
+            conversation = (conversations or self.conversations).view(turn, provider,
                 allowed_sender=lambda member: self.groups.allowed(turn.group, member))
         prompt = question.strip() or DEFAULT_VISION_QUESTION
         try:
             # Vision inference plus upload needs more room than ordinary text.
             async with asyncio.timeout(190):
-                answer = await provider.answer(prompt, system=VISION_SYSTEM, conversation=conversation,
+                answer = await provider.answer(prompt, system=system, conversation=conversation,
                                                image_data_url=image_url)
             if not isinstance(answer, str) or not answer.strip():
                 raise ValueError
@@ -688,7 +790,8 @@ class MentionChatService:
                 with ai_scope(job["group"], job["sender"]), ai_permission(lambda: self._accepting and self.allowed(job["group"], job["sender"])):
                     answer = await self._answer(job["question"], job["group"], sender=job["sender"], key=job["key"], turn=turn,
                                                 image_question=job["image_question"], image_ambiguous=job["image_ambiguous"],
-                                                image_msgid=job.get("image_msgid"), incoming_msgid=job.get("incoming_msgid", ""))
+                                                image_msgid=job.get("image_msgid"), incoming_msgid=job.get("incoming_msgid", ""),
+                                                quoted_reply=job.get("quoted_reply"))
                 limit = self.options.max_reply_chars
                 is_image = isinstance(answer, Path)
                 if not is_image and len(answer) > limit:
@@ -720,7 +823,8 @@ class MentionChatService:
                 status = "sent"
                 self.sent += 1
                 if not is_image:
-                    self.conversations.commit(turn, answer)
+                    conversations = self.advisor.conversations if turn.mode == "advisor" else self.conversations
+                    conversations.commit(turn, answer)
                 else:
                     self.image_prompts.remember(self.identity, job["group"], job["sender"], turn.image_prompt)
                 report.update(status="sent", message="Hook 已确认发送一张生成图片" if is_image else "Hook 已确认发送一条回复")

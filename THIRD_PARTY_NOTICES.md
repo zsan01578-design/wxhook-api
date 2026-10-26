@@ -1,5 +1,23 @@
 # Third-party dependencies
 
+## goutoujunshi
+
+- Project: https://github.com/shengjidaguai-china/goutoujunshi
+- Pinned revision: `6db7354a4002dc7c448a9c87ffdad8132570c9d3`
+- Copyright (c) 2026 powerycy
+- License: MIT; complete license is bundled at `src/wxhook_api/resources/relationship_advisor/LICENSE`.
+
+The relationship advisor bundles the 20 knowledge documents and six selected
+practical guides from this revision. Document content is retained from upstream;
+the application selects bounded excerpts at runtime. The workflow prompt is
+adapted in `services/relationship_advisor.py` for explicit WeChat commands,
+member-scoped temporary conversations and the existing model pipeline. The
+upstream memory script, Codex metadata and ChatLab integration are not installed.
+
+Updating these resources requires reviewing the upstream changes, replacing the
+bundled documents and license, and updating the pinned revision here and in the
+service. There is no runtime download or automatic update.
+
 ## parse-video-py
 
 - Project: https://github.com/wujunwei928/parse-video-py
