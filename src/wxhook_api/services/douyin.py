@@ -349,8 +349,8 @@ class DouyinService:
                         try:
                             parsed = await parser.parse(job["source_url"])
                         except DouyinError as primary_error:
-                            # The upstream library cannot read Douyin image notes;
-                            # retry those through the optional third-party endpoint.
+                            # The shared adapter already tries public share pages;
+                            # use the optional third-party endpoint as a last resort.
                             if job["platform"] != "douyin" or not config.parser_api_url:
                                 raise
                             try:

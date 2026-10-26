@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 import importlib
@@ -17,7 +18,7 @@ import yaml
 
 from wxhook_api.core.bounded_http import LimitedStream, ResponseReadError
 from wxhook_api.core.config import PROJECT_ROOT
-from wxhook_api.services.douyin_parser import DouyinError, ParsedMedia, USER_AGENT, checked_url, stream_error
+from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, ParsedMedia, USER_AGENT, checked_url, stream_error
 
 
 PLATFORMS = {
@@ -196,6 +197,25 @@ class ParseVideoParser:
 
     async def parse(self, source: str) -> ParsedMedia:
         source = _normalize_source(source)
+        try:
+            return await self._parse_sdk(source)
+        except DouyinError as primary_error:
+            if source_platform(source) != "douyin":
+                raise
+            # Keep this recovery in the shared adapter: both queued group jobs
+            # and /api/parse need it, without requiring a third-party endpoint.
+            try:
+                async with asyncio.timeout(60), httpx.AsyncClient(
+                    transport=self.transport, trust_env=False, follow_redirects=False,
+                    timeout=httpx.Timeout(12, connect=5), proxy=os.getenv("PARSE_VIDEO_PROXY") or None,
+                ) as client:
+                    return await DouyinParser(client).parse(source)
+            except Exception:
+                # Preserve the SDK's sanitized error if recovery also fails;
+                # malformed platform data or proxy settings must not leak.
+                raise primary_error from None
+
+    async def _parse_sdk(self, source: str) -> ParsedMedia:
         platform = source_platform(source)
         name = PLATFORMS[platform][0]
         resolver = _load_library()

@@ -19,7 +19,7 @@ def note_failure(request):
         return httpx.Response(302, headers={"location": f"https://www.douyin.com/note/{ITEM}"})
     if host == "www.iesdouyin.com" and "/slidesinfo/" in path:
         return httpx.Response(200, json={"aweme_details": None})
-    if host in {"www.douyin.com", "www.iesdouyin.com"}:
+    if host in {"www.douyin.com", "www.iesdouyin.com", "m.douyin.com"}:
         return httpx.Response(200, text='window._ROUTER_DATA = {"loaderData":{"video_(id)/page":{}}}</script>')
     pytest.fail(f"unexpected request: {request.url}")
 

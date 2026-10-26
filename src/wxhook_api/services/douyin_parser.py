@@ -122,6 +122,8 @@ def page_data(document: str) -> list[Any]:
             try:
                 candidate = re.sub(r'"(?:\\.|[^"\\])*"|(?<![\w$])undefined(?![\w$])', lambda match: "null" if match.group() == "undefined" else match.group(), candidate)
                 value, _ = decoder.raw_decode(candidate)
+                if isinstance(value, str):
+                    value = json.loads(value)
             except (ValueError, RecursionError):
                 continue
             if isinstance(value, (dict, list)):
@@ -209,7 +211,8 @@ class DouyinParser:
         current = url
         for _ in range(7):
             current = checked_url(current)
-            async with self.client.stream("GET", current, headers={"Accept-Encoding": "gzip, deflate"}) as response:
+            async with self.client.stream("GET", current, headers={"User-Agent": USER_AGENT,
+                                          "Referer": "https://www.douyin.com/", "Accept-Encoding": "gzip, deflate"}) as response:
                 if response.is_redirect:
                     location = response.headers.get("location")
                     if not location:
@@ -227,7 +230,9 @@ class DouyinParser:
         identity = item_identity(source)
         try:
             final_url, document = await self.document(source)
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            if isinstance(exc, httpx.HTTPStatusError):
+                identity = item_identity(str(exc.request.url)) or identity
             if identity is None:
                 raise
             # A standard desktop URL can fail while the public mobile share
@@ -248,9 +253,16 @@ class DouyinParser:
         parsed = from_document(document)
         if parsed:
             return parsed
-        for host in ("www.iesdouyin.com", "m.douyin.com"):
+        # A note's /share/note/ page can contain only an empty loader while
+        # /share/video/ for the same ID still exposes the complete image list.
+        candidates = [("www.iesdouyin.com", route) for route in dict.fromkeys((kind, "video", "note", "slides"))]
+        candidates.append(("m.douyin.com", kind))
+        for host, route in candidates:
+            url = f"https://{host}/share/{route}/{item_id}/"
+            if url.rstrip("/") == final_url.split("?", 1)[0].rstrip("/"):
+                continue
             try:
-                _, text = await self.document(f"https://{host}/share/{kind}/{item_id}/")
+                _, text = await self.document(url)
                 parsed = from_document(text)
                 if parsed:
                     return parsed
