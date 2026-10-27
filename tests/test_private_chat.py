@@ -1,0 +1,196 @@
+import asyncio
+from contextlib import asynccontextmanager
+import json
+from types import SimpleNamespace
+
+from asgi_lifespan import LifespanManager
+import httpx
+import pytest
+
+from tests.test_callbacks import EVENT
+from tests.test_douyin import options as douyin_options
+from wxhook_api.clients.hook_client import HookClient
+from wxhook_api.core.chatbot_config import ChatbotOptions
+from wxhook_api.main import create_app
+from wxhook_api.services.chatbot import MentionChatService
+from wxhook_api.services.douyin import DouyinService
+from wxhook_api.services.groups import GroupManager
+
+
+BOT = "wxid_robot"
+FRIEND = "wxid_friend"
+OTHER = "wxid_other"
+GROUP = "123456789@chatroom"
+
+
+class Provider:
+    def __init__(self, result="收到"):
+        self.result = result
+        self.calls = []
+
+    async def answer(self, question, context=None, *, system=None, history=None, **kwargs):
+        self.calls.append({"question": question, "system": system, "history": history})
+        return self.result
+
+
+def private_event(content="你好", msgid=1, **extra):
+    return {**EVENT, "roomid": "", "wxid": FRIEND, "sender": FRIEND, "msgid": msgid, "type": 1, "content": content, **extra}
+
+
+@asynccontextmanager
+async def context(tmp_path, provider=None):
+    state = SimpleNamespace(sends=[], hook_calls=[])
+
+    async def hook_response(request):
+        body = json.loads(request.content)
+        state.hook_calls.append(request.url.path)
+        if request.url.path == "/GetSelfProfile":
+            return httpx.Response(200, json={"wxid": BOT, "nickname": "机器人"})
+        assert request.url.path == "/SendTextMsg", "Unexpected outbound Hook operation"
+        state.sends.append(body)
+        return httpx.Response(200, json={"ret": 0})
+
+    state.bot = MentionChatService(ChatbotOptions(True, BOT, ("机器人",)), provider=provider)
+    state.hook = HookClient("http://hook.test", transport=httpx.MockTransport(hook_response))
+    state.media = DouyinService(douyin_options(tmp_path), transport=httpx.MockTransport(lambda request: httpx.Response(404)))
+    state.app = create_app(douyin_service=state.media, hook_client=state.hook, chat_service=state.bot,
+                           group_manager=GroupManager(tmp_path / "management.sqlite3"))
+    try:
+        async with LifespanManager(state.app), httpx.AsyncClient(transport=httpx.ASGITransport(app=state.app), base_url="http://test") as client:
+            state.client = client
+
+            async def submit(payload):
+                response = await client.post("/receiveChatBotMsg", json=payload)
+                assert response.status_code == 200
+                await asyncio.wait_for(state.app.state.event_dispatcher._queue.join(), 2)
+                await asyncio.wait_for(state.app.state.private_chat._queue.join(), 2)
+
+            state.submit = submit
+            yield state
+    finally:
+        await state.hook.aclose()
+
+
+async def enable(state, contact=FRIEND, personality=""):
+    await state.app.state.private_chat.configure(enabled=True, personality=personality)
+    assert await state.app.state.private_chat.update_contact(contact, {"enabled": True})
+
+
+async def test_private_chat_is_off_by_default_and_only_records_the_contact(tmp_path):
+    provider = Provider()
+    async with context(tmp_path, provider) as state:
+        await state.submit(private_event())
+        assert not provider.calls and not state.sends
+        snapshot = state.app.state.private_chat.snapshot()
+        assert snapshot["enabled"] is False
+        assert [(item["id"], item["enabled"]) for item in snapshot["contacts"]] == [(FRIEND, False)]
+
+
+async def test_enabled_contact_gets_one_reply_to_the_friend(tmp_path):
+    provider = Provider("你好呀")
+    async with context(tmp_path, provider) as state:
+        await state.submit(private_event())
+        await enable(state)
+        await state.submit(private_event("在吗", 2))
+        assert provider.calls[0]["question"] == "在吗"
+        assert state.sends == [{"wxidorgid": FRIEND, "msg": "你好呀"}]
+
+
+async def test_personality_and_context_reach_the_model(tmp_path):
+    provider = Provider("第一句")
+    async with context(tmp_path, provider) as state:
+        await state.submit(private_event())
+        await enable(state, personality="你说话温柔耐心")
+        await state.submit(private_event("你好", 2))
+        await state.submit(private_event("再说一句", 3))
+        assert len(provider.calls) == 2
+        assert "你说话温柔耐心" in provider.calls[0]["system"]
+        assert provider.calls[0]["history"] == []
+        assert provider.calls[1]["history"] == [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "第一句"},
+        ]
+
+
+@pytest.mark.parametrize("payload", [
+    private_event(msgid=10, roomid=GROUP, wxid=GROUP),
+    private_event(msgid=11, sender=BOT, wxid=FRIEND),
+    private_event(msgid=12, type=3),
+])
+async def test_group_self_and_nontext_messages_are_ignored(tmp_path, payload):
+    provider = Provider()
+    async with context(tmp_path, provider) as state:
+        await state.submit(private_event())
+        await enable(state)
+        await state.submit(payload)
+        assert not provider.calls and not state.sends
+
+
+async def test_only_enabled_contacts_are_answered(tmp_path):
+    provider = Provider()
+    async with context(tmp_path, provider) as state:
+        await state.submit(private_event())
+        await state.submit(private_event(msgid=2, wxid=OTHER, sender=OTHER))
+        await enable(state)
+        await state.submit(private_event(msgid=3))
+        await state.submit(private_event(msgid=4, wxid=OTHER, sender=OTHER))
+        assert [call["question"] for call in provider.calls] == ["你好"]
+        assert [body["wxidorgid"] for body in state.sends] == [FRIEND]
+
+
+async def test_clear_context_command_resets_history(tmp_path):
+    provider = Provider("好的")
+    async with context(tmp_path, provider) as state:
+        await state.submit(private_event())
+        await enable(state)
+        await state.submit(private_event("你好", 2))
+        await state.submit(private_event("清空上下文", 3))
+        await state.submit(private_event("重新开始", 4))
+        assert [call["question"] for call in provider.calls] == ["你好", "重新开始"]
+        assert provider.calls[1]["history"] == []
+        assert [body["msg"] for body in state.sends] == ["好的", "私聊对话上下文已清空。", "好的"]
+
+
+async def test_duplicate_callback_does_not_repeat_the_answer(tmp_path):
+    provider = Provider()
+    async with context(tmp_path, provider) as state:
+        await state.submit(private_event())
+        await enable(state)
+        await state.submit(private_event("你好", 5))
+        await state.submit(private_event("你好", 5))
+        assert len(provider.calls) == 1
+        assert len(state.sends) == 1
+
+
+async def test_missing_model_gives_an_honest_configuration_message(tmp_path):
+    async with context(tmp_path, None) as state:
+        await state.submit(private_event())
+        await enable(state)
+        await state.submit(private_event("在吗", 2))
+        assert state.sends == [{"wxidorgid": FRIEND, "msg": "私聊问答接口尚未配置，请联系管理员。"}]
+
+
+async def test_config_api_updates_personality_and_contact_toggle(tmp_path):
+    async with context(tmp_path, Provider()) as state:
+        await state.submit(private_event())
+        response = await state.client.post("/api/private/config", json={"enabled": True, "personality": "幽默风趣"})
+        assert response.status_code == 200
+        assert response.json()["state"]["enabled"] is True
+        assert response.json()["state"]["personality"] == "幽默风趣"
+        response = await state.client.patch(f"/api/private/contacts/{FRIEND}", json={"enabled": True, "name": "朋友"})
+        assert response.status_code == 200
+        contact = response.json()["state"]["contacts"][0]
+        assert contact["enabled"] is True and contact["name"] == "朋友"
+        assert contact["last_message"] == "等待新的私聊消息"
+        response = await state.client.get("/api/private/state")
+        assert response.status_code == 200 and response.json()["contacts"][0]["name"] == "朋友"
+        page = await state.client.get("/private")
+        assert page.status_code == 200 and "私聊 AI 问答" in page.text
+
+
+async def test_invalid_personality_and_group_contact_are_rejected(tmp_path):
+    async with context(tmp_path, Provider()) as state:
+        response = await state.client.post("/api/private/config", json={"personality": "x" * 2001})
+        assert response.status_code == 422
+        response = await state.client.patch("/api/private/contacts/123456789@chatroom", json={"enabled": True})
+        assert response.status_code == 400

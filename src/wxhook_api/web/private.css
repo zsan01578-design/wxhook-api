@@ -1,0 +1,15 @@
+.private-layout{display:grid;grid-template-columns:minmax(290px,.85fr) minmax(0,1.15fr);gap:24px}
+.contact-tools{display:flex;align-items:center;gap:10px}
+.contact-tools .secondary{padding:6px 10px}
+.persona-presets{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 8px}
+.persona-presets .secondary{padding:7px 11px}
+.contact-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;border:1px solid #e5ebe1;border-radius:9px;padding:14px;margin-bottom:10px;background:#fcfdfb}
+.contact-main{min-width:0}
+.contact-id{font-family:Consolas,monospace;font-size:12px;overflow-wrap:anywhere}
+.contact-name{display:block;width:100%;border:1px solid #dce4db;border-radius:6px;background:#fdfefb;color:#254438;padding:7px 9px;font-size:12px;margin-top:7px;outline:none}
+.contact-name:focus{border-color:#7b9e86}
+.contact-meta{font-size:11px;color:#8b9788;line-height:1.7;margin-top:6px;overflow-wrap:anywhere}
+.contact-switch{display:flex;align-items:center;gap:8px;font-size:12px;white-space:nowrap;cursor:pointer}
+.contact-switch input{accent-color:var(--green);width:auto;margin:0}
+@media(max-width:850px){.private-layout{grid-template-columns:1fr}}
+@media(max-width:700px){.page-header{flex-direction:column;align-items:flex-start;gap:16px}.header-links{gap:14px}}

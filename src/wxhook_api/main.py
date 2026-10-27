@@ -24,9 +24,10 @@ from wxhook_api.core.douyin_config import load_douyin_options
 from wxhook_api.core.errors import AccountMismatchError, HookTransportError, install_exception_handlers
 from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.core.runtime import source_revision
-from wxhook_api.routes import account, callbacks, contacts, douyin, favorites, group_insights, group_tools, health, history, manage, media, messages, parse, querydb, ui
+from wxhook_api.routes import account, callbacks, contacts, douyin, favorites, group_insights, group_tools, health, history, manage, media, messages, parse, private_chat, querydb, ui
 from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.chatbot import MentionChatService
+from wxhook_api.services.private_chat import PrivateChatService
 from wxhook_api.services.chat_model import ChatModelConfiguration
 from wxhook_api.services.image_model import ImageModelConfiguration
 from wxhook_api.services.vision_model import VisionModelConfiguration
@@ -60,6 +61,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     douyin_worker.account_check = chatbot.verify_account
     douyin_worker.own_message_check = chatbot.own_message
     model_configuration = ChatModelConfiguration(chatbot)
+    private_chat_service = PrivateChatService(groups, chatbot)
     vision_configuration = VisionModelConfiguration(chatbot, budget=model_configuration.budget)
     image_configuration = ImageModelConfiguration(chatbot, budget=model_configuration.budget)
     chatbot.image_service = image_configuration
@@ -106,6 +108,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
         if await tools_service.receive(event):
             return
         await douyin_worker.receive(event)
+        await private_chat_service.receive(event)
 
     dispatcher.register(automatic_message)
     owned_client: HookClient | None = None
@@ -128,6 +131,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             cleanup.callback(setattr, douyin_worker, "messenger", None)
             cleanup.push_async_callback(douyin_worker.stop)
             cleanup.push_async_callback(chatbot.stop)
+            cleanup.push_async_callback(private_chat_service.stop)
             cleanup.push_async_callback(summary_service.stop)
             cleanup.push_async_callback(tools_service.stop)
             cleanup.push_async_callback(dispatcher.stop, settings.shutdown_timeout)
@@ -147,6 +151,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
             await groups.start(douyin_worker.options.settings.groups)
             await douyin_worker.start()
             await chatbot.start(app.state.hook_client)
+            await private_chat_service.start(app.state.hook_client)
             await tools_service.start()
             await favorites_service.start()
             await retention.start()
@@ -170,6 +175,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.state.groups = groups
     app.state.wechat_sync = synchronizer
     app.state.chatbot = chatbot
+    app.state.private_chat = private_chat_service
     app.state.chat_model = model_configuration
     app.state.image_model = image_configuration
     app.state.vision_model = vision_configuration
@@ -186,7 +192,7 @@ def create_app(settings: Settings | None = None, *, hook_transport: httpx.AsyncB
     app.add_middleware(AccessMiddleware)
     install_exception_handlers(app)
     app.add_exception_handler(sqlite3.Error, manage.storage_error)
-    for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router, douyin.router, parse.router, manage.router, group_tools.router, favorites.router, group_insights.router):
+    for router in (health.router, account.router, messages.router, media.router, querydb.router, contacts.router, history.router, callbacks.router, ui.router, douyin.router, parse.router, manage.router, group_tools.router, favorites.router, group_insights.router, private_chat.router):
         app.include_router(router)
     app.mount("/ui/assets", StaticFiles(directory=ui.WEB_ROOT), name="message-assets")
     return app

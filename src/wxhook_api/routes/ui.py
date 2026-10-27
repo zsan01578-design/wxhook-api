@@ -30,6 +30,11 @@ async def message_page():
     return FileResponse(WEB_ROOT / "index.html", headers=PAGE_HEADERS)
 
 
+@router.get("/private", include_in_schema=False)
+async def private_chat_page():
+    return FileResponse(WEB_ROOT / "private.html", headers=PAGE_HEADERS)
+
+
 @router.get("/ui/messages", tags=["消息页面"])
 async def inbox_messages(request: Request):
     data = request.app.state.message_inbox.snapshot()

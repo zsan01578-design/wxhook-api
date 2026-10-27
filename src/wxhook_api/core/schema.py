@@ -93,6 +93,16 @@ CREATE TABLE IF NOT EXISTS group_favorites (
     created_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     UNIQUE(group_id,source_key));
 CREATE INDEX IF NOT EXISTS group_favorites_recent ON group_favorites(group_id,created_at DESC,id);
+CREATE TABLE IF NOT EXISTS private_contacts (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS private_chat_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled INTEGER NOT NULL DEFAULT 0,
+    personality TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
 """
 
 
