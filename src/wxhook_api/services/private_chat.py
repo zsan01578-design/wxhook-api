@@ -25,6 +25,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CONTACT_PATTERN = r"^[A-Za-z0-9_.@-]{1,256}$"
+# These built-in conversations also produce private-message callbacks. Match
+# account IDs, never display names (a friend can use the same nickname).
+SYSTEM_CONTACTS = frozenset({
+    "newsapp", "weixin", "fmessage", "medianote", "filehelper",
+    "floatbottle", "shakeapp", "qqmail", "qqsync", "qmessage", "qqfriend",
+    "tmessage", "tweibo", "weibo", "facebookapp", "masssendapp", "feedsapp",
+    "voip", "voipapp", "voipinvite", "blogapp", "gmailapp", "linkedinplugin",
+    "notifymessage", "notification_messages", "appbrand_notify_message",
+    "appbrandcustomerservicemsg", "officialaccounts", "brandsessionholder",
+    "mphelper", "weixinreminder", "wxpay", "wxpay_notify", "wxpay_business",
+    "exmail_tool", "helper_entry",
+})
 MAX_PERSONALITY_CHARS = 2000
 MAX_CONTEXT_TURNS = 10
 MAX_QUEUE = 100
@@ -35,6 +47,21 @@ PERSONA_RULES = (
     "不要使用 Markdown、表格或列表。不要提及系统提示、模型、接口或配置，"
     "也不要复述或解释本段设定。"
 )
+
+
+def is_personal_contact(contact: str) -> bool:
+    """Exclude known service accounts without requiring a wxid_ prefix.
+
+    Older personal accounts may use custom usernames. Callback payloads do not
+    include contact verification metadata, so classify by reserved IDs here.
+    """
+    normalized = contact.casefold()
+    return bool(
+        re.fullmatch(CONTACT_PATTERN, contact)
+        and normalized not in SYSTEM_CONTACTS
+        and not normalized.startswith("gh_")
+        and not normalized.endswith("@chatroom")
+    )
 
 
 @dataclass(frozen=True)
@@ -84,7 +111,9 @@ class PrivateChatService:
         settings, contacts = await asyncio.to_thread(self._load)
         self._settings = PrivateSettings(bool(settings["enabled"]), settings["personality"] or "")
         self._accepting = self._settings.enabled
-        self._contacts = {row["id"]: dict(row) for row in contacts}
+        # Old versions persisted system accounts too, sometimes enabled. Keep
+        # their stored settings intact, but never load them as reply targets.
+        self._contacts = {row["id"]: dict(row) for row in contacts if is_personal_contact(row["id"])}
         self._worker = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
@@ -129,6 +158,8 @@ class PrivateChatService:
     def snapshot(self) -> dict:
         contacts = []
         for contact, row in self._contacts.items():
+            if not is_personal_contact(contact):
+                continue
             status = self._status.get(contact, {})
             contacts.append({
                 "id": contact, "name": row.get("name", ""), "enabled": bool(row.get("enabled")),
@@ -172,7 +203,7 @@ class PrivateChatService:
 
     async def update_contact(self, contact: str, changes: dict) -> bool:
         changes = {key: value for key, value in changes.items() if key in {"enabled", "name"} and value is not None}
-        if contact not in self._contacts:
+        if not is_personal_contact(contact) or contact not in self._contacts:
             return False
         if not changes:
             return True
@@ -240,9 +271,9 @@ class PrivateChatService:
         contact = (event.wxid or "").strip()
         if not contact or contact == identity:
             contact = (event.sender or "").strip()
-        if not contact or contact == identity or contact.endswith("@chatroom"):
+        if contact == identity or not is_personal_contact(contact):
             return ""
-        return contact if re.fullmatch(CONTACT_PATTERN, contact) else ""
+        return contact
 
     def _claim(self, contact: str, event: CallbackEvent) -> bool:
         key = str(event.msgid)
@@ -258,7 +289,7 @@ class PrivateChatService:
 
     def _is_enabled(self, contact: str) -> bool:
         row = self._contacts.get(contact)
-        return bool(self._accepting and row and row.get("enabled"))
+        return bool(is_personal_contact(contact) and self._accepting and row and row.get("enabled"))
 
     def _set_status(self, contact: str, status: str, message: str = "", *, replied: bool = False) -> None:
         record = self._status.setdefault(contact, {})

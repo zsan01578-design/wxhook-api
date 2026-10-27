@@ -15,6 +15,7 @@ from wxhook_api.main import create_app
 from wxhook_api.services.chatbot import MentionChatService
 from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.groups import GroupManager
+from wxhook_api.services.private_chat import SYSTEM_CONTACTS
 
 
 BOT = "wxid_robot"
@@ -194,3 +195,67 @@ async def test_invalid_personality_and_group_contact_are_rejected(tmp_path):
         assert response.status_code == 422
         response = await state.client.patch("/api/private/contacts/123456789@chatroom", json={"enabled": True})
         assert response.status_code == 400
+
+
+@pytest.mark.parametrize("sender_fallback", [False, True])
+async def test_service_accounts_are_not_registered_or_answered(tmp_path, sender_fallback):
+    provider = Provider()
+    accounts = sorted(SYSTEM_CONTACTS | {"gh_43f2581f6fd6", "gh_example", "NEWSAPP", "GH_EXAMPLE"})
+    async with context(tmp_path, provider) as state:
+        await state.app.state.private_chat.configure(enabled=True)
+        for msgid, account in enumerate(accounts, 100):
+            await state.submit(private_event(msgid=msgid, wxid=BOT if sender_fallback else account, sender=account))
+        response = await state.client.get("/api/private/state")
+        assert response.json()["contacts"] == []
+        with state.app.state.private_chat._connect() as db:
+            assert db.execute("SELECT COUNT(*) FROM private_contacts").fetchone()[0] == 0
+        assert not provider.calls and not state.sends
+
+
+@pytest.mark.parametrize("contact", [FRIEND, "alice_1988", "didi1v6.qq.com", "newsapp_friend"])
+async def test_personal_usernames_still_receive_replies(tmp_path, contact):
+    async with context(tmp_path, Provider()) as state:
+        await state.submit(private_event(wxid=contact, sender=contact))
+        await enable(state, contact)
+        await state.submit(private_event(msgid=2, wxid=contact, sender=contact))
+        assert state.sends == [{"wxidorgid": contact, "msg": "收到"}]
+
+
+async def test_preexisting_enabled_service_accounts_are_excluded_after_restart(tmp_path):
+    blocked = ["newsapp", "gh_43f2581f6fd6", "fmessage", "weixin", "filehelper"]
+    async with context(tmp_path, Provider()) as state:
+        await state.submit(private_event())
+        await enable(state, personality="温和耐心")
+        await state.app.state.private_chat.update_contact(FRIEND, {"name": "朋友"})
+        with state.app.state.private_chat._connect() as db:
+            db.executemany(
+                "INSERT INTO private_contacts (id, name, enabled, created_at) VALUES (?, '', 1, '2026-01-01')",
+                [(account,) for account in blocked],
+            )
+
+    provider = Provider()
+    async with context(tmp_path, provider) as state:
+        response = await state.client.get("/api/private/state")
+        snapshot = response.json()
+        assert snapshot["enabled"] and snapshot["personality"] == "温和耐心"
+        assert [(row["id"], row["name"], row["enabled"]) for row in snapshot["contacts"]] == [(FRIEND, "朋友", True)]
+        for msgid, account in enumerate(blocked, 100):
+            response = await state.client.patch(f"/api/private/contacts/{account}", json={"enabled": True})
+            assert response.status_code == 404
+            await state.submit(private_event(msgid=msgid, wxid=account, sender=account))
+        assert not provider.calls and not state.sends
+        await state.submit(private_event(msgid=200))
+        assert state.sends == [{"wxidorgid": FRIEND, "msg": "收到"}]
+
+
+async def test_stale_enabled_service_account_cannot_bypass_reply_checks(tmp_path):
+    provider = Provider()
+    async with context(tmp_path, provider) as state:
+        service = state.app.state.private_chat
+        await service.configure(enabled=True)
+        service._contacts["newsapp"] = {"enabled": 1}
+        assert not await service.update_contact("newsapp", {"enabled": True})
+        assert service.snapshot()["contacts"] == []
+        await service._process({"contact": "newsapp", "question": "你好"})
+        assert not await service._send("newsapp", "你好")
+        assert not provider.calls and not state.sends
