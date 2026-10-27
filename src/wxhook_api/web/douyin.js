@@ -151,6 +151,9 @@ function renderJobs(data) {
   if (!data.jobs.length) {
     const empty = node("div", "empty-state");
     empty.append(node("h3", "", "暂无解析记录"), node("p", "", "新任务的解析结果会显示在这里，过期记录会自动清理。"));
+    const settings = node("a", "inline-link empty-action", "前往解析设置 →");
+    settings.href = "#settings";
+    empty.append(settings);
     element("jobs").replaceChildren(empty);
     return;
   }

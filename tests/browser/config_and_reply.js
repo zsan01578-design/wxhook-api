@@ -4,26 +4,29 @@ async page => {
   await page.unrouteAll({behavior:"wait"});
   await page.route("**/ui/assets/**", route => route.continue({url:route.request().url().replace("/ui/assets/", "/web/")}));
   let mode = "failure", saves = [], release;
+  let requestStarted;
+  const pendingRequest = new Promise(resolve => { requestStarted = resolve; });
   const config = {settings:{enabled:true,groups:["review@chatroom"],auto_download:false,notify_group:false,send_results:false,parser_provider:"builtin",parser_api_url:""},supported_parsers:["parse_video","builtin"],output_dir:"mock",max_file_mb:100};
   await page.route("**/api/douyin/config", async route => {
     if (route.request().method() === "POST") { saves.push(route.request().postDataJSON()); await route.fulfill({json:{saved:true}}); return; }
     if (mode === "failure") { await route.fulfill({status:503,json:{error:{message:"模拟配置读取失败"}}}); return; }
-    if (mode === "pending") await new Promise(resolve => release = resolve);
+    if (mode === "pending") await new Promise(resolve => { release = resolve; requestStarted(); });
     await route.fulfill({json:mode === "mismatch" ? {...config,supported_parsers:[]} : config});
   });
   await page.route("**/api/douyin/jobs", route => route.fulfill({json:{revision:"empty",jobs:[],pending:0}}));
   await page.route("**/ui/messages", route => route.fulfill({json:{instance:"mock",total:1,messages:[{wxid:"review@chatroom",sender:"member",roomid:"",type:1,msgid:"90071992547409931234",content:"<img src=x onerror=alert(1)>",received_at:"2026-10-20T12:00:00+08:00"}]}}));
   await page.goto("http://127.0.0.1:8137/web/douyin.html");
+  await page.locator('[data-page-tab="resource-settings"]').click();
   await page.getByText("读取配置失败：模拟配置读取失败",{exact:true}).waitFor();
   assert(await page.locator("#save-settings").isDisabled(), "Failed configuration load still permits overwriting saved settings");
   await page.locator("#group-form").evaluate(form => form.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true})));
   assert(saves.length === 0, "Failed load submitted default settings");
   mode = "pending";
-  await page.goto("http://127.0.0.1:8137/web/douyin.html");
+  await page.reload();
   assert(await page.locator("#save-settings").isDisabled(), "Pending load permits saving defaults");
   await page.waitForFunction(() => document.getElementById("config-status"));
   // Ensure the intercepted request has entered its wait before releasing it.
-  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await pendingRequest;
   assert(typeof release === "function", "Configuration request did not start");
   mode = "success"; release();
   await page.waitForFunction(() => !document.getElementById("save-settings").disabled);

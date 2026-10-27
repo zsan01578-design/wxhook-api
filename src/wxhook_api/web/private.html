@@ -7,19 +7,28 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/ui/assets/style.css">
   <link rel="stylesheet" href="/ui/assets/private.css">
+  <link rel="stylesheet" href="/ui/assets/shell.css">
+  <script src="/ui/assets/shell.js" defer></script>
   <script src="/ui/assets/http.js" defer></script>
   <script src="/ui/assets/private.js" defer></script>
 </head>
-<body>
-  <main class="workspace">
+<body class="utility-page" data-page="private">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <nav class="app-navigation" aria-label="主导航"><a href="/">群聊管理</a> · <a href="/private">私聊问答</a> · <a href="/messages">微信消息</a> · <a href="/douyin">分享解析</a></nav>
+  <main class="workspace" id="main-content" tabindex="-1">
     <header class="page-header">
-      <div><p class="eyebrow">WXHOOK / 私聊</p><h1>私聊 AI 问答</h1><p class="subtitle">只对你启用的私聊联系人自动回复；群聊仍由群内 @问答单独控制。</p></div>
-      <div class="header-links"><a class="docs-link" href="/">返回群聊管理 ↗</a><a class="docs-link" href="/messages">微信消息 ↗</a></div>
+      <div><p class="eyebrow">工作空间 / 私聊</p><h1>私聊 AI 问答</h1><p class="subtitle">只对你启用的私聊联系人自动回复；群聊仍由群内 @问答单独控制。</p></div>
     </header>
     <div class="private-layout">
+      <section class="panel">
+        <div class="inbox-heading"><div class="section-heading"><span class="section-number">02</span><h2>私聊联系人</h2></div><div class="contact-tools"><span id="contact-count" class="count">0 个</span><button type="button" class="secondary" id="refresh">刷新</button></div></div>
+        <p class="section-description">每个联系人单独开关，备注只保存在本机。对话上下文仅保存在内存，重启后清空；发送“清空上下文”可手动重置。</p>
+        <p id="contacts-status" class="inbox-status" role="status"></p>
+        <div id="contacts"><div class="empty-state"><span class="empty-icon" aria-hidden="true">✉</span><h3>还没有私聊联系人</h3><p>让对方给机器人发一条私聊消息，再回到这里启用。</p></div></div>
+      </section>
       <section class="panel compose">
         <div class="section-heading"><span class="section-number">01</span><h2>总开关与性格</h2></div>
-        <p class="section-description">默认关闭。开启后只有右侧启用的联系人会收到自动回复；回答使用“AI 模型”页当前启用的模型。</p>
+        <p class="section-description">默认关闭。开启后只有列表中启用的联系人会收到自动回复；回答使用“AI 模型”页当前启用的模型。</p>
         <form id="config-form">
           <label class="check-label"><input id="enabled" type="checkbox">启用私聊自动回复</label>
           <label for="personality">机器人性格设定</label>
@@ -33,13 +42,7 @@
           <div class="compose-footer"><span>保存后下一条私聊立即生效</span><button class="primary" id="save-config" type="submit" disabled>保存设置</button></div>
           <p id="config-status" class="feedback" role="status"></p>
         </form>
-        <div class="tip"><strong>使用前</strong><p>私聊消息需要先通过微信 Hook 实时回调到本服务。让联系人发一条消息后，对方会出现在右侧列表，默认未启用。</p><p id="model-status"></p></div>
-      </section>
-      <section class="panel">
-        <div class="inbox-heading"><div class="section-heading"><span class="section-number">02</span><h2>私聊联系人</h2></div><div class="contact-tools"><span id="contact-count" class="count">0 个</span><button type="button" class="secondary" id="refresh">刷新</button></div></div>
-        <p class="section-description">每个联系人单独开关，备注只保存在本机。对话上下文仅保存在内存，重启后清空；发送“清空上下文”可手动重置。</p>
-        <p id="contacts-status" class="inbox-status" role="status"></p>
-        <div id="contacts"><div class="empty-state"><span class="empty-icon" aria-hidden="true">✉</span><h3>还没有私聊联系人</h3><p>让对方给机器人发一条私聊消息，再回到这里启用。</p></div></div>
+        <div class="tip"><strong>使用前</strong><p>私聊消息需要先通过微信 Hook 实时回调到本服务。让联系人发一条消息后，对方会出现在联系人列表，默认未启用。</p><p id="model-status"></p><p><a class="inline-link" href="/#models">配置 AI 模型 →</a></p></div>
       </section>
     </div>
     <footer class="page-footer">发送前会再次核验微信账号与开关；不会回复群消息或机器人自己发送的消息。<span>WXHOOK · PRIVATE CHAT</span></footer>

@@ -164,6 +164,7 @@ function renderList() {
   $("group-list").replaceChildren(...(nodes.length ? nodes : [el("div", "list-empty", state.groups.length ? "没有符合条件的群聊" : "还没有群聊\n点击 + 添加，或等待群消息自动发现")]));
 }
 function selectGroup(id) {
+  if (location.hash === "#blacklist") history.replaceState(null, "", location.pathname + location.search);
   favoriteQuery = ""; favoritePage = 1; favoriteSearch = null; favoritesData = null;
   taskView = "open"; taskPage = 1;
   selectedId = id; tab = "messages"; memberQuery = ""; messagePage = 1; messageQuery = ""; view = "groups"; detailVersion = ""; resetChatScroll = true;
@@ -176,6 +177,7 @@ function selectGroup(id) {
 }
 function updateView() {
   const blacklist = view === "blacklist";
+  document.body.classList.toggle("blacklist-active", blacklist);
   $("page-title").textContent = blacklist ? "黑名单管理" : "群聊管理";
   $("nav-groups").classList.toggle("selected", !blacklist);
   $("nav-blacklist").classList.toggle("selected", blacklist);
@@ -1329,15 +1331,42 @@ $("add-group").addEventListener("click", () => addGroupDialog());
 $("add-group-small").addEventListener("click", () => addGroupDialog());
 $("refresh").addEventListener("click", async event => { const source = event.currentTarget; source.disabled = true; await Promise.all([refreshState(true), checkConnection()]); source.disabled = false; });
 $("sync-now").addEventListener("click", async event => { const source = event.currentTarget; source.disabled = true; try { await api("/api/manage/sync", {}); toast("已安排后台同步，进度会自动更新"); } catch (error) { toast(error.message, true); } finally { source.disabled = false; } });
-$("nav-groups").addEventListener("click", () => { view = "groups"; document.body.classList.remove("mobile-detail"); updateView(); renderList(); loadDetail().catch(error => toast(error.message, true)); });
-$("nav-blacklist").addEventListener("click", () => { view = "blacklist"; document.body.classList.add("mobile-detail"); updateView(); renderList(); });
-$("back-to-list").addEventListener("click", () => { view = "groups"; document.body.classList.remove("mobile-detail"); updateView(); renderList(); });
-$("connection-settings").addEventListener("click", connectionDialog);
-$("ai-model-settings").addEventListener("click", modelSettingsDialog);
+function applyManagementLocation() {
+  const destination = location.hash;
+  view = destination === "#blacklist" ? "blacklist" : "groups";
+  document.body.classList.toggle("mobile-detail", view === "blacklist");
+  updateView(); renderList();
+  if (destination === "#models") modelSettingsDialog();
+  else if (destination === "#connection") connectionDialog();
+  else {
+    if ($("modal").open && !modelSaving) $("modal").close();
+    loadDetail().catch(error => toast(error.message, true));
+  }
+}
+function navigateManagement(event) {
+  if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button) return;
+  event.preventDefault();
+  const destination = event.currentTarget.hash;
+  if (location.hash === destination) applyManagementLocation();
+  else if (destination) location.hash = destination;
+  else { history.pushState(null, "", location.pathname + location.search); applyManagementLocation(); }
+}
+["nav-groups", "nav-blacklist", "connection-settings", "ai-model-settings"].forEach(id => $(id).addEventListener("click", navigateManagement));
+window.addEventListener("hashchange", () => {
+  if (["", "#blacklist", "#models", "#connection"].includes(location.hash)) applyManagementLocation();
+});
+$("back-to-list").addEventListener("click", () => {
+  history.pushState(null, "", location.pathname + location.search);
+  applyManagementLocation();
+});
+$("modal").addEventListener("close", () => {
+  if (["#models", "#connection"].includes(location.hash)) history.replaceState(null, "", location.pathname + location.search);
+});
 $("connection-indicator").addEventListener("click", connectionDialog);
 $("close-modal").addEventListener("click", () => { if (!modelSaving) $("modal").close(); });
 $("modal").addEventListener("cancel", event => { if (modelSaving) event.preventDefault(); });
 $("modal").addEventListener("click", event => { if (!modelSaving && event.target === $("modal")) { const rect = $("modal").getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $("modal").close(); } });
 document.addEventListener("visibilitychange", () => { clearTimeout(pollTimer); if (!document.hidden) { poll(); checkConnection(); } });
 setInterval(updateTaskCountdowns, 1000);
-renderOverview(); checkConnection(); poll();
+renderOverview(); checkConnection();
+poll().then(() => { if (["#blacklist", "#models", "#connection"].includes(location.hash)) applyManagementLocation(); });
