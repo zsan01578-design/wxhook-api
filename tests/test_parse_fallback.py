@@ -1,13 +1,6 @@
-import asyncio
-from collections import deque
-from types import SimpleNamespace
-
-from fastapi import Response
 import httpx
 import pytest
 
-from wxhook_api.routes import parse as parse_routes
-from wxhook_api.schemas.requests import ParseLinkRequest
 from wxhook_api.services.douyin_parser import DouyinError, ParsedMedia
 from wxhook_api.services.parse_fallback import DudunasParser, load_dudunas_parser, prefer_watermark_free_video
 
@@ -104,20 +97,6 @@ async def test_fallback_requires_a_configured_secret(tmp_path, monkeypatch):
 PRIMARY = "https://v3.douyinvod.com/primary.mp4"
 
 
-class FailingPrimary:
-    transport = None
-
-    async def parse(self, source):
-        raise DouyinError("primary failed")
-
-
-class VideoPrimary:
-    transport = None
-
-    async def parse(self, source):
-        return ParsedMedia("id", "主解析标题", "作者", "video", [{"kind": "video", "urls": [PRIMARY]}], "douyin")
-
-
 class FakeFallback:
     def __init__(self):
         self.calls = 0
@@ -142,23 +121,3 @@ async def test_prefer_watermark_free_video_only_replaces_videos():
             raise DouyinError("fallback failed")
 
     assert await prefer_watermark_free_video(video, SHORT, fallback=FailingFallback()) is video
-
-
-async def test_api_parse_uses_fallback_after_primary_failure(monkeypatch):
-    app = SimpleNamespace(state=SimpleNamespace(
-        parse_video_parser=FailingPrimary(), parse_slots=asyncio.Semaphore(2), parse_rate=deque()))
-    request = SimpleNamespace(app=app)
-    monkeypatch.setattr(parse_routes, "load_dudunas_parser", lambda **kwargs: FakeFallback())
-    result = await parse_routes.parse_link(ParseLinkRequest(url=SHORT), request, Response())
-    assert result["kind"] == "video"
-    assert result["assets"] == [{"kind": "video", "urls": [VIDEO]}]
-
-
-async def test_api_parse_prefers_watermark_free_video_after_primary_success(monkeypatch):
-    app = SimpleNamespace(state=SimpleNamespace(
-        parse_video_parser=VideoPrimary(), parse_slots=asyncio.Semaphore(2), parse_rate=deque()))
-    request = SimpleNamespace(app=app)
-    monkeypatch.setattr(parse_routes, "load_dudunas_parser", lambda **kwargs: FakeFallback())
-    result = await parse_routes.parse_link(ParseLinkRequest(url=SHORT), request, Response())
-    assert result["kind"] == "video"
-    assert result["assets"] == [{"kind": "video", "urls": [VIDEO]}]

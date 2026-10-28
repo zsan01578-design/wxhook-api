@@ -1,15 +1,20 @@
 import asyncio
 import os
+from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 from asgi_lifespan import LifespanManager
+from fastapi import HTTPException, Response
 import pytest
 
 from tests.test_parse_video import XHS, XHS_VIDEO, sdk_response
+from wxhook_api.core.douyin_config import GroupSettings
 from wxhook_api.main import create_app
 from wxhook_api.routes import parse as parse_route
-from wxhook_api.services.douyin_parser import ParsedMedia
+from wxhook_api.schemas.requests import ParseLinkRequest
+from wxhook_api.services.douyin_parser import DouyinError, ParsedMedia
 from wxhook_api.services.parse_video import ParseVideoParser
 
 
@@ -100,3 +105,85 @@ async def test_api_limits_concurrent_parses(monkeypatch):
         assert (await first).status_code == 200
     assert second.status_code == 429
     assert "排队" in second.json()["error"]["message"]
+
+
+MEDIA_BASE = "http://127.0.0.1:8051"
+FALLBACK_VIDEO = "https://v3.douyinvod.com/fallback.mp4"
+FALLBACK_SHORT = "https://v.douyin.com/fallback/"
+
+
+def media_payload(request):
+    if request.url.host == "127.0.0.1" and request.url.path == "/api/v1/parse":
+        return httpx.Response(200, json={
+            "retcode": 200, "retdesc": "成功", "succ": True,
+            "data": {"title": "兜底标题", "author": {"nickname": "作者"}, "video_url": FALLBACK_VIDEO},
+        })
+    return httpx.Response(404)
+
+
+class FailingPrimary:
+    transport = httpx.MockTransport(media_payload)
+
+    async def parse(self, source):
+        raise DouyinError("primary failed")
+
+
+class VideoPrimary:
+    transport = httpx.MockTransport(lambda request: pytest.fail("fallback must not run after success"))
+
+    async def parse(self, source):
+        return ParsedMedia("id", "主解析", "作者", "video",
+                           [{"kind": "video", "urls": ["https://v3.douyinvod.com/primary.mp4"]}], "douyin")
+
+
+def parse_state(parser, media_url):
+    settings = GroupSettings(media_parser_url=media_url)
+    return SimpleNamespace(state=SimpleNamespace(
+        parse_video_parser=parser,
+        parse_slots=asyncio.Semaphore(2),
+        parse_rate=deque(),
+        douyin=SimpleNamespace(options=SimpleNamespace(settings=settings)),
+    ))
+
+
+async def test_api_parse_falls_back_to_media_parser():
+    request = SimpleNamespace(app=parse_state(FailingPrimary(), MEDIA_BASE))
+    result = await parse_route.parse_link(ParseLinkRequest(url=FALLBACK_SHORT), request, Response())
+    assert result["kind"] == "video"
+    assert result["title"] == "兜底标题"
+    assert result["assets"] == [{"kind": "video", "urls": [FALLBACK_VIDEO]}]
+
+
+async def test_api_parse_does_not_call_fallback_after_success():
+    request = SimpleNamespace(app=parse_state(VideoPrimary(), MEDIA_BASE))
+    result = await parse_route.parse_link(ParseLinkRequest(url=FALLBACK_SHORT), request, Response())
+    assert result["title"] == "主解析"
+
+
+async def test_api_parse_without_media_url_keeps_primary_error():
+    request = SimpleNamespace(app=parse_state(FailingPrimary(), ""))
+    with pytest.raises(HTTPException) as error:
+        await parse_route.parse_link(ParseLinkRequest(url=FALLBACK_SHORT), request, Response())
+    assert error.value.status_code == 400
+    assert "primary failed" in error.value.detail
+
+
+async def test_api_parse_combines_primary_and_fallback_errors():
+    def fail_media(request):
+        return httpx.Response(400, json={
+            "retcode": 400, "retdesc": "提取失败", "succ": False,
+            "error_code": "MEDIA_NOT_FOUND", "data": None,
+        })
+
+    class BrokenFallback:
+        transport = httpx.MockTransport(fail_media)
+
+        async def parse(self, source):
+            raise DouyinError("primary failed")
+
+    request = SimpleNamespace(app=parse_state(BrokenFallback(), MEDIA_BASE))
+    with pytest.raises(HTTPException) as error:
+        await parse_route.parse_link(ParseLinkRequest(url=FALLBACK_SHORT), request, Response())
+    assert "primary failed" in error.value.detail
+    assert "media-parser 兜底也失败" in error.value.detail
+    assert "MEDIA_NOT_FOUND" in error.value.detail
