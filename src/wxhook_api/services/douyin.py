@@ -20,7 +20,7 @@ from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links, read_response_bytes
 from wxhook_api.services.douyin_delivery import DeliveryBlocked, DeliveryError, DouyinMessenger
 from wxhook_api.services.douyin_api import DouyinAPIParser
-from wxhook_api.services.parse_fallback import load_dudunas_parser
+from wxhook_api.services.parse_fallback import load_dudunas_parser, prefer_watermark_free_video
 from wxhook_api.services.parse_video import ParseVideoParser, REFERERS, source_platform
 from wxhook_api.services.groups import GroupManager, event_group, normalize_group_sender
 from wxhook_api.services.media_cache import MediaCache
@@ -357,6 +357,7 @@ class DouyinService:
     async def _resolve_media(self, job: dict, config) -> Any:
         provider = config.parser_provider
         fallback_used = False
+        fallback = load_dudunas_parser(transport=self._transport)
         if config.parser_provider == "parse_video":
             parser = ParseVideoParser(transport=self._transport)
             try:
@@ -371,7 +372,6 @@ class DouyinService:
                         primary_error = DouyinError(
                             f"parse-video-py 解析失败：{str(primary_error)[:200]}；备用接口也失败：{str(fallback_error)[:200]}")
                 if parsed is None:
-                    fallback = load_dudunas_parser(transport=self._transport)
                     if fallback is None:
                         raise primary_error
                     try:
@@ -383,6 +383,11 @@ class DouyinService:
         else:
             parser = DouyinAPIParser(self._client, config.parser_api_url) if config.parser_provider == "api" else DouyinParser(self._client)
             parsed = await parser.parse(job["source_url"])
+        if parsed.kind == "video" and provider != "dudunas" and fallback is not None:
+            preferred = await prefer_watermark_free_video(parsed, job["source_url"], fallback=fallback)
+            if preferred is not parsed:
+                parsed = preferred
+                provider, fallback_used = "dudunas", False
         job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind,
                    assets=parsed.assets, platform=parsed.platform, parser_provider=provider, parser_fallback=fallback_used)
         return parsed

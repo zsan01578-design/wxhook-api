@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 
 from wxhook_api.schemas.requests import ParseLinkRequest
 from wxhook_api.services.douyin_parser import DouyinError
-from wxhook_api.services.parse_fallback import load_dudunas_parser
+from wxhook_api.services.parse_fallback import load_dudunas_parser, prefer_watermark_free_video
 from wxhook_api.services.parse_video import ParseVideoParser
 
 
@@ -47,10 +47,10 @@ async def parse_link(body: ParseLinkRequest, request: Request, response: Respons
     slots = await _acquire_slot(request.app)
     try:
         parser = request.app.state.parse_video_parser
+        fallback = load_dudunas_parser(transport=getattr(parser, "transport", None))
         try:
             media = await parser.parse(body.url)
         except DouyinError as primary_error:
-            fallback = load_dudunas_parser(transport=getattr(parser, "transport", None))
             if fallback is None:
                 raise
             try:
@@ -58,6 +58,8 @@ async def parse_link(body: ParseLinkRequest, request: Request, response: Respons
             except DouyinError as fallback_error:
                 raise DouyinError(
                     f"{str(primary_error)[:300]}；去水印兜底也失败：{str(fallback_error)[:200]}") from fallback_error
+        else:
+            media = await prefer_watermark_free_video(media, body.url, fallback=fallback)
     except DouyinError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:

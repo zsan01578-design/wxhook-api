@@ -12,6 +12,7 @@ from wxhook_api.services.douyin_parser import DouyinError, ParsedMedia
 
 MP4 = b"\0\0\0\x18ftypisom" + b"\0" * 40
 URL = "https://v3.douyinvod.com/retry.mp4"
+IMAGE = "https://p3.douyinpic.com/retry.png"
 
 
 class FakeParser:
@@ -78,7 +79,7 @@ class TogglingParser:
         self.calls += 1
         if self.calls == 1:
             raise DouyinError("primary parser failed")
-        return ParsedMedia("id", "主解析标题", "作者", "video", [{"kind": "video", "urls": [URL]}], "douyin")
+        return ParsedMedia("id", "主解析标题", "作者", "images", [{"kind": "image", "urls": [IMAGE]}], "douyin")
 
 
 async def test_retry_restores_primary_provider_after_a_fallback_attempt(tmp_path, monkeypatch):
@@ -93,6 +94,41 @@ async def test_retry_restores_primary_provider_after_a_fallback_attempt(tmp_path
     assert job["parser_provider"] == "dudunas" and job["parser_fallback"] is True
     await service._resolve_media(job, config)
     assert job["parser_provider"] == "parse_video" and job["parser_fallback"] is False
+
+
+class VideoParser:
+    async def parse(self, source):
+        return ParsedMedia("id", "主解析标题", "作者", "video",
+                           [{"kind": "video", "urls": ["https://v3.douyinvod.com/primary.mp4"]}], "douyin")
+
+
+class ImageParser:
+    async def parse(self, source):
+        return ParsedMedia("id", "图文标题", "作者", "images", [{"kind": "image", "urls": [IMAGE]}], "douyin")
+
+
+async def test_video_primary_is_replaced_by_the_watermark_fallback(tmp_path, monkeypatch):
+    fallback = FakeFallback("https://v3.douyinvod.com/watermark-free.mp4")
+    monkeypatch.setattr(douyin_module, "ParseVideoParser", lambda **kwargs: VideoParser())
+    monkeypatch.setattr(douyin_module, "load_dudunas_parser", lambda **kwargs: fallback)
+    service = DouyinService(options(tmp_path, parser_provider="parse_video"))
+    job = {"source_url": SHORT, "platform": "douyin"}
+    parsed = await service._resolve_media(job, service.options.settings)
+    assert fallback.calls == 1
+    assert job["parser_provider"] == "dudunas" and job["parser_fallback"] is False
+    assert parsed.assets == [{"kind": "video", "urls": ["https://v3.douyinvod.com/watermark-free.mp4"]}]
+
+
+async def test_image_primary_does_not_call_the_watermark_fallback(tmp_path, monkeypatch):
+    fallback = FakeFallback("https://v3.douyinvod.com/should-not-be-used.mp4")
+    monkeypatch.setattr(douyin_module, "ParseVideoParser", lambda **kwargs: ImageParser())
+    monkeypatch.setattr(douyin_module, "load_dudunas_parser", lambda **kwargs: fallback)
+    service = DouyinService(options(tmp_path, parser_provider="parse_video"))
+    job = {"source_url": SHORT, "platform": "douyin"}
+    parsed = await service._resolve_media(job, service.options.settings)
+    assert fallback.calls == 0
+    assert job["parser_provider"] == "parse_video" and job["parser_fallback"] is False
+    assert parsed.assets == [{"kind": "image", "urls": [IMAGE]}]
 
 
 async def test_dudunas_fallback_is_used_when_primary_parser_fails(tmp_path, monkeypatch):

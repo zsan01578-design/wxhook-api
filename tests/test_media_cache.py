@@ -67,6 +67,23 @@ def test_cache_load_rejects_expired_entry_before_cleanup(tmp_path):
     assert cache.load(key) is None
 
 
+def test_cache_rejects_entries_from_a_previous_version(tmp_path):
+    cache = MediaCache(tmp_path / "cache")
+    folder = tmp_path / "job"
+    folder.mkdir()
+    (folder / "001.mp4").write_bytes(MP4)
+    key = cache.key("douyin", SHORT)
+    cache.store(key, folder, {
+        "source_url": SHORT, "platform": "douyin", "item_id": "", "title": "", "author": "", "kind": "video",
+        "assets": [], "files": [{"name": "001.mp4", "kind": "video", "size": len(MP4)}],
+    })
+    meta_path = tmp_path / "cache" / key / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["version"] = 1
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    assert cache.load(key) is None
+
+
 def test_cache_cleanup_removes_expired_entries(tmp_path):
     cache = MediaCache(tmp_path / "cache")
     folder = tmp_path / "job"

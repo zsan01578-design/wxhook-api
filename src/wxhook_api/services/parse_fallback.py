@@ -60,6 +60,28 @@ def load_dudunas_parser(*, transport: httpx.AsyncBaseTransport | None = None) ->
     return DudunasParser(secret, transport=transport) if secret else None
 
 
+async def prefer_watermark_free_video(primary: ParsedMedia, source: str, *,
+                                      fallback: DudunasParser | None = None,
+                                      transport: httpx.AsyncBaseTransport | None = None) -> ParsedMedia:
+    """Keep image galleries unchanged; replace only videos with a fallback result."""
+    if primary.kind != "video":
+        return primary
+    fallback = fallback or load_dudunas_parser(transport=transport)
+    if fallback is None:
+        return primary
+    try:
+        candidate = await fallback.parse(source)
+    except DouyinError:
+        return primary
+    if candidate.kind != "video" or not candidate.assets:
+        return primary
+    return ParsedMedia(
+        candidate.item_id or primary.item_id, candidate.title or primary.title,
+        candidate.author or primary.author, "video", candidate.assets,
+        platform=candidate.platform or primary.platform,
+    )
+
+
 class DudunasParser:
     def __init__(self, secret: str, *, transport: httpx.AsyncBaseTransport | None = None,
                  attempts: int = FALLBACK_ATTEMPTS, interval: float = FALLBACK_INTERVAL,

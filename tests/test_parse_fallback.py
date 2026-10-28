@@ -9,7 +9,7 @@ import pytest
 from wxhook_api.routes import parse as parse_routes
 from wxhook_api.schemas.requests import ParseLinkRequest
 from wxhook_api.services.douyin_parser import DouyinError, ParsedMedia
-from wxhook_api.services.parse_fallback import DudunasParser, load_dudunas_parser
+from wxhook_api.services.parse_fallback import DudunasParser, load_dudunas_parser, prefer_watermark_free_video
 
 
 VIDEO = "https://v3.douyinvod.com/fallback.mp4"
@@ -101,6 +101,9 @@ async def test_fallback_requires_a_configured_secret(tmp_path, monkeypatch):
     assert load_dudunas_parser().secret == "env-secret"
 
 
+PRIMARY = "https://v3.douyinvod.com/primary.mp4"
+
+
 class FailingPrimary:
     transport = None
 
@@ -108,14 +111,52 @@ class FailingPrimary:
         raise DouyinError("primary failed")
 
 
-class FakeFallback:
+class VideoPrimary:
+    transport = None
+
     async def parse(self, source):
+        return ParsedMedia("id", "主解析标题", "作者", "video", [{"kind": "video", "urls": [PRIMARY]}], "douyin")
+
+
+class FakeFallback:
+    def __init__(self):
+        self.calls = 0
+
+    async def parse(self, source):
+        self.calls += 1
         return ParsedMedia("id", "兜底标题", "作者", "video", [{"kind": "video", "urls": [VIDEO]}], "douyin")
+
+
+async def test_prefer_watermark_free_video_only_replaces_videos():
+    fallback = FakeFallback()
+    images = ParsedMedia("id", "图文", "作者", "images", [{"kind": "image", "urls": [IMAGE]}], "douyin")
+    assert await prefer_watermark_free_video(images, SHORT, fallback=fallback) is images
+    assert fallback.calls == 0
+    video = ParsedMedia("id", "视频", "作者", "video", [{"kind": "video", "urls": [PRIMARY]}], "douyin")
+    preferred = await prefer_watermark_free_video(video, SHORT, fallback=fallback)
+    assert preferred.assets == [{"kind": "video", "urls": [VIDEO]}]
+    assert fallback.calls == 1
+
+    class FailingFallback:
+        async def parse(self, source):
+            raise DouyinError("fallback failed")
+
+    assert await prefer_watermark_free_video(video, SHORT, fallback=FailingFallback()) is video
 
 
 async def test_api_parse_uses_fallback_after_primary_failure(monkeypatch):
     app = SimpleNamespace(state=SimpleNamespace(
         parse_video_parser=FailingPrimary(), parse_slots=asyncio.Semaphore(2), parse_rate=deque()))
+    request = SimpleNamespace(app=app)
+    monkeypatch.setattr(parse_routes, "load_dudunas_parser", lambda **kwargs: FakeFallback())
+    result = await parse_routes.parse_link(ParseLinkRequest(url=SHORT), request, Response())
+    assert result["kind"] == "video"
+    assert result["assets"] == [{"kind": "video", "urls": [VIDEO]}]
+
+
+async def test_api_parse_prefers_watermark_free_video_after_primary_success(monkeypatch):
+    app = SimpleNamespace(state=SimpleNamespace(
+        parse_video_parser=VideoPrimary(), parse_slots=asyncio.Semaphore(2), parse_rate=deque()))
     request = SimpleNamespace(app=app)
     monkeypatch.setattr(parse_routes, "load_dudunas_parser", lambda **kwargs: FakeFallback())
     result = await parse_routes.parse_link(ParseLinkRequest(url=SHORT), request, Response())
