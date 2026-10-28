@@ -170,7 +170,7 @@ function renderJobs(data) {
     header.append(node("strong", "message-peer", job.title || "群聊分享"), node("span", hasError ? "count error" : "count", label));
     info.append(header, node("p", "message-meta", `${job.group_id} · ${job.sender}`));
     if (job.author) info.append(node("p", "message-meta", `作者：${job.author} · ${job.kind === "images" ? "图集" : "视频"}`));
-    if (job.parser_provider) info.append(node("p", "message-meta", `解析来源：${{parse_video: "parse-video-py", api: "指定接口", builtin: "公开分享页"}[job.parser_provider] || job.parser_provider}${job.parser_fallback ? "（parse-video-py 失败后回退）" : ""}${job.platform ? ` · ${{douyin: "抖音", xiaohongshu: "小红书", bilibili: "B站"}[job.platform] || job.platform}` : ""}`));
+    if (job.parser_provider) info.append(node("p", "message-meta", `解析来源：${{parse_video: "parse-video-py", api: "指定接口", builtin: "公开分享页", dudunas: "去水印兜底"}[job.parser_provider] || job.parser_provider}${job.parser_fallback ? "（失败后回退）" : ""}${job.cache_hit ? " · 缓存命中" : ""}${job.platform ? ` · ${{douyin: "抖音", xiaohongshu: "小红书", bilibili: "B站"}[job.platform] || job.platform}` : ""}`));
     if (job.error) info.append(node("p", "feedback error", job.error));
     if (job.delivery_error) info.append(node("p", "feedback error", `回传：${job.delivery_error}`));
     if (job.storage_error) info.append(node("p", "feedback error", job.storage_error));

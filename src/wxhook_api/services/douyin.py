@@ -7,6 +7,7 @@ import heapq
 import json
 from pathlib import Path
 import re
+import time
 from typing import Any
 from urllib.parse import urljoin
 from uuid import uuid4
@@ -19,10 +20,19 @@ from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links, read_response_bytes
 from wxhook_api.services.douyin_delivery import DeliveryBlocked, DeliveryError, DouyinMessenger
 from wxhook_api.services.douyin_api import DouyinAPIParser
+from wxhook_api.services.parse_fallback import load_dudunas_parser
 from wxhook_api.services.parse_video import ParseVideoParser, REFERERS, source_platform
 from wxhook_api.services.groups import GroupManager, event_group, normalize_group_sender
-from wxhook_api.services.media_cleanup import ACTIVE_STATES, cleanup_media, next_cleanup_at, safe_child, timestamp, utcnow, valid_job_record
+from wxhook_api.services.media_cache import MediaCache
+from wxhook_api.services.media_cleanup import ACTIVE_STATES, MEDIA_NAME, cleanup_media, next_cleanup_at, safe_child, timestamp, utcnow, valid_job_record
 from wxhook_api.services.storage_guard import LowDiskSpace, StorageGuard
+
+
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_RETRY_SECONDS = 3.0
+CACHE_DIR_NAME = "_cache"
+CACHE_CLEANUP_SECONDS = 86400
+MAX_JOB_BYTES = 500 * 1024 * 1024
 
 
 def media_extension(prefix: bytes, kind: str) -> str:
@@ -66,6 +76,7 @@ class DouyinService:
         self.own_message_check = None
         self.cleanup_status = {"enabled": options.retention.enabled, "next_run_at": "", "last_run_at": "", "error": ""}
         self.storage = StorageGuard(options.output_dir)
+        self._cache_cleanup_at = 0.0
 
     def allowed(self, group: str, sender: str = "") -> bool:
         fallback = self.options.settings.enabled and group in self.options.settings.groups
@@ -134,6 +145,11 @@ class DouyinService:
 
     async def start(self) -> None:
         await asyncio.to_thread(self._load_saved)
+        try:
+            await asyncio.to_thread(MediaCache(self.options.output_dir / CACHE_DIR_NAME).cleanup)
+        except OSError:
+            pass
+        self._cache_cleanup_at = time.monotonic()
         self._client = httpx.AsyncClient(
             headers={"User-Agent": USER_AGENT, "Referer": "https://www.douyin.com/"},
             timeout=httpx.Timeout(20, connect=8), follow_redirects=False,
@@ -325,6 +341,52 @@ class DouyinService:
             job["status"] = "completed" if job["files"] else "parsed"
             self._changed()
 
+    async def _materialize_cache(self, job: dict, cache: MediaCache, meta: dict) -> bool:
+        folder = self.options.output_dir / job["id"]
+        try:
+            files = await asyncio.to_thread(cache.materialize, meta, folder)
+        except OSError:
+            return False
+        job.update(item_id=meta.get("item_id", ""), title=meta.get("title", ""), author=meta.get("author", ""),
+                   kind=meta.get("kind", ""), assets=meta.get("assets", []), files=files, status="completed",
+                   parser_provider=meta.get("parser_provider") or job.get("parser_provider", ""),
+                   parser_fallback=bool(meta.get("parser_fallback")), cache_hit=True)
+        self._changed()
+        return True
+
+    async def _resolve_media(self, job: dict, config) -> Any:
+        provider = config.parser_provider
+        fallback_used = False
+        if config.parser_provider == "parse_video":
+            parser = ParseVideoParser(transport=self._transport)
+            try:
+                parsed = await parser.parse(job["source_url"])
+            except DouyinError as primary_error:
+                parsed = None
+                if job["platform"] == "douyin" and config.parser_api_url:
+                    try:
+                        parsed = await DouyinAPIParser(self._client, config.parser_api_url).parse(job["source_url"])
+                        provider, fallback_used = "api", True
+                    except DouyinError as fallback_error:
+                        primary_error = DouyinError(
+                            f"parse-video-py 解析失败：{str(primary_error)[:200]}；备用接口也失败：{str(fallback_error)[:200]}")
+                if parsed is None:
+                    fallback = load_dudunas_parser(transport=self._transport)
+                    if fallback is None:
+                        raise primary_error
+                    try:
+                        parsed = await fallback.parse(job["source_url"])
+                        provider, fallback_used = "dudunas", True
+                    except DouyinError as watermark_error:
+                        raise DouyinError(
+                            f"{str(primary_error)[:300]}；去水印兜底也失败：{str(watermark_error)[:200]}") from watermark_error
+        else:
+            parser = DouyinAPIParser(self._client, config.parser_api_url) if config.parser_provider == "api" else DouyinParser(self._client)
+            parsed = await parser.parse(job["source_url"])
+        job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind,
+                   assets=parsed.assets, platform=parsed.platform, parser_provider=provider, parser_fallback=fallback_used)
+        return parsed
+
     async def _run(self) -> None:
         while True:
             job = await self._queue.get()
@@ -339,46 +401,69 @@ class DouyinService:
                 self._changed()
                 await self._persist(job)
                 await self._notice(job, "start", "开始解析")
+                folder = self.options.output_dir / job["id"]
+                cache = None
+                cache_key = ""
                 async with asyncio.timeout(240):
                     config = self.options.settings
                     job.update(parser_provider=config.parser_provider, platform=source_platform(job["source_url"]))
                     if config.parser_provider != "parse_video" and job["platform"] != "douyin":
                         raise DouyinError("当前解析来源仅支持抖音，请在资源页选择 parse-video-py 并保存后重新发送链接")
-                    if config.parser_provider == "parse_video":
-                        parser = ParseVideoParser(transport=self._transport)
-                        try:
-                            parsed = await parser.parse(job["source_url"])
-                        except DouyinError as primary_error:
-                            # The shared adapter already tries public share pages;
-                            # use the optional third-party endpoint as a last resort.
-                            if job["platform"] != "douyin" or not config.parser_api_url:
-                                raise
+                    auto_download = self.auto_download(job["group_id"])
+                    if auto_download:
+                        cache = MediaCache(self.options.output_dir / CACHE_DIR_NAME)
+                        cache_key = cache.key(job["platform"], job["source_url"])
+                        if time.monotonic() - self._cache_cleanup_at >= CACHE_CLEANUP_SECONDS:
                             try:
-                                parsed = await DouyinAPIParser(self._client, config.parser_api_url).parse(job["source_url"])
-                            except DouyinError as fallback_error:
-                                detail = f"parse-video-py 解析失败：{str(primary_error)[:200]}；备用接口也失败：{str(fallback_error)[:200]}"
-                                raise DouyinError(detail) from fallback_error
-                            job.update(parser_provider="api", parser_fallback=True)
-                    else:
-                        parser = DouyinAPIParser(self._client, config.parser_api_url) if config.parser_provider == "api" else DouyinParser(self._client)
-                        parsed = await parser.parse(job["source_url"])
-                    job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind, assets=parsed.assets, platform=parsed.platform)
-                    if not self.allowed(job["group_id"], job["sender"]):
-                        raise DouyinError("群聊或成员已被限制，或解析功能已停用")
-                    if self.auto_download(job["group_id"]):
-                        job["status"] = "downloading"
-                        self._changed()
-                        folder = self.options.output_dir / job["id"]
-                        folder.mkdir(parents=True, exist_ok=True)
-                        downloaded = 0
-                        for index, asset in enumerate(parsed.assets, 1):
-                            file = await self._download_asset(asset, folder, index, job["group_id"], 500 * 1024 * 1024 - downloaded, job["sender"], parsed.platform)
-                            job["files"].append(file)
-                            downloaded += file["size"]
+                                await asyncio.to_thread(cache.cleanup)
+                            except OSError:
+                                pass
+                            self._cache_cleanup_at = time.monotonic()
+                    cached = None
+                    if cache is not None:
+                        try:
+                            cached = await asyncio.to_thread(cache.load, cache_key)
+                        except OSError:
+                            cached = None
+                    if cached is not None:
+                        sizes = [file["size"] for file in cached["files"]]
+                        if any(size > self.options.max_file_bytes for size in sizes) or sum(sizes) > MAX_JOB_BYTES:
+                            raise DouyinError("媒体文件超过配置的大小限制，已停止下载", retryable=False)
+                    if cached is None or not await self._materialize_cache(job, cache, cached):
+                        parsed = await self._resolve_media(job, config)
+                        if not self.allowed(job["group_id"], job["sender"]):
+                            raise DouyinError("群聊或成员已被限制，或解析功能已停用")
+                        if auto_download:
+                            job["status"] = "downloading"
                             self._changed()
-                        job["status"] = "completed"
-                    else:
-                        job["status"] = "parsed"
+                            folder.mkdir(parents=True, exist_ok=True)
+                            for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+                                try:
+                                    await self._download_all(job, parsed, folder)
+                                except DouyinError as exc:
+                                    if attempt >= DOWNLOAD_ATTEMPTS or not getattr(exc, "retryable", True):
+                                        self._clear_downloads(job, folder)
+                                        raise
+                                    job["download_attempt"] = attempt
+                                    self._clear_downloads(job, folder)
+                                    await asyncio.sleep(DOWNLOAD_RETRY_SECONDS)
+                                    try:
+                                        parsed = await self._resolve_media(job, config)
+                                    except DouyinError as parse_error:
+                                        raise DouyinError(
+                                            f"下载失败后重新解析也失败：{str(parse_error)[:200]}") from parse_error
+                                    if not self.allowed(job["group_id"], job["sender"]):
+                                        raise DouyinError("群聊或成员已被限制，或解析功能已停用")
+                                else:
+                                    job["status"] = "completed"
+                                    break
+                        else:
+                            job["status"] = "parsed"
+                if cache is not None and not job.get("cache_hit") and job["files"]:
+                    try:
+                        await asyncio.to_thread(cache.store, cache_key, folder, job)
+                    except OSError:
+                        job["cache_error"] = "媒体缓存写入失败"
                 await self._return_media(job)
             except asyncio.CancelledError:
                 job.update(status="interrupted", error="服务已停止，请重新发送链接")
@@ -474,13 +559,40 @@ class DouyinService:
         job = self._jobs.get(job_id, {})
         return any(file.get("name") == filename and (job.get("files_cleaned_at") or file.get("cleaned")) for file in job.get("files", []))
 
+    async def _download_all(self, job: dict, parsed, folder: Path) -> None:
+        job["files"] = []
+        downloaded = 0
+        for index, asset in enumerate(parsed.assets, 1):
+            file = await self._download_asset(asset, folder, index, job["group_id"], MAX_JOB_BYTES - downloaded,
+                                              job["sender"], parsed.platform)
+            job["files"].append(file)
+            downloaded += file["size"]
+            self._changed()
+
+    def _clear_downloads(self, job: dict, folder: Path) -> None:
+        job["files"] = []
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            return
+        for path in entries:
+            if MEDIA_NAME.fullmatch(path.name):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
     async def _download_asset(self, asset: dict, folder: Path, index: int, group: str, remaining: int, sender: str = "", platform: str = "douyin") -> dict:
         last_error = None
         for url in asset["urls"]:
             self._check_download_policy(group, sender)
             try:
                 return await self._download(url, asset["kind"], folder, index, group, remaining, sender, platform)
-            except (DouyinError, httpx.HTTPError) as exc:
+            except DouyinError as exc:
+                if not exc.retryable:
+                    raise
+                last_error = exc
+            except httpx.HTTPError as exc:
                 last_error = exc
         if isinstance(last_error, DouyinError):
             raise last_error
@@ -488,11 +600,11 @@ class DouyinService:
 
     def _check_download_policy(self, group: str, sender: str) -> None:
         if not self.allowed(group, sender) or not self.auto_download(group):
-            raise DouyinError("群聊或成员已被限制，或自动保存已停用")
+            raise DouyinError("群聊或成员已被限制，或自动保存已停用", retryable=False)
 
     async def _download(self, url: str, kind: str, folder: Path, index: int, group: str, remaining: int, sender: str = "", platform: str = "douyin") -> dict:
         if remaining <= 0:
-            raise DouyinError("单个作品下载量超过 500 MB，已停止")
+            raise DouyinError("单个作品下载量超过 500 MB，已停止", retryable=False)
         limit = min(self.options.max_file_bytes, remaining)
         await self.storage.ensure()
         current = url
@@ -508,7 +620,7 @@ class DouyinService:
                     raise DouyinError("媒体响应不完整，已停止保存")
                 length = response.headers.get("content-length", "")
                 if length.isdigit() and int(length) > limit:
-                    raise DouyinError("媒体文件超过配置的大小限制，已停止下载")
+                    raise DouyinError("媒体文件超过配置的大小限制，已停止下载", retryable=False)
                 await self.storage.ensure(int(length) if length.isdigit() else 0)
                 partial = folder / f"{index:03d}.part"
                 size = 0
@@ -519,7 +631,7 @@ class DouyinService:
                             self._check_download_policy(group, sender)
                             size += len(chunk)
                             if size > limit:
-                                raise DouyinError("媒体文件超过配置的大小限制，已停止下载")
+                                raise DouyinError("媒体文件超过配置的大小限制，已停止下载", retryable=False)
                             if len(prefix) < 32:
                                 prefix.extend(chunk[:32 - len(prefix)])
                             await self.storage.ensure(len(chunk))
