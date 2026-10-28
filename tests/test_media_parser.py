@@ -10,7 +10,9 @@ from wxhook_api.services.media_parser import MediaParserClient
 BASE = "http://127.0.0.1:8051"
 SHORT = "https://v.douyin.com/mediaparser/"
 XHS = "https://www.xiaohongshu.com/explore/abcdef1234567890"
+BILI = "https://www.bilibili.com/video/BV1xx411c7mD"
 VIDEO = "https://v3.douyinvod.com/media.mp4"
+BILI_VIDEO = "https://upos-sz-mirrorcos.bilivideo.com/media.mp4"
 IMAGE = "https://p3.douyinpic.com/media.png"
 XHS_IMAGE = "https://sns-img.xhscdn.com/media.png"
 
@@ -24,16 +26,23 @@ def client(handler, **kwargs):
 
 
 async def test_video_payload_maps_to_parsed_media():
-    media = await client(lambda request: success(
-        video_id="123456", title="标题", desc="完整文案", video_url=VIDEO,
-        platform="抖音", author={"nickname": "作者"},
-    )).parse(SHORT)
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return success(
+            video_id="123456", title="标题", desc="完整文案", video_url=VIDEO,
+            platform="抖音", author={"nickname": "作者"},
+        )
+
+    media = await client(respond).parse(SHORT)
     assert media.kind == "video"
     assert media.item_id == "123456"
     assert media.title == "标题"
     assert media.author == "作者"
     assert media.platform == "douyin"
     assert media.assets == [{"kind": "video", "urls": [VIDEO]}]
+    assert len(calls) == 1
 
 
 async def test_request_uses_post_json_to_v1_parse():
@@ -44,6 +53,7 @@ async def test_request_uses_post_json_to_v1_parse():
         return success(video_url=VIDEO)
 
     await client(respond).parse(SHORT)
+    assert len(calls) == 1
     assert calls[0].method == "POST"
     assert str(calls[0].url) == f"{BASE}/api/v1/parse"
     assert json.loads(calls[0].content) == {"url": SHORT}
@@ -58,6 +68,13 @@ async def test_image_payload_ignores_live_photo_video_and_uses_source_platform()
     assert media.kind == "images"
     assert media.platform == "xiaohongshu"
     assert [asset["urls"] for asset in media.assets] == [[IMAGE], [XHS_IMAGE]]
+
+
+async def test_bilibili_source_maps_to_bilibili_platform():
+    media = await client(lambda request: success(video_url=BILI_VIDEO)).parse(BILI)
+    assert media.kind == "video"
+    assert media.platform == "bilibili"
+    assert media.assets == [{"kind": "video", "urls": [BILI_VIDEO]}]
 
 
 async def test_title_falls_back_to_desc_then_default():
@@ -85,6 +102,19 @@ async def test_non_json_error_uses_http_status():
     assert "HTTP 500" in str(error.value)
 
 
+async def test_http_status_overrides_success_envelope():
+    with pytest.raises(DouyinError) as error:
+        await client(lambda request: httpx.Response(
+            500, json={"retcode": 200, "succ": True, "data": {"video_url": VIDEO}})).parse(SHORT)
+    assert "HTTP 500" in str(error.value)
+
+
+async def test_non_envelope_error_body_uses_http_status():
+    with pytest.raises(DouyinError) as error:
+        await client(lambda request: httpx.Response(404, json={"detail": "Not Found"})).parse(SHORT)
+    assert "HTTP 404" in str(error.value)
+
+
 async def test_invalid_json_success_is_rejected():
     with pytest.raises(DouyinError) as error:
         await client(lambda request: httpx.Response(200, text="not-json")).parse(SHORT)
@@ -100,6 +130,15 @@ async def test_connection_failure_is_explained():
     assert "本地服务连接失败" in str(error.value)
 
 
+async def test_connect_timeout_is_explained_as_connection_failure():
+    def timeout(request):
+        raise httpx.ConnectTimeout("timeout", request=request)
+
+    with pytest.raises(DouyinError) as error:
+        await client(timeout).parse(SHORT)
+    assert "本地服务连接失败" in str(error.value)
+
+
 async def test_oversized_response_is_rejected():
     with pytest.raises(DouyinError) as error:
         await client(lambda request: httpx.Response(200, content=b" " * 2048), max_bytes=1024).parse(SHORT)
@@ -109,6 +148,12 @@ async def test_oversized_response_is_rejected():
 async def test_untrusted_media_url_is_rejected():
     with pytest.raises(DouyinError):
         await client(lambda request: success(image_list=["http://127.0.0.1/private.png"])).parse(SHORT)
+
+
+async def test_invalid_image_entry_is_rejected():
+    with pytest.raises(DouyinError) as error:
+        await client(lambda request: success(image_list=[{"url": ""}])).parse(SHORT)
+    assert "无效图片地址" in str(error.value)
 
 
 async def test_more_than_100_images_is_rejected():

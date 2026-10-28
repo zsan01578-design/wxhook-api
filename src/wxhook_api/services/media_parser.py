@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -12,6 +13,7 @@ from wxhook_api.services.parse_video import source_platform
 
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 MAX_IMAGES = 100
+TOTAL_TIMEOUT = 35
 CONNECT_MESSAGE = "media-parser 本地服务连接失败，请确认 127.0.0.1:8051 已启动"
 COOKIE_MESSAGE = "media-parser 提示小红书需要登录 Cookie，请检查 parse-video.local.yml 的 xiaohongshu-cookie"
 
@@ -30,20 +32,23 @@ class MediaParserClient:
 
     async def _request(self, source: str) -> tuple[int, bytes]:
         try:
-            async with httpx.AsyncClient(
-                transport=self.transport, trust_env=False, follow_redirects=False,
-                timeout=httpx.Timeout(30, connect=2),
-            ) as client:
-                async with client.stream(
-                    "POST", self.endpoint, json={"url": source},
-                    headers={"Accept": "application/json"},
-                ) as response:
-                    status = response.status_code
-                    raw = bytearray()
-                    async for chunk in read_response_bytes(
-                        response, self.max_bytes, size_error="media-parser 响应过大，已停止处理"):
-                        raw.extend(chunk)
-        except httpx.ConnectError as exc:
+            async with asyncio.timeout(TOTAL_TIMEOUT):
+                async with httpx.AsyncClient(
+                    transport=self.transport, trust_env=False, follow_redirects=False,
+                    timeout=httpx.Timeout(30, connect=2),
+                ) as client:
+                    async with client.stream(
+                        "POST", self.endpoint, json={"url": source},
+                        headers={"Accept": "application/json"},
+                    ) as response:
+                        status = response.status_code
+                        raw = bytearray()
+                        async for chunk in read_response_bytes(
+                            response, self.max_bytes,
+                            size_error="media-parser 响应过大，已停止处理", kind="响应",
+                        ):
+                            raw.extend(chunk)
+        except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
             raise DouyinError(CONNECT_MESSAGE) from exc
         except (httpx.TimeoutException, TimeoutError) as exc:
             raise DouyinError("media-parser 解析超时，请稍后重试") from exc
@@ -53,22 +58,27 @@ class MediaParserClient:
 
 
 def _parse_payload(raw: bytes, source: str, status: int) -> ParsedMedia:
+    ok_status = 200 <= status < 300
     try:
         payload = json.loads(raw)
     except (ValueError, RecursionError, UnicodeError):
         payload = None
     if not isinstance(payload, dict):
-        if status != 200:
+        if not ok_status:
             raise DouyinError(f"media-parser 返回 HTTP {status}")
         raise DouyinError("media-parser 返回的不是有效 JSON")
 
     retcode = payload.get("retcode")
+    if retcode is None and not ok_status:
+        raise DouyinError(f"media-parser 返回 HTTP {status}")
     if retcode != 200 or payload.get("succ") is not True:
         code = str(payload.get("error_code") or "")[:50]
         if code == "XIAOHONGSHU_COOKIE_REQUIRED":
             raise DouyinError(COOKIE_MESSAGE)
         desc = str(payload.get("retdesc") or "解析失败")[:200]
         raise DouyinError(f"media-parser 解析失败：{desc}" + (f"（{code}）" if code else ""))
+    if not ok_status:
+        raise DouyinError(f"media-parser 返回 HTTP {status}")
 
     data = payload.get("data")
     if not isinstance(data, dict):
