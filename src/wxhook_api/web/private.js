@@ -2,6 +2,9 @@
 
 const $ = (id) => document.getElementById(id);
 let timer = null;
+let configReady = false;
+let saving = false;
+let editVersion = 0;
 
 function node(tag, className, text) {
   const result = document.createElement(tag);
@@ -80,13 +83,27 @@ function renderContacts(state) {
 function renderForm(state) {
   $("enabled").checked = Boolean(state.enabled);
   $("personality").value = state.personality || "";
-  $("save-config").disabled = false;
+}
+
+function updateSaveButton() {
+  $("save-config").disabled = !configReady || saving;
+}
+
+function configEdited() {
+  editVersion += 1;
+  updateSaveButton();
+  if (configReady) status("config-status", "有未保存的更改。");
 }
 
 async function load({ form = false } = {}) {
   const state = await request("/api/private/state");
   renderContacts(state);
-  if (form) renderForm(state);
+  if (form && !configReady) {
+    renderForm(state);
+    configReady = true;
+    updateSaveButton();
+    status("config-status", "");
+  }
 }
 
 async function saveContact(contact, changes) {
@@ -106,32 +123,42 @@ async function saveContact(contact, changes) {
 
 document.querySelectorAll("[data-persona]").forEach((button) => button.addEventListener("click", () => {
   $("personality").value = button.dataset.persona;
-  $("save-config").disabled = false;
+  configEdited();
   $("personality").focus();
 }));
 
-$("personality").addEventListener("input", () => { $("save-config").disabled = false; });
-$("enabled").addEventListener("change", () => { $("save-config").disabled = false; });
+$("personality").addEventListener("input", configEdited);
+$("enabled").addEventListener("change", configEdited);
 
 $("config-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  $("save-config").disabled = true;
+  if (!configReady || saving) return;
+  saving = true;
+  const submittedVersion = editVersion;
+  updateSaveButton();
+  status("config-status", "正在保存…");
   try {
     const data = await request("/api/private/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled: $("enabled").checked, personality: $("personality").value }),
     });
-    renderForm(data.state);
+    if (submittedVersion === editVersion) {
+      renderForm(data.state);
+      status("config-status", "已保存，下一条私聊立即生效。");
+    } else {
+      status("config-status", "先前设置已保存，当前更改尚未保存。");
+    }
     renderContacts(data.state);
-    status("config-status", "已保存，下一条私聊立即生效。");
   } catch (error) {
     status("config-status", error.message, true);
-    $("save-config").disabled = false;
+  } finally {
+    saving = false;
+    updateSaveButton();
   }
 });
 
-$("refresh").addEventListener("click", () => load()
+$("refresh").addEventListener("click", () => load({ form: !configReady })
   .then(() => status("contacts-status", "已刷新。"))
   .catch((error) => status("contacts-status", error.message, true)));
 

@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import json
+import threading
 from types import SimpleNamespace
 
 from asgi_lifespan import LifespanManager
@@ -39,7 +40,7 @@ def private_event(content="你好", msgid=1, **extra):
 
 
 @asynccontextmanager
-async def context(tmp_path, provider=None):
+async def context(tmp_path, provider=None, *, bot_options=None, hook=None):
     state = SimpleNamespace(sends=[], hook_calls=[])
 
     async def hook_response(request):
@@ -49,9 +50,9 @@ async def context(tmp_path, provider=None):
             return httpx.Response(200, json={"wxid": BOT, "nickname": "机器人"})
         assert request.url.path == "/SendTextMsg", "Unexpected outbound Hook operation"
         state.sends.append(body)
-        return httpx.Response(200, json={"ret": 0})
+        return await hook(request) if hook else httpx.Response(200, json={"ret": 0})
 
-    state.bot = MentionChatService(ChatbotOptions(True, BOT, ("机器人",)), provider=provider)
+    state.bot = MentionChatService(bot_options or ChatbotOptions(True, BOT, ("机器人",)), provider=provider)
     state.hook = HookClient("http://hook.test", transport=httpx.MockTransport(hook_response))
     state.media = DouyinService(douyin_options(tmp_path), transport=httpx.MockTransport(lambda request: httpx.Response(404)))
     state.app = create_app(douyin_service=state.media, hook_client=state.hook, chat_service=state.bot,
@@ -259,3 +260,111 @@ async def test_stale_enabled_service_account_cannot_bypass_reply_checks(tmp_path
         await service._process({"contact": "newsapp", "question": "你好"})
         assert not await service._send("newsapp", "你好")
         assert not provider.calls and not state.sends
+
+
+@pytest.mark.parametrize("scope", ["global", "contact"])
+async def test_cancelled_disable_still_updates_reply_policy(tmp_path, monkeypatch, scope):
+    async with context(tmp_path, Provider()) as state:
+        await state.submit(private_event())
+        await enable(state)
+        service = state.app.state.private_chat
+        original = service._run_write
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+        def delayed_write(action):
+            try:
+                result = original(action)
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("test write gate was not released")
+                return result
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(service, "_run_write", delayed_write)
+        operation = service.configure(enabled=False) if scope == "global" else service.update_contact(FRIEND, {"enabled": False})
+        task = asyncio.create_task(operation)
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert await asyncio.to_thread(finished.wait, 3)
+            monkeypatch.setattr(service, "_run_write", original)
+
+        await state.submit(private_event("停用后不应回答", 301))
+        assert state.sends == []
+        snapshot = (await state.client.get("/api/private/state")).json()
+        assert not (snapshot["enabled"] if scope == "global" else snapshot["contacts"][0]["enabled"])
+
+
+async def test_cold_start_ignores_self_message_after_identity_check(tmp_path):
+    async with context(tmp_path) as state:
+        await state.submit(private_event())
+        await enable(state)
+    provider = Provider()
+    async with context(tmp_path, provider, bot_options=ChatbotOptions(True, "", ())) as state:
+        assert state.bot.identity == ""
+        await state.submit(private_event("机器人本人手动发送", 302, sender=BOT))
+        assert provider.calls == [] and state.sends == []
+        await state.submit(private_event("好友的新提问", 303))
+        assert [call["question"] for call in provider.calls] == ["好友的新提问"]
+        assert [body["wxidorgid"] for body in state.sends] == [FRIEND]
+
+
+async def test_private_duplicate_is_not_answered_after_restart(tmp_path):
+    payload = private_event("这条消息只能回复一次", 304)
+    async with context(tmp_path, Provider()) as state:
+        await state.submit(private_event())
+        await enable(state)
+        await state.submit(payload)
+        assert len(state.sends) == 1
+    provider = Provider()
+    async with context(tmp_path, provider) as state:
+        await state.submit(payload)
+        assert provider.calls == [] and state.sends == []
+        await state.submit(private_event("新消息仍可回复", 305))
+        assert len(state.sends) == 1
+
+
+async def test_uncertain_private_send_is_not_retried_after_restart(tmp_path):
+    async def timeout(request):
+        raise httpx.ReadTimeout("reply result unknown", request=request)
+
+    payload = private_event("发送超时也不能重发", 306)
+    async with context(tmp_path, Provider(), hook=timeout) as state:
+        await state.submit(private_event())
+        await enable(state)
+        await state.submit(payload)
+        assert len(state.sends) == 1
+        assert state.app.state.private_chat.sent == 0
+    provider = Provider()
+    async with context(tmp_path, provider) as state:
+        await state.submit(payload)
+        assert provider.calls == [] and state.sends == []
+
+
+async def test_private_duplicate_keys_are_separate_for_each_contact(tmp_path):
+    async with context(tmp_path, Provider()) as state:
+        for contact in (FRIEND, OTHER):
+            await state.submit(private_event(wxid=contact, sender=contact))
+            await enable(state, contact)
+            await state.submit(private_event("相同编号不同联系人", 307, wxid=contact, sender=contact))
+        assert [body["wxidorgid"] for body in state.sends] == [FRIEND, OTHER]
+    async with context(tmp_path, Provider()) as state:
+        for contact in (FRIEND, OTHER):
+            await state.submit(private_event("相同编号不同联系人", 307, wxid=contact, sender=contact))
+        assert state.sends == []
+
+
+async def test_private_messages_without_ids_remain_independent(tmp_path):
+    async with context(tmp_path, Provider()) as state:
+        await state.submit(private_event())
+        await enable(state)
+        await state.submit(private_event("没有编号的第一条", 0))
+        await state.submit(private_event("没有编号的第二条", 0))
+        assert len(state.sends) == 2

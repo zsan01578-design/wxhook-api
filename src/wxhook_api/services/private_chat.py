@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from wxhook_api.clients.hook_client import HookClient
 from wxhook_api.core.ai_safety import ai_permission, ai_scope
+from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.core.schema import apply_management_schema
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.chat_model import ModelError
@@ -148,10 +149,11 @@ class PrivateChatService:
         if not self._is_enabled(contact):
             self._set_status(contact, "disabled", "全局开关或该联系人未启用")
             return
-        if not self._claim(contact, event):
+        key = self._claim(contact, event)
+        if key is None:
             return
         try:
-            self._queue.put_nowait({"contact": contact, "question": question, "queued_at": now()})
+            self._queue.put_nowait({"contact": contact, "question": question, "event": event, "key": key})
         except asyncio.QueueFull:
             self._set_status(contact, "busy", "私聊回复队列已满，本条未处理")
 
@@ -193,12 +195,14 @@ class PrivateChatService:
                 db.execute("UPDATE private_chat_settings SET personality=? WHERE id=1", (personality,))
             db.execute("UPDATE private_chat_settings SET updated_at=? WHERE id=1", (timestamp,))
 
-        await self._write(write)
-        self._settings = PrivateSettings(
-            self._settings.enabled if enabled is None else bool(enabled),
-            self._settings.personality if personality is None else personality,
-        )
-        self._accepting = self._settings.enabled
+        def publish(_):
+            self._settings = PrivateSettings(
+                self._settings.enabled if enabled is None else bool(enabled),
+                self._settings.personality if personality is None else personality,
+            )
+            self._accepting = self._settings.enabled
+
+        await self._write(write, publish)
         return self.snapshot()
 
     async def update_contact(self, contact: str, changes: dict) -> bool:
@@ -218,19 +222,21 @@ class PrivateChatService:
                 db.execute("UPDATE private_contacts SET name=? WHERE id=?", (changes["name"].strip(), contact))
             return True
 
-        if not await self._write(write):
-            return False
-        row = dict(self._contacts[contact])
-        if "enabled" in changes:
-            row["enabled"] = 1 if changes["enabled"] else 0
-            if row["enabled"]:
-                self._set_status(contact, "ready", "等待新的私聊消息")
-            else:
-                self._set_status(contact, "disabled", "")
-        if "name" in changes:
-            row["name"] = changes["name"].strip()
-        self._contacts[contact] = row
-        return True
+        def publish(saved):
+            if not saved:
+                return
+            row = dict(self._contacts[contact])
+            if "enabled" in changes:
+                row["enabled"] = 1 if changes["enabled"] else 0
+                if row["enabled"]:
+                    self._set_status(contact, "ready", "等待新的私聊消息")
+                else:
+                    self._set_status(contact, "disabled", "")
+            if "name" in changes:
+                row["name"] = changes["name"].strip()
+            self._contacts[contact] = row
+
+        return await self._write(write, publish)
 
     def _initialize(self) -> None:
         with self._connect() as db:
@@ -243,9 +249,14 @@ class PrivateChatService:
             contacts = [dict(row) for row in db.execute("SELECT id, name, enabled, created_at FROM private_contacts ORDER BY created_at DESC")]
         return (dict(settings) if settings else {"enabled": 0, "personality": ""}), contacts
 
-    async def _write(self, action):
+    async def _write(self, action, publish):
+        async def commit():
+            result = await asyncio.to_thread(self._run_write, action)
+            publish(result)
+            return result
+
         async with self._write_lock:
-            return await asyncio.to_thread(self._run_write, action)
+            return await finish_before_cancel(commit())
 
     def _run_write(self, action):
         with self._connect() as db:
@@ -258,13 +269,15 @@ class PrivateChatService:
             db.execute("INSERT OR IGNORE INTO private_contacts (id, name, enabled, created_at) VALUES (?, '', 0, ?)", (contact, created))
             return dict(db.execute("SELECT id, name, enabled, created_at FROM private_contacts WHERE id=?", (contact,)).fetchone())
 
+        def publish(row):
+            self._contacts[contact] = row
+
         try:
-            row = await self._write(write)
+            await self._write(write, publish)
         except sqlite3.Error:
             self.last_error = "无法保存私聊联系人，请检查管理数据库"
             logger.warning("Failed to persist private contact")
-            row = {"id": contact, "name": "", "enabled": 0, "created_at": created}
-        self._contacts[contact] = row
+            self._contacts[contact] = {"id": contact, "name": "", "enabled": 0, "created_at": created}
 
     def _contact(self, event: CallbackEvent) -> str:
         identity = (self.chatbot.identity or "").strip()
@@ -275,17 +288,16 @@ class PrivateChatService:
             return ""
         return contact
 
-    def _claim(self, contact: str, event: CallbackEvent) -> bool:
-        key = str(event.msgid)
-        if key in {"", "0"}:
-            key = event._receipt_key or uuid4().hex
-        key = f"{contact}:{key}"
-        if key in self._seen:
-            return False
-        self._seen[key] = None
+    def _claim(self, contact: str, event: CallbackEvent) -> str | None:
+        key = ("receipt:" + (event._receipt_key or uuid4().hex) if str(event.msgid) in {"", "0"}
+               else "msgid:" + str(event.msgid))
+        seen_key = f"{contact}:{key}"
+        if seen_key in self._seen:
+            return None
+        self._seen[seen_key] = None
         while len(self._seen) > MAX_SEEN:
             self._seen.popitem(last=False)
-        return True
+        return key
 
     def _is_enabled(self, contact: str) -> bool:
         row = self._contacts.get(contact)
@@ -323,6 +335,17 @@ class PrivateChatService:
         if not await self.chatbot.verify_account():
             self.last_error = self.chatbot.last_error or "无法核验微信账号，已停止私聊回复"
             self._set_status(contact, "identity", self.last_error)
+            return
+        if not self._is_enabled(contact):
+            self._set_status(contact, "skipped", "处理前私聊开关或联系人已关闭")
+            return
+        event = job["event"]
+        if self.chatbot.own_message(event) or self._contact(event) != contact:
+            self._set_status(contact, "skipped", "账号核验后确认不是对方的私聊消息")
+            return
+        scope = f"private:{self.chatbot.identity}:{contact}"
+        if not await self.groups.claim_chat_reply(scope, job["key"]):
+            self._set_status(contact, "duplicate", "此消息已处理或已尝试回复，不再重复发送")
             return
         if not self._is_enabled(contact):
             self._set_status(contact, "skipped", "处理前私聊开关或联系人已关闭")
