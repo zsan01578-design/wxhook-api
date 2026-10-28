@@ -314,7 +314,7 @@ async def test_management_enabled_bili_card_parses_without_legacy_group_list(tmp
             state = (await context.client.get("/api/manage/state")).json()
             assert state["callbacks"]["total"] == 1 and state["callbacks"]["last_received_at"]
             assert state["media"] == {"parser_provider": "parse_video", "notify_group": True, "send_results": True, "feedback_available": True}
-            assert (await context.client.get("/api/douyin/config")).json()["supported_parsers"] == ["parse_video", "api", "builtin"]
+            assert (await context.client.get("/api/douyin/config")).json()["supported_parsers"] == ["parse_video", "api", "builtin", "media_parser"]
         finally:
             await context.service._client.aclose()
             context.service._client = original

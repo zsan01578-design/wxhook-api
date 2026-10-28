@@ -7,7 +7,7 @@ import re
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 import yaml
 
 from wxhook_api.core.config import PROJECT_ROOT, load_yaml
@@ -21,8 +21,9 @@ class GroupSettings(BaseModel):
     auto_download: bool = True
     notify_group: bool = True
     send_results: bool = True
-    parser_provider: Literal["parse_video", "api", "builtin"] = "parse_video"
+    parser_provider: Literal["parse_video", "api", "builtin", "media_parser"] = "parse_video"
     parser_api_url: str = Field(default="", max_length=4096)
+    media_parser_url: str = Field(default="http://127.0.0.1:8051", max_length=2048)
 
     @field_validator("parser_api_url")
     @classmethod
@@ -39,6 +40,38 @@ class GroupSettings(BaseModel):
         except ValueError as exc:
             raise ValueError("请填写完整的 https://jk.y-l.cc/api/dsp/.../.../ 接口地址，不要附加 ?url= 参数") from exc
         return value
+
+    @field_validator("media_parser_url")
+    @classmethod
+    def validate_media_parser_url(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return ""
+        try:
+            parsed = urlsplit(value)
+            valid = (
+                parsed.scheme in {"http", "https"}
+                and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+                and parsed.port is not None
+                and 1 <= parsed.port <= 65535
+                and not parsed.username
+                and not parsed.password
+                and not parsed.query
+                and not parsed.fragment
+                and parsed.path in {"", "/"}
+                and not any(ord(char) < 33 for char in value)
+            )
+            if not valid:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("media-parser 地址必须是本机地址，例如 http://127.0.0.1:8051") from exc
+        return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def validate_media_parser_selection(self):
+        if self.parser_provider == "media_parser" and not self.media_parser_url:
+            raise ValueError("选择 media-parser 时必须填写本机服务地址")
+        return self
 
     @field_validator("groups")
     @classmethod
@@ -99,6 +132,7 @@ def load_douyin_options() -> DouyinOptions:
         # version 2, so a later explicit provider choice remains authoritative.
         parser_provider=values.get("parser-provider", "parse_video") if version >= 2 else "parse_video",
         parser_api_url=os.getenv("WXHOOK_DOUYIN_API_URL", values.get("parser-api-url", "")),
+        media_parser_url=os.getenv("WXHOOK_MEDIA_PARSER_URL", values.get("media-parser-url", "http://127.0.0.1:8051")),
     )
     output = Path(values.get("output-dir", "downloads/douyin")).expanduser()
     if not output.is_absolute():
@@ -119,6 +153,7 @@ def save_group_settings(options: DouyinOptions, settings: GroupSettings) -> Douy
         "parser-provider": settings.parser_provider,
         "parser-config-version": 2,
         "parser-api-url": settings.parser_api_url,
+        "media-parser-url": settings.media_parser_url,
         "output-dir": str(options.output_dir),
         "max-file-mb": options.max_file_bytes // (1024 * 1024),
         "cleanup-enabled": options.retention.enabled,
