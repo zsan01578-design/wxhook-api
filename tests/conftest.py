@@ -34,8 +34,6 @@ def isolated_management_database(tmp_path, monkeypatch):
     monkeypatch.setenv("WXHOOK_IMAGE_OUTPUT_DIR", str(tmp_path / "generated-images"))
     monkeypatch.setenv("WXHOOK_CHATBOT_CONFIG", str(tmp_path / "chatbot.local.yml"))
     monkeypatch.setenv("WXHOOK_PARSE_VIDEO_CONFIG", str(tmp_path / "parse-video.local.yml"))
-    # Dudunas fallback still loads unconditionally until it is removed; keep it out of tests.
-    monkeypatch.delenv("WXHOOK_DUDUNAS_SECRET", raising=False)
     monkeypatch.setenv("WXHOOK_MEDIA_PARSER_URL", "")
     monkeypatch.delenv("PARSE_VIDEO_XHS_COOKIE", raising=False)
     monkeypatch.delenv("PARSE_VIDEO_PROXY", raising=False)

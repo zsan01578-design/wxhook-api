@@ -2,6 +2,3 @@
 # 用本人已登录小红书网页的请求头 Cookie（单行），不要把 Cookie 发到聊天或提交 Git。
 # 不需要登录的公开分享可留空；Cookie 失效时需要在本机更新。
 xiaohongshu-cookie: ''
-# 可选：去水印兜底接口密钥。留空=不启用；仅在自研解析失败时调用。
-# 该密钥只保存在本机 parse-video.local.yml（或 WXHOOK_DUDUNAS_SECRET），不要提交 Git。
-dudunas-secret: ''

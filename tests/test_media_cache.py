@@ -27,7 +27,7 @@ def test_cache_store_load_and_materialize(tmp_path):
         "id": "a" * 32, "source_url": SHORT, "platform": "douyin", "item_id": "id", "title": "标题",
         "author": "作者", "kind": "video", "assets": [{"kind": "video", "urls": [URL]}],
         "files": [{"name": "001.mp4", "kind": "video", "size": len(MP4)}],
-        "parser_provider": "dudunas", "parser_fallback": True,
+        "parser_provider": "media_parser", "parser_fallback": True,
     }
     key = cache.key("douyin", SHORT)
     cache.store(key, folder, job)

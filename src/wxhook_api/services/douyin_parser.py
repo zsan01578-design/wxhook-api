@@ -15,7 +15,7 @@ from wxhook_api.core.bounded_http import ResponseReadError, response_bytes
 
 SHARE_HOSTS = {"douyin.com", "www.douyin.com", "v.douyin.com", "m.douyin.com", "iesdouyin.com", "www.iesdouyin.com", "jingxuan.douyin.com"}
 PLATFORM_HOSTS = {"xiaohongshu.com", "www.xiaohongshu.com", "xhslink.com", "xhslink.cn", "bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv"}
-MEDIA_DOMAINS = ("douyinvod.com", "douyinpic.com", "byteimg.com", "ibytedtos.com", "snssdk.com", "amemv.com", "pstatp.com", "bytecdn.cn", "zjcdn.com", "ixigua.com", "365yg.com", "xiaohongshu.com", "xhscdn.com", "bilibili.com", "bilivideo.com", "bilivideo.cn", "hdslb.com", "api.dudunas.top")
+MEDIA_DOMAINS = ("douyinvod.com", "douyinpic.com", "byteimg.com", "ibytedtos.com", "snssdk.com", "amemv.com", "pstatp.com", "bytecdn.cn", "zjcdn.com", "ixigua.com", "365yg.com", "xiaohongshu.com", "xhscdn.com", "bilibili.com", "bilivideo.com", "bilivideo.cn", "hdslb.com")
 USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1"
 LINK_PATTERN = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&()*+,;=%]+", re.IGNORECASE)
 
