@@ -64,6 +64,7 @@ def install_exception_handlers(app: FastAPI) -> None:
                 "groups": "请填写真实群 ID（例如 123456789@chatroom），每行一个，不能填写群昵称",
                 "parser_provider": "后台不接受此解析来源，请更新并停止旧服务后重新运行 main.py",
                 "parser_api_url": "接口地址须以 https://jk.y-l.cc/api/dsp/ 开头，不要附加 ?url= 参数",
+                "media_parser_url": "media-parser 地址须为本机地址，例如 http://127.0.0.1:8051，不能带路径、账号或查询参数",
             }
             fields = list(dict.fromkeys(str(error["loc"][1]) for error in exc.errors() if len(error.get("loc", ())) > 1))
             descriptions = list(dict.fromkeys(hints.get(field, "请检查配置字段 " + field) for field in fields))
