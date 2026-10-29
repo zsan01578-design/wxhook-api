@@ -10,10 +10,12 @@ notify-group: true
 send-results: true
 # API 地址含账号标识，请在“资源”页面填写，保存到本机 douyin.local.yml。
 # 默认直接调用 Python 库，无需单独启动解析服务。
-# 兼容 api（原指定接口）和 builtin（原抖音公开分享页解析）。
+# 兼容 api（原指定接口）、builtin（原抖音公开分享页解析）和 media_parser（本地服务，失败兜底）。
 parser-config-version: 2
 parser-provider: parse_video
 parser-api-url: ''
+# media-parser 本地服务地址；作为可选来源和失败自动兜底，留空表示禁用。
+media-parser-url: 'http://127.0.0.1:8051'
 output-dir: downloads/douyin
 max-file-mb: 100
 # 每天北京时间凌晨 3 点清理；启动时也会补清理已过期的文件。

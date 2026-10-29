@@ -31,6 +31,17 @@ context-local HTTP policy through the pinned SDK's client factory. SDK source is
 not vendored or modified. Recheck the factory integration and platform tests when
 updating the pinned revision.
 
+## media-parser
+
+- Project: https://github.com/ucmao/media-parser
+- Tested revision: `19496f8c253ee0c18a2e2e27e23267c76aecaa63`
+- License: MIT
+
+Installed and run as a separate local service; source code is not vendored
+into this repository. The launcher in `scripts/media-parser-server.py` only
+sets up a loopback-bound process and does not modify upstream files. Users
+clone and update the upstream repository themselves.
+
 ## jieba (optional)
 
 - Project: https://github.com/fxsjy/jieba
