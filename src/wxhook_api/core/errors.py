@@ -68,7 +68,7 @@ def install_exception_handlers(app: FastAPI) -> None:
             }
             fields = list(dict.fromkeys(str(error["loc"][1]) for error in exc.errors() if len(error.get("loc", ())) > 1))
             descriptions = list(dict.fromkeys(hints.get(field, "请检查配置字段 " + field) for field in fields))
-            return error_response(422, "validation_error", "配置校验失败：" + ("；".join(descriptions[:4]) or "请使用页面表单重新保存配置"))
+            return error_response(422, "validation_error", "配置校验失败：" + ("；".join(descriptions[:4]) or "请检查解析来源与 media-parser 服务地址"))
         return error_response(422, "validation_error", "request validation failed")
 
     @app.exception_handler(StarletteHTTPException)

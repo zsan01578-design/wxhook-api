@@ -7,12 +7,18 @@ import pytest
 
 from tests.test_chatbot import MEMBER, context, event
 from tests.test_douyin import GROUP, ITEM, PNG, SHORT, image_item, page
+from wxhook_api.core.douyin_config import GroupSettings
 from wxhook_api.schemas.events import CallbackEvent
+from wxhook_api.services import favorites as favorites_module
+from wxhook_api.services.douyin_parser import DouyinError
 from wxhook_api.services.favorites import (FavoritesService, bookmark_url, is_favorite_command, query_terms, share_links)
 
 
 OTHER = "other@chatroom"
 ARTICLE = "https://example.com/recipes/braised-pork?x=1&y=2"
+MEDIA_BASE = "http://127.0.0.1:8051"
+MEDIA_VIDEO = "https://v3.douyinvod.com/favorite.mp4"
+MP4 = b"\0\0\0\x18ftypisom" + b"\0" * 40
 
 
 def endpoint(group=GROUP):
@@ -31,6 +37,61 @@ def media_response(request):
 
 def configure_media(state, respond=media_response):
     state.media._transport = httpx.MockTransport(respond)
+
+
+def media_parser_media(request):
+    if request.url.host == "127.0.0.1" and request.url.path == "/api/v1/parse":
+        return httpx.Response(200, json={
+            "retcode": 200, "retdesc": "成功", "succ": True,
+            "data": {"title": "收藏兜底标题", "author": {"nickname": "作者"}, "video_url": MEDIA_VIDEO},
+        })
+    if request.url.host == "v3.douyinvod.com":
+        return httpx.Response(200, content=MP4, headers={"content-type": "video/mp4"})
+    return httpx.Response(404)
+
+
+class FailingPrimary:
+    async def parse(self, source):
+        raise DouyinError("primary failed")
+
+
+async def test_collect_uses_media_parser_as_the_source(tmp_path):
+    async with context(tmp_path) as state:
+        calls = []
+
+        def respond(request):
+            calls.append((request.url.host, request.url.path))
+            return media_parser_media(request)
+
+        configure_media(state, respond)
+        state.media.options = replace(state.media.options, settings=GroupSettings(
+            parser_provider="media_parser", media_parser_url=MEDIA_BASE))
+        worker = state.app.state.favorites
+        item = (await worker.collect(GROUP, SHORT))["item"]
+        assert item["status"] == "saved" and item["kind"] == "video"
+        assert [file["name"] for file in item["files"]] == ["001.mp4"]
+        assert item["title"] == "收藏兜底标题"
+        assert ("127.0.0.1", "/api/v1/parse") in calls
+        assert not any(host in {"v.douyin.com", "www.douyin.com"} for host, _ in calls)
+
+
+async def test_collect_falls_back_to_media_parser_when_primary_fails(tmp_path, monkeypatch):
+    async with context(tmp_path) as state:
+        calls = []
+
+        def respond(request):
+            calls.append((request.url.host, request.url.path))
+            return media_parser_media(request)
+
+        configure_media(state, respond)
+        state.media.options = replace(state.media.options, settings=GroupSettings(
+            parser_provider="parse_video", media_parser_url=MEDIA_BASE))
+        monkeypatch.setattr(favorites_module, "ParseVideoParser", lambda **kwargs: FailingPrimary())
+        worker = state.app.state.favorites
+        item = (await worker.collect(GROUP, SHORT))["item"]
+        assert item["status"] == "saved" and item["kind"] == "video"
+        assert [file["name"] for file in item["files"]] == ["001.mp4"]
+        assert ("127.0.0.1", "/api/v1/parse") in calls
 
 
 @pytest.mark.parametrize("text", ["收藏", f"收藏 {SHORT}", "收藏夹", "搜索收藏：红烧肉", "上次那个红烧肉教程在哪", "之前收藏的Python教程在哪里"])

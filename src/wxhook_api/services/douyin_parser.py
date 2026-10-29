@@ -33,6 +33,12 @@ def stream_error(exc: ResponseReadError, size_error: str, kind: str = "页面") 
     return DouyinError(messages[str(exc)])
 
 
+def request_error(exc: httpx.HTTPError) -> DouyinError:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return DouyinError(f"平台请求返回 HTTP {exc.response.status_code}，请确认链接可访问")
+    return DouyinError("平台请求失败，请确认网络和分享链接可访问")
+
+
 async def read_response_bytes(response: httpx.Response, limit: int, *, size_error: str, kind: str = "页面"):
     try:
         async for chunk in response_bytes(response, limit):

@@ -10,7 +10,7 @@ notify-group: true
 send-results: true
 # API 地址含账号标识，请在“资源”页面填写，保存到本机 douyin.local.yml。
 # 默认直接调用 Python 库，无需单独启动解析服务。
-# 兼容 api（原指定接口）、builtin（原抖音公开分享页解析）和 media_parser（本地服务，失败兜底）。
+# 兼容 api（原指定接口）、builtin（原抖音公开分享页解析）和 media_parser（本地服务，可作为可选来源，也是其他来源失败后的自动兜底）。
 parser-config-version: 2
 parser-provider: parse_video
 parser-api-url: ''

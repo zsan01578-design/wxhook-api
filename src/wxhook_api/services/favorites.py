@@ -20,9 +20,10 @@ from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.services.douyin import media_extension
 from wxhook_api.services.douyin_api import DouyinAPIParser
 from wxhook_api.services.douyin_parser import (DouyinError, DouyinParser, LINK_PATTERN, USER_AGENT,
-                                             checked_url, item_identity, read_response_bytes)
+                                             checked_url, item_identity, read_response_bytes, request_error)
 from wxhook_api.services.groups import now
 from wxhook_api.services.media_cleanup import safe_child
+from wxhook_api.services.media_parser import MediaParserClient
 from wxhook_api.services.parse_video import ParseVideoParser, REFERERS, source_platform
 from wxhook_api.services.storage_guard import StorageGuard
 from wxhook_api.services.word_cloud import frequent_words
@@ -258,17 +259,37 @@ class FavoritesService:
                         proxy=os.getenv("PARSE_VIDEO_PROXY") or None) as client:
                     self.check(group, sender)
                     config = self.media.options.settings
-                    if platform == "douyin" and config.parser_provider == "builtin":
-                        parsed = await DouyinParser(client).parse(url)
-                    elif platform == "douyin" and config.parser_provider == "api":
-                        parsed = await DouyinAPIParser(client, config.parser_api_url).parse(url)
+                    if config.parser_provider == "media_parser":
+                        parsed = await MediaParserClient(config.media_parser_url,
+                                                         transport=self.media._transport).parse(url)
                     else:
                         try:
-                            parsed = await ParseVideoParser(transport=self.media._transport).parse(url)
-                        except DouyinError:
-                            if platform != "douyin" or not config.parser_api_url:
-                                raise
-                            parsed = await DouyinAPIParser(client, config.parser_api_url).parse(url)
+                            if platform == "douyin" and config.parser_provider == "builtin":
+                                parsed = await DouyinParser(client).parse(url)
+                            elif platform == "douyin" and config.parser_provider == "api":
+                                parsed = await DouyinAPIParser(client, config.parser_api_url).parse(url)
+                            else:
+                                try:
+                                    parsed = await ParseVideoParser(transport=self.media._transport).parse(url)
+                                except (DouyinError, httpx.HTTPError):
+                                    if platform != "douyin" or not config.parser_api_url:
+                                        raise
+                                    parsed = await DouyinAPIParser(client, config.parser_api_url).parse(url)
+                        except (DouyinError, httpx.HTTPError) as exc:
+                            primary_error = exc if isinstance(exc, DouyinError) else request_error(exc)
+                            if not config.media_parser_url:
+                                if primary_error is exc:
+                                    raise
+                                raise primary_error from exc
+                            try:
+                                parsed = await MediaParserClient(config.media_parser_url,
+                                                                 transport=self.media._transport).parse(url)
+                            except (DouyinError, httpx.HTTPError) as fallback_exc:
+                                fallback_error = (fallback_exc if isinstance(fallback_exc, DouyinError)
+                                                  else request_error(fallback_exc))
+                                raise DouyinError(
+                                    f"{str(primary_error)[:300]}；media-parser 兜底也失败：{str(fallback_error)[:200]}"
+                                ) from fallback_exc
                     card.update(title=card["title"] if custom_title or retry_id else parsed.title[:220],
                                 source_text=(parsed.title + "\n\n" + text)[:4000],author=parsed.author,
                                 platform=platform,kind=parsed.kind,assets=parsed.assets)

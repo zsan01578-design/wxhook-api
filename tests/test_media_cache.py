@@ -11,7 +11,7 @@ from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services import douyin as douyin_module
 from wxhook_api.services.douyin import DouyinService
 from wxhook_api.services.douyin_parser import ParsedMedia
-from wxhook_api.services.media_cache import MediaCache
+from wxhook_api.services.media_cache import CACHE_VERSION, MediaCache
 
 
 MP4 = b"\0\0\0\x18ftypisom" + b"\0" * 40
@@ -79,7 +79,7 @@ def test_cache_rejects_entries_from_a_previous_version(tmp_path):
     })
     meta_path = tmp_path / "cache" / key / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    meta["version"] = 1
+    meta["version"] = CACHE_VERSION - 1
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
     assert cache.load(key) is None
 

@@ -46,6 +46,25 @@ def test_xhs_cookie_is_bridged_without_overwriting_env(tmp_path, monkeypatch):
         os.environ.pop("XHS_COOKIE", None)
 
 
+def test_parse_video_env_cookie_takes_precedence_and_needs_no_file(tmp_path, monkeypatch):
+    module = load_launcher()
+    monkeypatch.delenv("XHS_COOKIE", raising=False)
+    monkeypatch.setenv("PARSE_VIDEO_XHS_COOKIE", "a1=env; web_session=env")
+    try:
+        monkeypatch.setenv("WXHOOK_PARSE_VIDEO_CONFIG", str(tmp_path / "missing.yml"))
+        module.bridge_xhs_cookie(PROJECT_ROOT)
+        assert os.environ["XHS_COOKIE"] == "a1=env; web_session=env"
+
+        config = tmp_path / "parse-video.local.yml"
+        config.write_text("xiaohongshu-cookie: 'a1=file; web_session=file'\n", encoding="utf-8")
+        monkeypatch.setenv("WXHOOK_PARSE_VIDEO_CONFIG", str(config))
+        os.environ.pop("XHS_COOKIE", None)
+        module.bridge_xhs_cookie(PROJECT_ROOT)
+        assert os.environ["XHS_COOKIE"] == "a1=env; web_session=env"
+    finally:
+        os.environ.pop("XHS_COOKIE", None)
+
+
 def test_missing_root_exits_with_message(tmp_path, capsys):
     module = load_launcher()
     assert module.main(["--root", str(tmp_path / "missing")]) == 2

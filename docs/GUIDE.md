@@ -594,6 +594,7 @@ send-results: true
 parser-provider: parse_video
 parser-config-version: 2
 parser-api-url: '' # 仅选择旧 API 来源时需要
+media-parser-url: 'http://127.0.0.1:8051' # 本地服务地址；作为可选来源和失败自动兜底，留空表示禁用
 output-dir: downloads/douyin
 max-file-mb: 100
 ```

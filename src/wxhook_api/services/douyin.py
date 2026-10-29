@@ -17,7 +17,7 @@ import httpx
 from wxhook_api.core.douyin_config import DouyinOptions, GroupSettings, save_group_settings
 from wxhook_api.core.persistence import finish_before_cancel
 from wxhook_api.schemas.events import CallbackEvent
-from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links, read_response_bytes
+from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links, read_response_bytes, request_error
 from wxhook_api.services.douyin_delivery import DeliveryBlocked, DeliveryError, DouyinMessenger
 from wxhook_api.services.douyin_api import DouyinAPIParser
 from wxhook_api.services.parse_video import ParseVideoParser, REFERERS, source_platform
@@ -364,43 +364,55 @@ class DouyinService:
                 raise DouyinError("未配置 media-parser 本地服务地址")
             return await MediaParserClient(fallback_url, transport=self._transport).parse(job["source_url"])
 
+        def normalized(exc: Exception) -> DouyinError:
+            return exc if isinstance(exc, DouyinError) else request_error(exc)
+
         if provider == "media_parser":
             parsed = await media_parser()
         elif provider == "parse_video":
             parser = ParseVideoParser(transport=self._transport)
             try:
                 parsed = await parser.parse(job["source_url"])
-            except DouyinError as primary_error:
+            except (DouyinError, httpx.HTTPError) as exc:
+                primary_error = normalized(exc)
                 parsed = None
                 if job["platform"] == "douyin" and config.parser_api_url:
                     try:
                         parsed = await DouyinAPIParser(self._client, config.parser_api_url).parse(job["source_url"])
                         provider, fallback_used = "api", True
-                    except DouyinError as api_error:
+                    except (DouyinError, httpx.HTTPError) as api_exc:
+                        api_error = normalized(api_exc)
                         primary_error = DouyinError(
                             f"parse-video-py 解析失败：{str(primary_error)[:200]}；备用接口也失败：{str(api_error)[:200]}")
                 if parsed is None:
                     if not fallback_url:
-                        raise primary_error
+                        if primary_error is exc:
+                            raise
+                        raise primary_error from exc
                     try:
                         parsed = await media_parser()
                         provider, fallback_used = "media_parser", True
-                    except DouyinError as fallback_error:
+                    except (DouyinError, httpx.HTTPError) as fallback_exc:
+                        fallback_error = normalized(fallback_exc)
                         raise DouyinError(
-                            f"{str(primary_error)[:300]}；media-parser 兜底也失败：{str(fallback_error)[:200]}") from fallback_error
+                            f"{str(primary_error)[:300]}；media-parser 兜底也失败：{str(fallback_error)[:200]}") from fallback_exc
         else:
             parser = DouyinAPIParser(self._client, config.parser_api_url) if provider == "api" else DouyinParser(self._client)
             try:
                 parsed = await parser.parse(job["source_url"])
-            except DouyinError as primary_error:
+            except (DouyinError, httpx.HTTPError) as exc:
+                primary_error = normalized(exc)
                 if not fallback_url:
-                    raise
+                    if primary_error is exc:
+                        raise
+                    raise primary_error from exc
                 try:
                     parsed = await media_parser()
                     provider, fallback_used = "media_parser", True
-                except DouyinError as fallback_error:
+                except (DouyinError, httpx.HTTPError) as fallback_exc:
+                    fallback_error = normalized(fallback_exc)
                     raise DouyinError(
-                        f"{str(primary_error)[:300]}；media-parser 兜底也失败：{str(fallback_error)[:200]}") from fallback_error
+                        f"{str(primary_error)[:300]}；media-parser 兜底也失败：{str(fallback_error)[:200]}") from fallback_exc
         job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind,
                    assets=parsed.assets, platform=parsed.platform, parser_provider=provider, parser_fallback=fallback_used)
         return parsed

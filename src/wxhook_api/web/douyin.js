@@ -7,7 +7,8 @@ let polling = false;
 let configReady = false;
 
 function updateProvider() {
-  element("api-settings").hidden = element("parser-provider").value === "builtin";
+  const provider = element("parser-provider").value;
+  element("api-settings").hidden = provider === "builtin" || provider === "media_parser";
 }
 element("parser-provider").addEventListener("change", updateProvider);
 

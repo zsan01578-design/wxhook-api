@@ -141,6 +141,23 @@ async def test_api_provider_failure_uses_media_parser(tmp_path, monkeypatch):
     assert job["parser_provider"] == "media_parser" and job["parser_fallback"] is True
 
 
+class RawHttp403Parser:
+    async def parse(self, source):
+        request = httpx.Request("GET", "https://www.douyin.com/video/123")
+        raise httpx.HTTPStatusError("403", request=request, response=httpx.Response(403, request=request))
+
+
+async def test_builtin_raw_http_error_uses_media_parser(tmp_path, monkeypatch):
+    monkeypatch.setattr(douyin_module, "DouyinParser", lambda *args, **kwargs: RawHttp403Parser())
+    service = DouyinService(
+        options(tmp_path, parser_provider="builtin", media_parser_url=MEDIA_BASE),
+        transport=httpx.MockTransport(media_success))
+    job = {"source_url": SHORT, "platform": "douyin"}
+    parsed = await service._resolve_media(job, service.options.settings)
+    assert job["parser_provider"] == "media_parser" and job["parser_fallback"] is True
+    assert parsed.assets == [{"kind": "video", "urls": [MEDIA_VIDEO]}]
+
+
 async def test_empty_media_url_keeps_primary_error(tmp_path, monkeypatch):
     monkeypatch.setattr(douyin_module, "ParseVideoParser", lambda **kwargs: FailingParser())
     service = DouyinService(

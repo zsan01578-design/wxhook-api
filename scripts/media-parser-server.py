@@ -28,6 +28,10 @@ def parse_video_config_path() -> Path:
 def bridge_xhs_cookie(project_root: Path) -> None:
     if os.getenv("XHS_COOKIE", "").strip():
         return
+    configured = os.getenv("PARSE_VIDEO_XHS_COOKIE", "").strip()
+    if configured and all(32 <= ord(char) <= 126 for char in configured):
+        os.environ["XHS_COOKIE"] = configured
+        return
     path = parse_video_config_path()
     try:
         if not path.is_file() or path.stat().st_size > 32 * 1024:
@@ -63,7 +67,7 @@ def install_fcntl_stub() -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root")
-    parser.add_argument("--port", type=int, default=int(os.getenv("WXHOOK_MEDIA_PARSER_PORT", "8051")))
+    parser.add_argument("--port", type=int, default=int(os.getenv("WXHOOK_MEDIA_PARSER_PORT", "8051") or "8051"))
     args = parser.parse_args(argv)
     root = resolve_root(args.root)
     if not (root / "app.py").is_file() or not (root / "src" / "parsers").is_dir():

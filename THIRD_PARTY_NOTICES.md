@@ -37,10 +37,11 @@ updating the pinned revision.
 - Tested revision: `19496f8c253ee0c18a2e2e27e23267c76aecaa63`
 - License: MIT
 
-Installed and run as a separate local service; source code is not vendored
-into this repository. The launcher in `scripts/media-parser-server.py` only
-sets up a loopback-bound process and does not modify upstream files. Users
-clone and update the upstream repository themselves.
+Cloned and run as a separate local service; it is neither installed as a
+dependency nor vendored into this repository. The launcher in
+`scripts/media-parser-server.py` only sets up a loopback-bound process and does
+not modify upstream files. Users clone and update the upstream repository
+themselves.
 
 ## jieba (optional)
 
