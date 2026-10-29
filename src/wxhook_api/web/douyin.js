@@ -49,6 +49,7 @@ async function loadConfig() {
     element("parser-provider").value = data.settings.parser_provider || "parse_video";
     updateProvider();
     element("parser-api-url").value = data.settings.parser_api_url || "";
+    element("media-parser-url").value = data.settings.media_parser_url || "";
     element("enabled").checked = data.settings.enabled;
     element("groups").value = data.settings.groups.join("\n");
     element("auto-download").checked = data.settings.auto_download;
@@ -60,6 +61,7 @@ async function loadConfig() {
     element("cleanup-policy").textContent = cleanup?.enabled ? `每天 ${String(cleanup.hour).padStart(2, "0")}:00（北京时间）清理：已回传媒体保留 ${cleanup.sent_hours} 小时，其他媒体保留 ${cleanup.other_hours / 24} 天，解析记录保留 ${cleanup.record_days} 天。服务启动时也会补清理过期文件。` : "自动清理已关闭，媒体文件会继续保留在本机。";
     message("config-status", data.settings.enabled && data.settings.groups.length ? `默认名单已启用 ${data.settings.groups.length} 个群，独立配置以群管理为准。` : "默认群名单未启用，独立配置以群管理为准。");
     if (element("parser-provider").value === "api" && !element("parser-api-url").value) message("config-status", "请填写完整解析接口地址并保存。", true);
+    if (element("parser-provider").value === "media_parser" && !element("media-parser-url").value.trim()) message("config-status", "选择 media-parser 时请填写本机服务地址，例如 http://127.0.0.1:8051。", true);
     if (data.feedback_available === false) message("config-status", "群内发送总开关已关闭；如需提示和回传，请检查 WXHOOK_DOUYIN_FEEDBACK_ENABLED 后重启。", true);
     if (!data.supported_parsers?.includes("parse_video")) {
       message("config-status", "检测到页面与后台版本不一致。请停止原 PyCharm 任务或原终端服务，重新运行根目录 main.py 后刷新页面。", true);
@@ -83,10 +85,12 @@ element("group-form").addEventListener("submit", async (event) => {
     const enabled = element("enabled").checked;
     const provider = element("parser-provider").value;
     const apiUrl = element("parser-api-url").value.trim();
-    await request("/api/douyin/config", { enabled, groups, auto_download: element("auto-download").checked, notify_group: element("notify-group").checked, send_results: element("send-results").checked, parser_provider: provider, parser_api_url: apiUrl });
+    const mediaUrl = element("media-parser-url").value.trim();
+    await request("/api/douyin/config", { enabled, groups, auto_download: element("auto-download").checked, notify_group: element("notify-group").checked, send_results: element("send-results").checked, parser_provider: provider, parser_api_url: apiUrl, media_parser_url: mediaUrl });
     element("groups").value = groups.join("\n");
     message("config-status", enabled && groups.length ? `默认名单已保存，共 ${groups.length} 个群；独立配置以群管理为准。` : "已保存，默认群名单未启用；独立配置以群管理为准。");
     if (provider === "api" && !apiUrl) message("config-status", "配置已保存，但接口地址为空，收到链接时将提示解析失败。", true);
+    if (provider === "media_parser" && !mediaUrl) message("config-status", "配置已保存，但 media-parser 地址为空，解析会失败。", true);
   } catch (error) {
     message("config-status", `保存失败：${error.message}`, true);
   } finally {
@@ -170,7 +174,7 @@ function renderJobs(data) {
     header.append(node("strong", "message-peer", job.title || "群聊分享"), node("span", hasError ? "count error" : "count", label));
     info.append(header, node("p", "message-meta", `${job.group_id} · ${job.sender}`));
     if (job.author) info.append(node("p", "message-meta", `作者：${job.author} · ${job.kind === "images" ? "图集" : "视频"}`));
-    if (job.parser_provider) info.append(node("p", "message-meta", `解析来源：${{parse_video: "parse-video-py", api: "指定接口", builtin: "公开分享页", dudunas: "去水印兜底"}[job.parser_provider] || job.parser_provider}${job.parser_fallback ? "（失败后回退）" : ""}${job.cache_hit ? " · 缓存命中" : ""}${job.platform ? ` · ${{douyin: "抖音", xiaohongshu: "小红书", bilibili: "B站"}[job.platform] || job.platform}` : ""}`));
+    if (job.parser_provider) info.append(node("p", "message-meta", `解析来源：${{parse_video: "parse-video-py", api: "指定接口", builtin: "公开分享页", media_parser: "media-parser"}[job.parser_provider] || job.parser_provider}${job.parser_fallback ? "（失败后回退）" : ""}${job.cache_hit ? " · 缓存命中" : ""}${job.platform ? ` · ${{douyin: "抖音", xiaohongshu: "小红书", bilibili: "B站"}[job.platform] || job.platform}` : ""}`));
     if (job.error) info.append(node("p", "feedback error", job.error));
     if (job.delivery_error) info.append(node("p", "feedback error", `回传：${job.delivery_error}`));
     if (job.storage_error) info.append(node("p", "feedback error", job.storage_error));

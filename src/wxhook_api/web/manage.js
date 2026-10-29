@@ -255,7 +255,7 @@ function renderFeatures(group) {
   diagnostic.append(el("p", "", `当前识别的机器人称呼：${names}\n${version}\n${recent ? `最近实时消息：${dateText(recent.received_at)}\n${route ? `处理分支：${route}\n` : ""}${intentSource ? `图片需求：${intentSource}，描述 ${recent.image_prompt_chars} 字\n` : ""}处理状态：${recent.message}` : "本次启动尚未收到此群的实时消息。历史同步显示的消息不会触发问答。"}`), button("配置机器人群内显示名", "button small", mentionSettingsDialog));
   const runtime = el("div", "feature-footnote"), media = state.media;
   if (media) {
-    const provider = {parse_video: "parse-video-py（抖音 / 小红书 / B站）", api: "指定接口（仅抖音）", builtin: "公开分享页（仅抖音）"}[media.parser_provider] || media.parser_provider;
+    const provider = {parse_video: "parse-video-py（抖音 / 小红书 / B站）", media_parser: "media-parser（本地服务）", api: "指定接口（仅抖音）", builtin: "公开分享页（仅抖音）"}[media.parser_provider] || media.parser_provider;
     const warnings = [];
     if (!media.feedback_available) warnings.push("群内发送总开关已关闭，无法发送提示或媒体");
     if (!media.notify_group) warnings.push("开始和失败提示已关闭");
