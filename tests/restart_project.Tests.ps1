@@ -104,3 +104,16 @@ try { Restart-Project $scratch; throw 'Expected dependency failure' } catch {
 }
 Assert-True (($script:events -join ',') -eq 'pull,dependencies') 'Dependency failure stopped the old service.'
 Write-Output 'restart ordering, local mode, and dependency failure: passed'
+
+# The media-parser is optional: a failing lifecycle must degrade to a warning
+# and still start wxhook. Restart-Project must not rethrow.
+$script:events = @()
+$script:failDependencies = $false
+function Start-MediaParserService { param($Root, $Python) throw 'simulated media-parser failure' }
+try {
+    Restart-Project $scratch -SkipUpdate
+} catch {
+    throw "A media-parser failure blocked wxhook startup: $($_.Exception.Message)"
+}
+Assert-True (($script:events -join ',') -eq 'dependencies,stop,start') 'media-parser failure blocked or reordered the wxhook start.'
+Write-Output 'media-parser failure does not block wxhook: passed'

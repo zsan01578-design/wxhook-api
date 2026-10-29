@@ -335,7 +335,11 @@ sys.exit(0 if stamp.is_file() and stamp.read_text(encoding='ascii').strip() == d
     Write-Host '[3/5] Stopping the old project service...'
     Stop-ProjectService $Root
     Write-Host '[4/5] Starting media-parser local service...'
-    Start-MediaParserService $Root $python
+    try {
+        Start-MediaParserService $Root $python
+    } catch {
+        Write-Warning "media-parser lifecycle failed: $($_.Exception.Message); wxhook will still start."
+    }
     Write-Host '[5/5] Starting the updated service...'
     Start-ProjectService $Root $python $configuration
 }
