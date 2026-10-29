@@ -497,19 +497,19 @@ media-parser 启动失败或健康检查超时只会告警，不影响 wxhook �
 
 - 把“解析来源”选为 `media-parser（本地服务）`，直接用本地服务解析；
 - 保持 `parse-video-py`、`指定解析接口` 或 `公开分享页` 时，主解析失败后自动再尝试 media-parser 兜底；
-- 修改“media-parser 本地服务地址”（默认 `http://127.0.0.1:8051`）。地址只允许本机回环地址，留空表示禁用。
+- 修改“media-parser 本地服务地址”（默认 `http://127.0.0.1:8051`）。地址只允许本机回环地址，留空表示禁用兜底；选择 media-parser 作为主来源时必须填写地址。
 
-选择 media-parser 作为主来源时，它失败后不会再反向回退到 parse-video-py。
+选择 media-parser 作为主来源时，它失败后不会再反向回退到 parse-video-py 或配置的指定解析接口。
 小红书 Cookie 仍然只填写在 `parse-video.local.yml` 的 `xiaohongshu-cookie`，启动器会自动传给 media-parser，不需要复制到别处。
 
-更新 media-parser：`cd D:\media-parser && git pull`，然后重启 wxhook。
+更新 media-parser：cd 到你的 media-parser 目录（测试机 `D:\media-parser`，开发机 `F:\media-parser`），执行 `git pull`，然后重启 wxhook。
 日志在 `data/media-parser.stdout.log` 与 `data/media-parser.stderr.log`。
 media-parser 的数据库与会话密钥保存在其源码目录，不进入 wxhook 的备份和更新。
 如果修改端口，需要同时设置 `WXHOOK_MEDIA_PARSER_PORT` 和页面里的服务地址。
 
-下载失败仍会清理未完成文件、重新解析并最多重试 3 次。
+下载失败仍会清理未完成文件、重新解析并最多尝试 3 次（首次 + 2 次重试）；群/成员限制、文件大小上限等错误不会重试。
 同一平台和源链接的媒体缓存 7 天；本次升级提升了缓存版本，旧缓存不会命中，第一次解析会重新获取媒体。
-media-parser 只处理抖音、小红书和 B站；媒体回传仍走原有的群权限、大小限制和自动保存规则。
+wxhook 只在抖音/小红书/B站链接上调用 media-parser；媒体回传仍走原有的群权限、大小限制和自动保存规则。
 这里的“无水印”指选择平台的无水印媒体源，不做像素擦除，作者嵌入画面的水印仍会保留。
 
 ### 群内提示与自动回传
@@ -1370,7 +1370,7 @@ wxhook-api/
 
 ### 部署与进程恢复
 
-Windows 上双击项目根目录的 **`update-and-start.bat` 即可一键更新并重启**，不必先手动关闭旧黑窗口。脚本按“拉取代码 → 检查依赖和配置 → 停止旧项目进程 → 启动新服务”的顺序执行，并核对新服务的健康状态和代码版本。
+Windows 上双击项目根目录的 **`update-and-start.bat` 即可一键更新并重启**，不必先手动关闭旧黑窗口。脚本按 5 步顺序执行：更新代码 → 准备依赖（此时旧服务仍在运行）→ 停止旧 wxhook 服务 → 停止旧 media-parser 并启动新实例（失败只告警，不阻止后续启动）→ 启动新 wxhook 服务，并核对新服务的健康状态和代码版本。media-parser 的启动输出与错误分别保存在 `data/media-parser.stdout.log` 与 `data/media-parser.stderr.log`。
 
 | 需求 | 操作 |
 | --- | --- |
@@ -1387,7 +1387,7 @@ GitHub 无法连接或依赖、配置检查失败时，脚本停止并保留旧�
 
 两个入口共用依赖检查：首次运行会安装依赖，之后仅在 `requirements-runtime.lock` 或 `pyproject.toml` 变化时重新安装，并在每次启动前运行 `pip check`。因此，本地启动也需要已安装匹配的依赖；首次安装或依赖文件变化时仍可能需要访问软件源。没有虚拟环境时需要已安装 Python 3.12。脚本默认设置常规同步间隔为 180 秒，已有 `WXHOOK_SYNC_INTERVAL` 环境变量时保留其值。Git、依赖或启动失败会保留报错窗口；使用前确认本机 `launcher.yml` 的微信路径与 Hook 文件配置正确。脚本不自动覆盖或丢弃本地修改；本地修改阻止更新时，需要先处理 Git 提示。计划任务管理的服务应通过计划任务重启，避免其自动恢复策略与手动重启同时生效。
 
-提供 [部署依赖快照](requirements-runtime.lock)，来自本轮 Windows / Python 3.12.14 的已验收运行环境，固定 38 个运行时依赖；开发测试依赖仍由 `.[dev]` 提供。在新虚拟环境中安装：
+提供 [部署依赖快照](requirements-runtime.lock)，来自本轮 Windows / Python 3.12.14 的已验收运行环境，固定 54 个运行时依赖；开发测试依赖仍由 `.[dev]` 提供。在新虚拟环境中安装：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-runtime.lock

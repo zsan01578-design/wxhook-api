@@ -14,14 +14,14 @@ from wxhook_api.services.parse_video import source_platform
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 MAX_IMAGES = 100
 TOTAL_TIMEOUT = 35
-CONNECT_MESSAGE = "media-parser 本地服务连接失败，请确认 127.0.0.1:8051 已启动"
 COOKIE_MESSAGE = "media-parser 提示小红书需要登录 Cookie，请检查 parse-video.local.yml 的 xiaohongshu-cookie"
 
 
 class MediaParserClient:
     def __init__(self, base_url: str, *, transport: httpx.AsyncBaseTransport | None = None,
                  max_bytes: int = DEFAULT_MAX_BYTES):
-        self.endpoint = base_url.rstrip("/") + "/api/v1/parse"
+        self.address = base_url.rstrip("/")
+        self.endpoint = self.address + "/api/v1/parse"
         self.transport = transport
         self.max_bytes = max(1024, int(max_bytes))
 
@@ -49,11 +49,11 @@ class MediaParserClient:
                         ):
                             raw.extend(chunk)
         except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
-            raise DouyinError(CONNECT_MESSAGE) from exc
+            raise DouyinError(f"media-parser 本地服务连接失败，请确认 {self.address} 已启动") from exc
         except (httpx.TimeoutException, TimeoutError) as exc:
             raise DouyinError("media-parser 解析超时，请稍后重试") from exc
         except httpx.HTTPError as exc:
-            raise DouyinError(CONNECT_MESSAGE) from exc
+            raise DouyinError(f"media-parser 本地服务连接失败，请确认 {self.address} 已启动") from exc
         return status, bytes(raw)
 
 
