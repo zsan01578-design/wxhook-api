@@ -20,11 +20,11 @@ from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, USER_AGENT, checked_url, extract_links, read_response_bytes
 from wxhook_api.services.douyin_delivery import DeliveryBlocked, DeliveryError, DouyinMessenger
 from wxhook_api.services.douyin_api import DouyinAPIParser
-from wxhook_api.services.parse_fallback import load_dudunas_parser, prefer_watermark_free_video
 from wxhook_api.services.parse_video import ParseVideoParser, REFERERS, source_platform
 from wxhook_api.services.groups import GroupManager, event_group, normalize_group_sender
 from wxhook_api.services.media_cache import MediaCache
 from wxhook_api.services.media_cleanup import ACTIVE_STATES, MEDIA_NAME, cleanup_media, next_cleanup_at, safe_child, timestamp, utcnow, valid_job_record
+from wxhook_api.services.media_parser import MediaParserClient
 from wxhook_api.services.storage_guard import LowDiskSpace, StorageGuard
 
 
@@ -357,8 +357,16 @@ class DouyinService:
     async def _resolve_media(self, job: dict, config) -> Any:
         provider = config.parser_provider
         fallback_used = False
-        fallback = load_dudunas_parser(transport=self._transport)
-        if config.parser_provider == "parse_video":
+        fallback_url = config.media_parser_url
+
+        async def media_parser():
+            if not fallback_url:
+                raise DouyinError("未配置 media-parser 本地服务地址")
+            return await MediaParserClient(fallback_url, transport=self._transport).parse(job["source_url"])
+
+        if provider == "media_parser":
+            parsed = await media_parser()
+        elif provider == "parse_video":
             parser = ParseVideoParser(transport=self._transport)
             try:
                 parsed = await parser.parse(job["source_url"])
@@ -368,26 +376,31 @@ class DouyinService:
                     try:
                         parsed = await DouyinAPIParser(self._client, config.parser_api_url).parse(job["source_url"])
                         provider, fallback_used = "api", True
-                    except DouyinError as fallback_error:
+                    except DouyinError as api_error:
                         primary_error = DouyinError(
-                            f"parse-video-py 解析失败：{str(primary_error)[:200]}；备用接口也失败：{str(fallback_error)[:200]}")
+                            f"parse-video-py 解析失败：{str(primary_error)[:200]}；备用接口也失败：{str(api_error)[:200]}")
                 if parsed is None:
-                    if fallback is None:
+                    if not fallback_url:
                         raise primary_error
                     try:
-                        parsed = await fallback.parse(job["source_url"])
-                        provider, fallback_used = "dudunas", True
-                    except DouyinError as watermark_error:
+                        parsed = await media_parser()
+                        provider, fallback_used = "media_parser", True
+                    except DouyinError as fallback_error:
                         raise DouyinError(
-                            f"{str(primary_error)[:300]}；去水印兜底也失败：{str(watermark_error)[:200]}") from watermark_error
+                            f"{str(primary_error)[:300]}；media-parser 兜底也失败：{str(fallback_error)[:200]}") from fallback_error
         else:
-            parser = DouyinAPIParser(self._client, config.parser_api_url) if config.parser_provider == "api" else DouyinParser(self._client)
-            parsed = await parser.parse(job["source_url"])
-        if parsed.kind == "video" and provider != "dudunas" and fallback is not None:
-            preferred = await prefer_watermark_free_video(parsed, job["source_url"], fallback=fallback)
-            if preferred is not parsed:
-                parsed = preferred
-                provider, fallback_used = "dudunas", False
+            parser = DouyinAPIParser(self._client, config.parser_api_url) if provider == "api" else DouyinParser(self._client)
+            try:
+                parsed = await parser.parse(job["source_url"])
+            except DouyinError as primary_error:
+                if not fallback_url:
+                    raise
+                try:
+                    parsed = await media_parser()
+                    provider, fallback_used = "media_parser", True
+                except DouyinError as fallback_error:
+                    raise DouyinError(
+                        f"{str(primary_error)[:300]}；media-parser 兜底也失败：{str(fallback_error)[:200]}") from fallback_error
         job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind,
                    assets=parsed.assets, platform=parsed.platform, parser_provider=provider, parser_fallback=fallback_used)
         return parsed
@@ -412,8 +425,8 @@ class DouyinService:
                 async with asyncio.timeout(240):
                     config = self.options.settings
                     job.update(parser_provider=config.parser_provider, platform=source_platform(job["source_url"]))
-                    if config.parser_provider != "parse_video" and job["platform"] != "douyin":
-                        raise DouyinError("当前解析来源仅支持抖音，请在资源页选择 parse-video-py 并保存后重新发送链接")
+                    if config.parser_provider in {"api", "builtin"} and job["platform"] != "douyin":
+                        raise DouyinError("当前解析来源仅支持抖音，请在资源页选择 parse-video-py 或 media-parser 并保存后重新发送链接")
                     auto_download = self.auto_download(job["group_id"])
                     if auto_download:
                         cache = MediaCache(self.options.output_dir / CACHE_DIR_NAME)

@@ -95,3 +95,30 @@ async def test_api_fallback_failure_reports_both_causes(tmp_path):
     assert "parse-video-py 解析失败" in job["error"]
     assert "备用接口也失败" in job["error"]
     assert "108" in job["error"]
+
+
+async def test_api_failure_falls_back_to_media_parser(tmp_path):
+    def respond(request):
+        if request.url.host == "jk.y-l.cc":
+            return httpx.Response(200, json={"code": 108, "msg": "会员接口不存在"})
+        if request.url.host == "127.0.0.1":
+            return httpx.Response(200, json={
+                "retcode": 200, "retdesc": "成功", "succ": True,
+                "data": {"title": "mp", "author": {"nickname": "a"}, "video_url": "https://v3.douyinvod.com/mp.mp4"},
+            })
+        return note_failure(request)
+
+    job, _ = await run_job(
+        tmp_path, respond, parser_provider="parse_video", parser_api_url=API,
+        media_parser_url="http://127.0.0.1:8051")
+    assert job["status"] == "parsed", job["error"]
+    assert job["parser_provider"] == "media_parser" and job["parser_fallback"] is True
+
+
+async def test_non_douyin_api_provider_still_rejects_before_network(tmp_path):
+    job, calls = await run_job(
+        tmp_path, note_failure, content=XHS, parser_provider="api", parser_api_url=API,
+        media_parser_url="http://127.0.0.1:8051")
+    assert job["status"] == "failed"
+    assert "parse-video-py" in job["error"]
+    assert not any("127.0.0.1" in url for url in calls)
