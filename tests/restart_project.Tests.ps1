@@ -30,8 +30,29 @@ $script:current.CreationDate = 'reused-pid'
 Assert-True (-not (Test-SameProcess $snapshot[0])) 'PID reuse was accepted.'
 Write-Output 'PID reuse protection: passed'
 
+$previousMediaRoot = $env:WXHOOK_MEDIA_PARSER_ROOT
+try {
+    $env:WXHOOK_MEDIA_PARSER_ROOT = 'E:\Media Parser'
+    Assert-True ((Get-MediaParserRoot $root) -eq 'E:\Media Parser') 'Configured media-parser root was ignored.'
+    Remove-Item Env:WXHOOK_MEDIA_PARSER_ROOT
+    Assert-True ((Get-MediaParserRoot $root) -eq 'D:\Project With Spaces\media-parser') 'Default sibling media-parser root is incorrect.'
+} finally {
+    if ($null -ne $previousMediaRoot) { $env:WXHOOK_MEDIA_PARSER_ROOT = $previousMediaRoot }
+    else { Remove-Item Env:WXHOOK_MEDIA_PARSER_ROOT -ErrorAction SilentlyContinue }
+}
+$mediaLauncher = Join-Path $root 'scripts\media-parser-server.py'
+$mediaSnapshot = @(
+    (Process-Record 201 $venv ('"' + $venv + '" "' + $mediaLauncher + '"')),
+    (Process-Record 202 'C:\Python312\python.exe' 'python.exe scripts\media-parser-server.py'),
+    (Process-Record 203 $venv 'python.exe unrelated.py')
+)
+$mediaIds = @(Get-MediaParserProcesses $root $mediaSnapshot | ForEach-Object { $_.ProcessId })
+Assert-True (($mediaIds -join ',') -eq '201') 'media-parser ownership included unrelated Python.'
+Write-Output 'media-parser root and ownership: passed'
+
 function Update-ProjectCode { param($Root) throw 'simulated failed pull' }
 function Stop-ProjectService { param($Root) throw 'BUG: stopped service after failed pull' }
+function Start-MediaParserService { param($Root, $Python) throw 'BUG: started media-parser after failed pull' }
 function Start-ProjectService { param($Root, $Python, $Configuration) throw 'BUG: started service after failed pull' }
 try { Restart-Project $root; throw 'Expected failed pull' } catch {
     Assert-True ($_.Exception.Message -eq 'simulated failed pull') 'Update failure did not preserve the old service.'
@@ -69,12 +90,13 @@ function Invoke-Checked {
 }
 function Update-ProjectCode { param($Root) $script:events += 'pull' }
 function Stop-ProjectService { param($Root) $script:events += 'stop' }
+function Start-MediaParserService { param($Root, $Python) $script:events += 'start-media' }
 function Start-ProjectService { param($Root, $Python, $Configuration) $script:events += 'start' }
 Restart-Project $scratch
-Assert-True (($script:events -join ',') -eq 'pull,dependencies,stop,start') 'Restart order is incorrect.'
+Assert-True (($script:events -join ',') -eq 'pull,dependencies,stop,start-media,start') 'Restart order is incorrect.'
 $script:events = @()
 Restart-Project $scratch -SkipUpdate
-Assert-True (($script:events -join ',') -eq 'dependencies,stop,start') 'Local mode unexpectedly pulled code.'
+Assert-True (($script:events -join ',') -eq 'dependencies,stop,start-media,start') 'Local mode unexpectedly pulled code.'
 $script:events = @()
 $script:failDependencies = $true
 try { Restart-Project $scratch; throw 'Expected dependency failure' } catch {

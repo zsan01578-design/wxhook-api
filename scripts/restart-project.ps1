@@ -188,6 +188,87 @@ function Stop-ProjectService {
     throw 'The old project process has not stopped. A second instance was not started.'
 }
 
+function Get-MediaParserRoot {
+    param([string]$Root)
+    $configured = $env:WXHOOK_MEDIA_PARSER_ROOT
+    if ($configured) { return [System.IO.Path]::GetFullPath($configured) }
+    return [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $Root) 'media-parser'))
+}
+
+function Get-MediaParserProcesses {
+    param([string]$Root, [object[]]$Snapshot)
+    $launcher = Join-Path $Root 'scripts\media-parser-server.py'
+    $interpreters = @((Join-Path $Root '.venv\Scripts\python.exe'), (Join-Path $Root '.venv\Scripts\pythonw.exe'))
+    foreach ($item in $Snapshot) {
+        if ($item.Name -notin @('python.exe', 'pythonw.exe')) { continue }
+        if ($item.ExecutablePath -notin $interpreters) { continue }
+        if (-not ([string]$item.CommandLine).Contains($launcher)) { continue }
+        $item
+    }
+}
+
+function Stop-MediaParserService {
+    param([string]$Root)
+    $targets = @(Get-MediaParserProcesses $Root (Get-ProcessSnapshot))
+    foreach ($target in $targets) {
+        if (Test-SameProcess $target) {
+            Write-Host "Stopping media-parser PID $($target.ProcessId)..."
+            Stop-Process -Id $target.ProcessId -Force -ErrorAction Stop
+        }
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        if (-not @(Get-MediaParserProcesses $Root (Get-ProcessSnapshot)).Count) { return }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'The old media-parser process has not stopped.'
+}
+
+function Start-MediaParserService {
+    param([string]$Root, [string]$Python)
+    $mediaRoot = Get-MediaParserRoot $Root
+    Stop-MediaParserService $Root
+    if (-not (Test-Path -LiteralPath (Join-Path $mediaRoot 'app.py'))) {
+        Write-Host "media-parser not installed at $mediaRoot; parsing fallback stays disabled."
+        return
+    }
+    $launcher = Join-Path $Root 'scripts\media-parser-server.py'
+    if (-not (Test-Path -LiteralPath $launcher)) {
+        Write-Warning "Missing $launcher; parsing fallback stays disabled."
+        return
+    }
+    $port = 8051
+    if ($env:WXHOOK_MEDIA_PARSER_PORT) {
+        try { $port = [int]$env:WXHOOK_MEDIA_PARSER_PORT } catch { throw 'WXHOOK_MEDIA_PARSER_PORT must be an integer.' }
+    }
+    if ($port -lt 1 -or $port -gt 65535) { throw 'WXHOOK_MEDIA_PARSER_PORT is out of range.' }
+    $health = "http://127.0.0.1:$port/api/health"
+    if (Test-ServicePort $health) {
+        Write-Warning "Port $port is already in use; media-parser was not started."
+        return
+    }
+    $outLog = Join-Path $Root 'data\media-parser.stdout.log'
+    $errLog = Join-Path $Root 'data\media-parser.stderr.log'
+    $process = Start-Process -FilePath $Python -ArgumentList @('"' + $launcher + '"', '--root', ('"' + $mediaRoot + '"'), '--port', "$port") -WorkingDirectory $Root -WindowStyle Hidden -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        try {
+            $status = Invoke-RestMethod -Uri $health -TimeoutSec 2 -UseBasicParsing
+            if ($status.status -eq 'ok') {
+                $statePath = Join-Path $Root 'data\runtime\media-parser.json'
+                New-Item -ItemType Directory -Path (Split-Path -Parent $statePath) -Force | Out-Null
+                [IO.File]::WriteAllText($statePath, (@{pid=$process.Id; root=$mediaRoot; port=$port; started_at=(Get-Date).ToString('o')} | ConvertTo-Json))
+                Write-Host "media-parser ready: $health (PID $($process.Id))"
+                return
+            }
+        } catch { }
+        $process.Refresh()
+        if ($process.HasExited) { break }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    Write-Warning "media-parser did not become ready. Check $outLog and $errLog; wxhook will still start."
+}
+
 function Test-ServicePort {
     param([string]$Url)
     $uri = [Uri]$Url
@@ -223,12 +304,12 @@ function Start-ProjectService {
 
 function Restart-Project {
     param([string]$Root, [switch]$SkipUpdate)
-    Write-Host '[1/4] Updating code...'
+    Write-Host '[1/5] Updating code...'
     if (-not $SkipUpdate) {
         Update-ProjectCode $Root
     } else { Write-Host 'Local restart selected; Git update skipped.' }
 
-    Write-Host '[2/4] Preparing dependencies; the old service is still running...'
+    Write-Host '[2/5] Preparing dependencies; the old service is still running...'
     $python = Join-Path $Root '.venv\Scripts\python.exe'
     if (-not (Test-Path -LiteralPath $python)) { Invoke-Checked 'py.exe' @('-3.12', '-m', 'venv', (Join-Path $Root '.venv')) }
     $digest = @'
@@ -251,9 +332,11 @@ sys.exit(0 if stamp.is_file() and stamp.read_text(encoding='ascii').strip() == d
     if ($LASTEXITCODE -ne 0 -or -not $configuration.url) { throw 'Cannot load project configuration. The old service was not stopped.' }
     New-Item -ItemType Directory -Path (Join-Path $Root 'data') -Force | Out-Null
 
-    Write-Host '[3/4] Stopping the old project service...'
+    Write-Host '[3/5] Stopping the old project service...'
     Stop-ProjectService $Root
-    Write-Host '[4/4] Starting the updated service...'
+    Write-Host '[4/5] Starting media-parser local service...'
+    Start-MediaParserService $Root $python
+    Write-Host '[5/5] Starting the updated service...'
     Start-ProjectService $Root $python $configuration
 }
 
