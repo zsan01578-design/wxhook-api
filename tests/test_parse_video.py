@@ -39,13 +39,23 @@ def test_extracts_three_platforms_from_share_text_and_xml_without_losing_signed_
     assert extract_links(content) == [SHORT]
 
 
-def test_real_sdk_models_preserve_gallery_order_without_cover_music_or_live_photo():
-    images = [ImgInfo(url=f"https://ci.xiaohongshu.com/{i}.jpg", live_photo_url=XHS_VIDEO) for i in range(2)]
+def test_real_sdk_models_preserve_live_photo_pairs_without_cover_or_music():
+    images = [ImgInfo(url=f"https://ci.xiaohongshu.com/{i}.jpg", live_photo_url=XHS_VIDEO if i == 0 else "") for i in range(2)]
     info = VideoInfo(video_url=XHS_VIDEO, cover_url="https://ci.xiaohongshu.com/cover.jpg", music_url=VIDEO, images=images, title="图文", author=VideoAuthor(name="作者"))
     result = normalize_media(info, XHS)
     assert result.platform == "xiaohongshu" and result.kind == "images"
     assert result.author == "作者"
-    assert [asset["urls"][0] for asset in result.assets] == [image.url for image in images]
+    assert result.assets == [
+        {"kind": "image", "urls": [images[0].url]},
+        {"kind": "video", "urls": [XHS_VIDEO]},
+        {"kind": "image", "urls": [images[1].url]},
+    ]
+
+
+@pytest.mark.parametrize("live_url", ["http://127.0.0.1/private.mp4", "https://evil.example/live.mp4", [XHS_VIDEO]])
+def test_invalid_live_photo_video_is_rejected(live_url):
+    with pytest.raises(DouyinError):
+        normalize_media({"images": [{"url": "https://ci.xiaohongshu.com/still.jpg", "live_photo_url": live_url}]}, XHS)
 
 
 @pytest.mark.parametrize("info", [{}, {"video_url": "http://127.0.0.1:30001/x"}, {"images": [{}]}, {"images": [ImgInfo(url=VIDEO)] * 101}])
@@ -54,7 +64,7 @@ def test_invalid_sdk_media_is_never_accepted(info):
         normalize_media(info, SHORT)
 
 
-def sdk_response(request, *, album=False, fail=False):
+def sdk_response(request, *, album=False, fail=False, live_photo=False):
     host, path = request.url.host, request.url.path
     if host == "v.douyin.com":
         return httpx.Response(302, headers={"location": f"https://www.douyin.com/note/{ITEM}"})
@@ -64,6 +74,8 @@ def sdk_response(request, *, album=False, fail=False):
         item = {"desc": "抖音测试", "author": {"nickname": "作者"}, "video": {"play_addr": {"url_list": [VIDEO]}}}
         if album:
             item["images"] = [{"url_list": [f"https://p3.douyinpic.com/{i}.png"]} for i in range(2)]
+            if live_photo:
+                item["images"][0]["video"] = {"play_addr": {"url_list": [VIDEO]}}
         return httpx.Response(200, json={"aweme_details": [item]})
     if host == "www.iesdouyin.com":
         return httpx.Response(200, text='window._ROUTER_DATA = {"loaderData":{"video_(id)/page":{}}}</script>')
@@ -71,6 +83,8 @@ def sdk_response(request, *, album=False, fail=False):
         return httpx.Response(302, headers={"location": "https://www.xiaohongshu.com/explore/test?xsec_token=signed"})
     if host == "www.xiaohongshu.com":
         data = {"title": "小红书测试", "user": {"userId": "test", "nickname": "作者", "avatar": ""}, "imageList": [{"urlDefault": f"https://sns-img.xhscdn.com/{i}.png"} for i in range(2)]}
+        if album and live_photo:
+            data["imageList"][0].update(livePhoto=True, stream={"h264": [{"masterUrl": XHS_VIDEO}]})
         if not album:
             data["video"] = {"media": {"stream": {"h264": [{"masterUrl": XHS_VIDEO}]}}}
         state = {"note": {"currentNoteId": "test", "noteDetailMap": {"test": {"note": data}}}}
@@ -81,7 +95,8 @@ def sdk_response(request, *, album=False, fail=False):
         if path.endswith("view"):
             return httpx.Response(200, json={"code": 0, "data": {"pages": [{"cid": 1}], "title": "B站测试", "owner": {"name": "作者"}}})
         return httpx.Response(200, json={"code": 0, "data": {"durl": [{"url": BILI_VIDEO}]}})
-    return httpx.Response(200, content=PNG if album else MP4, headers={"content-type": "image/png" if album else "video/mp4"})
+    is_image = album and not (live_photo and host in {"v26-default.365yg.com", "sns-video-bd.xhscdn.com"})
+    return httpx.Response(200, content=PNG if is_image else MP4, headers={"content-type": "image/png" if is_image else "video/mp4"})
 
 
 @pytest.mark.parametrize("source,platform,album", [(SHORT, "douyin", False), (SHORT, "douyin", True), (XHS, "xiaohongshu", False), (XHS, "xiaohongshu", True), (BILI, "bilibili", False), ("https://b23.tv/sample", "bilibili", False)])

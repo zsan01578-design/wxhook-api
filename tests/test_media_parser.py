@@ -59,7 +59,7 @@ async def test_request_uses_post_json_to_v1_parse():
     assert json.loads(calls[0].content) == {"url": SHORT}
 
 
-async def test_image_payload_ignores_live_photo_video_and_uses_source_platform():
+async def test_image_payload_preserves_live_photo_video_and_uses_source_platform():
     media = await client(lambda request: success(
         title="图文", platform="抖音",
         author={"nickname": "作者"},
@@ -67,7 +67,17 @@ async def test_image_payload_ignores_live_photo_video_and_uses_source_platform()
     )).parse(XHS)
     assert media.kind == "images"
     assert media.platform == "xiaohongshu"
-    assert [asset["urls"] for asset in media.assets] == [[IMAGE], [XHS_IMAGE]]
+    assert media.assets == [
+        {"kind": "image", "urls": [IMAGE]},
+        {"kind": "image", "urls": [XHS_IMAGE]},
+        {"kind": "video", "urls": ["https://sns-video.xhscdn.com/live.mp4"]},
+    ]
+
+
+@pytest.mark.parametrize("live_url", ["http://127.0.0.1/private.mp4", "https://evil.example/live.mp4", [VIDEO]])
+async def test_invalid_live_photo_video_is_rejected(live_url):
+    with pytest.raises(DouyinError):
+        await client(lambda request: success(image_list=[{"url": IMAGE, "live_photo_url": live_url}])).parse(SHORT)
 
 
 async def test_bilibili_source_maps_to_bilibili_platform():

@@ -96,6 +96,11 @@ def _parse_payload(raw: bytes, source: str, status: int) -> ParsedMedia:
         if not isinstance(value, str) or not value:
             raise DouyinError("media-parser 返回了无效图片地址")
         assets.append({"kind": "image", "urls": [checked_url(value, media=True)]})
+        live_photo = item.get("live_photo_url") if isinstance(item, dict) else None
+        if live_photo is not None and live_photo != "":
+            if not isinstance(live_photo, str):
+                raise DouyinError("media-parser 返回了无效实况图视频地址")
+            assets.append({"kind": "video", "urls": [checked_url(live_photo, media=True)]})
 
     if assets:
         kind = "images"

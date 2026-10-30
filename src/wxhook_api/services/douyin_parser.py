@@ -198,6 +198,13 @@ def parse_item(item: dict, item_id: str) -> ParsedMedia:
         if not urls:
             raise DouyinError("图集缺少可用的图片地址，未回传不完整图集")
         assets.append({"kind": "image", "urls": urls})
+        live_video = image.get("video")
+        if isinstance(live_video, dict):
+            for key in ("play_addr", "play_addr_h264", "playAddr", "download_addr"):
+                live_urls = address_urls(live_video.get(key))
+                if live_urls:
+                    assets.append({"kind": "video", "urls": live_urls})
+                    break
     if not assets:
         video = item.get("video") or {}
         for key in ("play_addr", "play_addr_h264", "playAddr", "download_addr"):
