@@ -17,6 +17,24 @@ TOTAL_TIMEOUT = 35
 COOKIE_MESSAGE = "media-parser 提示小红书需要登录 Cookie，请检查 parse-video.local.yml 的 xiaohongshu-cookie"
 
 
+async def enrich_live_photos(media: ParsedMedia, source: str, base_url: str, *, transport=None) -> tuple[ParsedMedia, str, bool]:
+    """A successful still gallery can be an incomplete Live Photo result."""
+    if media.kind != "images" or any(asset["kind"] == "video" for asset in media.assets):
+        return media, "", False
+    notice = "当前仅获取到静态图片，未取得实况视频；静态图片无法还原实况动作。"
+    if not base_url:
+        return media, notice, False
+    try:
+        richer = await MediaParserClient(base_url, transport=transport).parse(source)
+    except (DouyinError, httpx.HTTPError):
+        return media, notice + "本地补充解析未成功，请检查 media-parser 服务。", False
+    if (richer.platform == media.platform and richer.kind == "images"
+            and sum(asset["kind"] == "image" for asset in richer.assets) == len(media.assets)
+            and any(asset["kind"] == "video" for asset in richer.assets)):
+        return richer, "", True
+    return media, notice, False
+
+
 class MediaParserClient:
     def __init__(self, base_url: str, *, transport: httpx.AsyncBaseTransport | None = None,
                  max_bytes: int = DEFAULT_MAX_BYTES):

@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 
 from wxhook_api.schemas.requests import ParseLinkRequest
 from wxhook_api.services.douyin_parser import DouyinError
-from wxhook_api.services.media_parser import MediaParserClient
+from wxhook_api.services.media_parser import MediaParserClient, enrich_live_photos
 from wxhook_api.services.parse_video import ParseVideoParser
 
 
@@ -48,6 +48,7 @@ async def parse_link(body: ParseLinkRequest, request: Request, response: Respons
     try:
         parser = request.app.state.parse_video_parser
         settings = request.app.state.douyin.options.settings
+        used_fallback = False
         try:
             media = await parser.parse(body.url)
         except DouyinError as primary_error:
@@ -56,12 +57,19 @@ async def parse_link(body: ParseLinkRequest, request: Request, response: Respons
             try:
                 media = await MediaParserClient(
                     settings.media_parser_url, transport=getattr(parser, "transport", None)).parse(body.url)
+                used_fallback = True
             except DouyinError as fallback_error:
                 raise DouyinError(
                     f"{str(primary_error)[:300]}；media-parser 兜底也失败：{str(fallback_error)[:200]}") from fallback_error
+        media, notice, _ = await enrich_live_photos(
+            media, body.url, settings.media_parser_url if not used_fallback else "",
+            transport=getattr(parser, "transport", None))
     except DouyinError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         slots.release()
     response.headers["Cache-Control"] = "no-store"
-    return {"platform": media.platform, "kind": media.kind, "title": media.title, "author": media.author, "assets": media.assets}
+    result = {"platform": media.platform, "kind": media.kind, "title": media.title, "author": media.author, "assets": media.assets}
+    if notice:
+        result["media_notice"] = notice
+    return result

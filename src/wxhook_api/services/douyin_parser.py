@@ -6,7 +6,7 @@ from html.parser import HTMLParser
 import json
 import re
 from typing import Any
-from urllib.parse import parse_qs, unquote, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -126,6 +126,16 @@ def page_data(document: str) -> list[Any]:
             candidates.append(unquote(script.strip()))
         for assignment in re.finditer(r"(?:window\.)?(?:_ROUTER_DATA|__INITIAL_STATE__)\s*=\s*", script):
             candidates.append(script[assignment.end():].lstrip())
+        # Streaming desktop pages carry JSON inside string-valued RSC chunks.
+        # Decode the data only; never evaluate page JavaScript.
+        for push in re.finditer(r"self\.__pace_f\.push\(\s*\[\s*1\s*,\s*", script):
+            try:
+                chunk, _ = decoder.raw_decode(script[push.end():].lstrip())
+            except (ValueError, RecursionError):
+                continue
+            if isinstance(chunk, str):
+                candidates.extend(line.split(":", 1)[1] for line in chunk.splitlines()
+                                  if re.match(r"^[a-fA-F0-9]+:[\[{]", line))
         for candidate in candidates:
             try:
                 candidate = re.sub(r'"(?:\\.|[^"\\])*"|(?<![\w$])undefined(?![\w$])', lambda match: "null" if match.group() == "undefined" else match.group(), candidate)
@@ -146,8 +156,8 @@ def find_item(payload: Any, item_id: str) -> dict | None:
         value = pending.pop()
         visited += 1
         if isinstance(value, dict):
-            identity = value.get("aweme_id", value.get("id"))
-            if str(identity) == item_id and any(key in value for key in ("video", "images", "image_post_info")):
+            identity = value.get("aweme_id", value.get("awemeId", value.get("id")))
+            if str(identity) == item_id and any(key in value for key in ("video", "images", "image_post_info", "imagePostInfo")):
                 return value
             pending.extend(reversed(list(value.values())))
         elif isinstance(value, list):
@@ -157,13 +167,19 @@ def find_item(payload: Any, item_id: str) -> dict | None:
 
 def address_urls(address: Any) -> list[str]:
     if isinstance(address, dict):
-        values = address.get("url_list") or address.get("urlList") or []
+        values = address.get("url_list") or address.get("urlList") or [address.get("src") or address.get("url") or address.get("uri")]
+    elif isinstance(address, list):
+        values = address
     elif isinstance(address, str):
         values = [address]
     else:
         values = []
     result = []
+    if not isinstance(values, list):
+        values = [values]
     for value in values:
+        if isinstance(value, dict):
+            value = value.get("src") or value.get("url")
         if isinstance(value, str):
             try:
                 checked = checked_url(value, media=True)
@@ -172,6 +188,27 @@ def address_urls(address: Any) -> list[str]:
             if checked not in result:
                 result.append(checked)
     return result[:4]
+
+
+def live_photo_urls(image: dict) -> list[str]:
+    video = image.get("video")
+    video = video if isinstance(video, dict) else {}
+    addresses = [video.get(key) for key in ("play_addr", "playAddr", "play_addr_h264", "download_addr", "downloadAddr")]
+    addresses.extend(image.get(key) for key in ("video_play_addr", "video_download_addr"))
+    for address in addresses:
+        urls = address_urls(address)
+        if urls:
+            return urls
+    # Some Live Photo metadata exposes only a video ID; the SDK discards it.
+    # This endpoint accepts the ID directly. Only per-image video fields count,
+    # so the album's background music is never mistaken for a motion track.
+    ids = [address.get("uri") for address in addresses if isinstance(address, dict)]
+    ids.append(video.get("vid"))
+    for video_id in ids:
+        if isinstance(video_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{6,128}", video_id) and "mp3" not in video_id.lower():
+            query = urlencode({"video_id": video_id, "ratio": "1080p", "line": "0"})
+            return [f"https://www.iesdouyin.com/aweme/v1/play/?{query}"]
+    return []
 
 
 @dataclass(frozen=True)
@@ -186,7 +223,8 @@ class ParsedMedia:
 
 def parse_item(item: dict, item_id: str) -> ParsedMedia:
     assets = []
-    pictures = item.get("images") or (item.get("image_post_info") or {}).get("images") or []
+    post = item.get("image_post_info") or item.get("imagePostInfo") or {}
+    pictures = item.get("images") or post.get("images") or post.get("image_list") or []
     if not isinstance(pictures, list):
         raise DouyinError("图集格式不受支持，已停止解析")
     if len(pictures) > 100:
@@ -198,13 +236,9 @@ def parse_item(item: dict, item_id: str) -> ParsedMedia:
         if not urls:
             raise DouyinError("图集缺少可用的图片地址，未回传不完整图集")
         assets.append({"kind": "image", "urls": urls})
-        live_video = image.get("video")
-        if isinstance(live_video, dict):
-            for key in ("play_addr", "play_addr_h264", "playAddr", "download_addr"):
-                live_urls = address_urls(live_video.get(key))
-                if live_urls:
-                    assets.append({"kind": "video", "urls": live_urls})
-                    break
+        live_urls = live_photo_urls(image)
+        if live_urls:
+            assets.append({"kind": "video", "urls": live_urls})
     if not assets:
         video = item.get("video") or {}
         for key in ("play_addr", "play_addr_h264", "playAddr", "download_addr"):
@@ -214,7 +248,7 @@ def parse_item(item: dict, item_id: str) -> ParsedMedia:
                 break
     if not assets:
         raise DouyinError("作品数据中没有可获取的视频或图片")
-    author = item.get("author") or {}
+    author = item.get("author") or item.get("authorInfo") or {}
     return ParsedMedia(item_id, str(item.get("desc") or "未命名作品")[:2000], str(author.get("nickname") or "")[:200], "images" if assets[0]["kind"] == "image" else "video", assets)
 
 

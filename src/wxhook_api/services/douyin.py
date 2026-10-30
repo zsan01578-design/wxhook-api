@@ -25,7 +25,7 @@ from wxhook_api.services.groups import GroupManager, event_group, normalize_grou
 from wxhook_api.services.media_cache import MediaCache
 from wxhook_api.services.media_conversion import MediaConversionError, animation_to_mp4
 from wxhook_api.services.media_cleanup import ACTIVE_STATES, MEDIA_NAME, cleanup_media, next_cleanup_at, safe_child, timestamp, utcnow, valid_job_record
-from wxhook_api.services.media_parser import MediaParserClient
+from wxhook_api.services.media_parser import MediaParserClient, enrich_live_photos
 from wxhook_api.services.storage_guard import LowDiskSpace, StorageGuard
 
 
@@ -351,7 +351,7 @@ class DouyinService:
         job.update(item_id=meta.get("item_id", ""), title=meta.get("title", ""), author=meta.get("author", ""),
                    kind=meta.get("kind", ""), assets=meta.get("assets", []), files=files, status="completed",
                    parser_provider=meta.get("parser_provider") or job.get("parser_provider", ""),
-                   parser_fallback=bool(meta.get("parser_fallback")), cache_hit=True)
+                   parser_fallback=bool(meta.get("parser_fallback")), media_notice=meta.get("media_notice", ""), cache_hit=True)
         self._changed()
         return True
 
@@ -414,7 +414,11 @@ class DouyinService:
                     fallback_error = normalized(fallback_exc)
                     raise DouyinError(
                         f"{str(primary_error)[:300]}；media-parser 兜底也失败：{str(fallback_error)[:200]}") from fallback_exc
-        job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind,
+        parsed, notice, enriched = await enrich_live_photos(
+            parsed, job["source_url"], fallback_url if provider != "media_parser" else "", transport=self._transport)
+        if enriched:
+            provider, fallback_used = "media_parser", True
+        job.update(item_id=parsed.item_id, title=parsed.title, author=parsed.author, kind=parsed.kind, media_notice=notice,
                    assets=parsed.assets, platform=parsed.platform, parser_provider=provider, parser_fallback=fallback_used)
         return parsed
 
@@ -608,6 +612,7 @@ class DouyinService:
                     max_bytes=min(self.options.max_file_bytes, MAX_JOB_BYTES - downloaded)))
                 self._check_download_policy(job["group_id"], job["sender"])
                 if converted is not None:
+                    job["media_notice"] = ""
                     file = {"name": converted.name, "kind": "video", "size": converted.stat().st_size}
                     job["files"][-1] = file
                     downloaded += file["size"]

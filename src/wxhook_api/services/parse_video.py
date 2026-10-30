@@ -6,6 +6,7 @@ import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 import importlib
+import json
 import os
 from pathlib import Path
 import sys
@@ -18,7 +19,7 @@ import yaml
 
 from wxhook_api.core.bounded_http import LimitedStream, ResponseReadError
 from wxhook_api.core.config import PROJECT_ROOT
-from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, ParsedMedia, USER_AGENT, checked_url, stream_error
+from wxhook_api.services.douyin_parser import DouyinError, DouyinParser, ParsedMedia, USER_AGENT, checked_url, stream_error, find_item, item_identity, page_data, parse_item
 
 
 PLATFORMS = {
@@ -52,6 +53,44 @@ def _normalize_source(url: str) -> str:
 class _RequestContext:
     transport: httpx.AsyncBaseTransport | None = None
     xhs_cookie: str = field(default="", repr=False)
+    douyin_media: dict[str, ParsedMedia] = field(default_factory=dict, repr=False)
+
+
+async def _capture_douyin_media(response: httpx.Response) -> None:
+    context = _request_context.get()
+    if context is None or response.status_code != 200 or response.url.host not in PLATFORMS["douyin"][1]:
+        return
+    identity = item_identity(str(response.url))
+    if identity:
+        item_id = identity[1]
+    elif response.url.path.rstrip("/").endswith("/aweme/slidesinfo"):
+        try:
+            ids = json.loads(response.url.params.get("aweme_ids", "[]"))
+        except (ValueError, RecursionError):
+            return
+        if not isinstance(ids, list) or len(ids) != 1 or not str(ids[0]).isdigit():
+            return
+        item_id = str(ids[0])
+    else:
+        return
+    # The response already has our bounded decoder. Reading here caches the
+    # same body the SDK is about to consume, without an additional request.
+    await response.aread()
+    try:
+        payloads = [response.json()]
+    except (ValueError, RecursionError):
+        payloads = page_data(response.text)
+    for payload in payloads:
+        item = find_item(payload, item_id)
+        if item is None:
+            continue
+        try:
+            parsed = parse_item(item, item_id)
+        except (DouyinError, TypeError, ValueError, AttributeError):
+            continue
+        previous = context.douyin_media.get(item_id)
+        if previous is None or sum(a["kind"] == "video" for a in parsed.assets) > sum(a["kind"] == "video" for a in previous.assets):
+            context.douyin_media[item_id] = parsed
 
 
 def parser_config_path() -> Path:
@@ -122,6 +161,8 @@ async def _guard_response(response: httpx.Response) -> None:
     if response.is_stream_consumed:
         if not binary and len(response.content) > _MAX_PAGE_BYTES:
             raise DouyinError("平台解析页面过大，已停止处理")
+        if not binary:
+            await _capture_douyin_media(response)
         return
     encoding = response.headers.get("content-encoding", "").strip().lower()
     if not binary and encoding not in {"", "identity", "gzip", "deflate"}:
@@ -132,6 +173,8 @@ async def _guard_response(response: httpx.Response) -> None:
         # or reporting the compressed Content-Length as the decoded length.
         response.headers.pop("content-encoding", None)
         response.headers.pop("content-length", None)
+    if not binary:
+        await _capture_douyin_media(response)
 
 
 def _load_library():
@@ -225,10 +268,25 @@ class ParseVideoParser:
         name = PLATFORMS[platform][0]
         resolver = _load_library()
         cookie = _local_xhs_cookie() if platform == "xiaohongshu" else ""
-        token = _request_context.set(_RequestContext(self.transport, cookie))
+        context = _RequestContext(self.transport, cookie)
+        token = _request_context.set(context)
         try:
-            result = await resolver(source)
-            return normalize_media(result, source)
+            try:
+                result = await resolver(source)
+            except Exception:
+                if len(context.douyin_media) == 1:
+                    return next(iter(context.douyin_media.values()))
+                raise
+            parsed = normalize_media(result, source)
+            if len(context.douyin_media) == 1:
+                raw = next(iter(context.douyin_media.values()))
+                # Recover motion tracks discarded by the pinned SDK, retaining
+                # complete gallery ordering and the SDK's ordinary video path.
+                if (raw.kind == parsed.kind == "images"
+                        and sum(a["kind"] == "image" for a in raw.assets) == sum(a["kind"] == "image" for a in parsed.assets)
+                        and sum(a["kind"] == "video" for a in raw.assets) > sum(a["kind"] == "video" for a in parsed.assets)):
+                    return raw
+            return parsed
         except DouyinError:
             raise
         except (httpx.TimeoutException, TimeoutError) as exc:

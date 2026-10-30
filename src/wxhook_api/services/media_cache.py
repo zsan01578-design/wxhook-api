@@ -15,7 +15,7 @@ from uuid import uuid4
 from wxhook_api.services.media_cleanup import MEDIA_NAME, safe_child
 
 
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 CACHE_TTL_DAYS = 7
 KEY_PATTERN = re.compile(r"[a-z]+_[a-f0-9]{32}")
 META_NAME = "meta.json"
@@ -142,6 +142,7 @@ class MediaCache:
                 "title": job.get("title", ""), "author": job.get("author", ""), "kind": job.get("kind", ""),
                 "assets": job.get("assets", []), "files": files,
                 "parser_provider": job.get("parser_provider", ""), "parser_fallback": bool(job.get("parser_fallback")),
+                "media_notice": job.get("media_notice", ""),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             (temporary / META_NAME).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
