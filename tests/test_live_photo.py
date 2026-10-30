@@ -1,4 +1,4 @@
-"""Live Photo companions survive parsing, download, delivery and cache reuse."""
+"""Live Photo videos replace duplicate stills through download and delivery."""
 
 from pathlib import Path
 
@@ -17,11 +17,10 @@ def live_item():
     return item
 
 
-def test_public_share_page_preserves_live_photo_next_to_still_image():
+def test_public_share_page_prefers_live_photo_video_and_keeps_ordinary_images():
     media = parse_item(live_item(), "id")
     assert media.kind == "images"
     assert media.assets == [
-        {"kind": "image", "urls": ["https://p3.douyinpic.com/0.png"]},
         {"kind": "video", "urls": [VIDEO]},
         {"kind": "image", "urls": ["https://p3.douyinpic.com/1.png"]},
     ]
@@ -61,17 +60,18 @@ async def test_live_photo_download_return_and_cache(tmp_path, monkeypatch, provi
                 assert job["status"] == "completed", job["error"]
                 assert job["delivery_status"] == "sent"
                 assert job["kind"] == "images"
-                assert [file["name"] for file in job["files"]] == ["001.png", "002.mp4", "003.png"]
-                assert [file["kind"] for file in job["files"]] == ["image", "video", "image"]
+                assert [file["name"] for file in job["files"]] == ["001.mp4", "002.png"]
+                assert [file["kind"] for file in job["files"]] == ["video", "image"]
                 assert bool(job.get("cache_hit")) == (msgid == 2)
-                path = context.service.file_path(job["id"], "002.mp4")
+                path = context.service.file_path(job["id"], "001.mp4")
                 assert path is not None and path.read_bytes() == MP4
-            assert len(downloads) == 3
+            assert len(downloads) == 2
+            assert not any("/0.png" in url for url in downloads)  # Never fetch the Live Photo's still cover.
             assert [route for route, _ in context.hook_calls] == [
-                "/SendTextMsg", "/SendImgMsg", "/send_file_msg", "/SendImgMsg",
+                "/SendTextMsg", "/send_file_msg", "/SendImgMsg",
             ] * 2
             sent = [payload for route, payload in context.hook_calls if route == "/send_file_msg"]
-            assert all(Path(payload["filepath"]).name == "002.mp4" for payload in sent)
+            assert all(Path(payload["filepath"]).name == "001.mp4" for payload in sent)
         finally:
             await context.service._client.aclose()
             context.service._client = original

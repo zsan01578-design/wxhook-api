@@ -232,13 +232,14 @@ def parse_item(item: dict, item_id: str) -> ParsedMedia:
     for image in pictures:
         if not isinstance(image, dict):
             raise DouyinError("图集图片条目格式不受支持，未回传不完整图集")
+        live_urls = live_photo_urls(image)
+        if live_urls:
+            assets.append({"kind": "video", "urls": live_urls})
+            continue
         urls = address_urls(image) or address_urls(image.get("display_image")) or address_urls(image.get("image"))
         if not urls:
             raise DouyinError("图集缺少可用的图片地址，未回传不完整图集")
         assets.append({"kind": "image", "urls": urls})
-        live_urls = live_photo_urls(image)
-        if live_urls:
-            assets.append({"kind": "video", "urls": live_urls})
     if not assets:
         video = item.get("video") or {}
         for key in ("play_addr", "play_addr_h264", "playAddr", "download_addr"):
@@ -249,7 +250,7 @@ def parse_item(item: dict, item_id: str) -> ParsedMedia:
     if not assets:
         raise DouyinError("作品数据中没有可获取的视频或图片")
     author = item.get("author") or item.get("authorInfo") or {}
-    return ParsedMedia(item_id, str(item.get("desc") or "未命名作品")[:2000], str(author.get("nickname") or "")[:200], "images" if assets[0]["kind"] == "image" else "video", assets)
+    return ParsedMedia(item_id, str(item.get("desc") or "未命名作品")[:2000], str(author.get("nickname") or "")[:200], "images" if pictures else "video", assets)
 
 
 class DouyinParser:

@@ -29,7 +29,7 @@ async def enrich_live_photos(media: ParsedMedia, source: str, base_url: str, *, 
     except (DouyinError, httpx.HTTPError):
         return media, notice + "本地补充解析未成功，请检查 media-parser 服务。", False
     if (richer.platform == media.platform and richer.kind == "images"
-            and sum(asset["kind"] == "image" for asset in richer.assets) == len(media.assets)
+            and len(richer.assets) == len(media.assets)
             and any(asset["kind"] == "video" for asset in richer.assets)):
         return richer, "", True
     return media, notice, False
@@ -110,15 +110,16 @@ def _parse_payload(raw: bytes, source: str, status: int) -> ParsedMedia:
 
     assets = []
     for item in images:
-        value = item if isinstance(item, str) else item.get("url") if isinstance(item, dict) else None
-        if not isinstance(value, str) or not value:
-            raise DouyinError("media-parser 返回了无效图片地址")
-        assets.append({"kind": "image", "urls": [checked_url(value, media=True)]})
         live_photo = item.get("live_photo_url") if isinstance(item, dict) else None
         if live_photo is not None and live_photo != "":
             if not isinstance(live_photo, str):
                 raise DouyinError("media-parser 返回了无效实况图视频地址")
             assets.append({"kind": "video", "urls": [checked_url(live_photo, media=True)]})
+            continue
+        value = item if isinstance(item, str) else item.get("url") if isinstance(item, dict) else None
+        if not isinstance(value, str) or not value:
+            raise DouyinError("media-parser 返回了无效图片地址")
+        assets.append({"kind": "image", "urls": [checked_url(value, media=True)]})
 
     if assets:
         kind = "images"

@@ -221,21 +221,22 @@ def normalize_media(info: Any, source: str) -> ParsedMedia:
         raise DouyinError("图集格式不受支持或超过 100 张，已停止处理")
     assets = []
     for image in images:
-        value = _field(image, "url")
-        if not isinstance(value, str) or not value:
-            raise DouyinError("解析器返回的图集缺少图片地址，未回传不完整图集")
-        assets.append({"kind": "image", "urls": [checked_url(value, media=True)]})
         live_photo = _field(image, "live_photo_url")
         if live_photo is not None and live_photo != "":
             if not isinstance(live_photo, str):
                 raise DouyinError("解析器返回的实况图视频地址无效")
             assets.append({"kind": "video", "urls": [checked_url(live_photo, media=True)]})
+            continue
+        value = _field(image, "url")
+        if not isinstance(value, str) or not value:
+            raise DouyinError("解析器返回的图集缺少图片地址，未回传不完整图集")
+        assets.append({"kind": "image", "urls": [checked_url(value, media=True)]})
     if not assets:
         value = _field(info, "video_url")
         if not isinstance(value, str) or not value:
             raise DouyinError("解析器没有返回视频或图片，作品可能不可用或需要登录")
         assets.append({"kind": "video", "urls": [checked_url(value, media=True)]})
-    # Keep each Live Photo video next to its still image; omit cover and music.
+    # One asset per gallery entry: prefer its Live Photo video over the still.
     return ParsedMedia("", str(_field(info, "title") or "未命名作品")[:2000], str(_field(_field(info, "author"), "name") or "")[:200], "images" if images else "video", assets, platform=platform)
 
 
@@ -283,7 +284,7 @@ class ParseVideoParser:
                 # Recover motion tracks discarded by the pinned SDK, retaining
                 # complete gallery ordering and the SDK's ordinary video path.
                 if (raw.kind == parsed.kind == "images"
-                        and sum(a["kind"] == "image" for a in raw.assets) == sum(a["kind"] == "image" for a in parsed.assets)
+                        and len(raw.assets) == len(parsed.assets)
                         and sum(a["kind"] == "video" for a in raw.assets) > sum(a["kind"] == "video" for a in parsed.assets)):
                     return raw
             return parsed

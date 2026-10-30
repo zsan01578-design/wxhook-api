@@ -15,7 +15,7 @@ from uuid import uuid4
 from wxhook_api.services.media_cleanup import MEDIA_NAME, safe_child
 
 
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 CACHE_TTL_DAYS = 7
 KEY_PATTERN = re.compile(r"[a-z]+_[a-f0-9]{32}")
 META_NAME = "meta.json"

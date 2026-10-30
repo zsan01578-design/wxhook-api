@@ -27,8 +27,8 @@ async def test_actual_sdk_does_not_discard_raw_live_photo_metadata(video):
         return sdk_response(request, album=True)
 
     parsed = await ParseVideoParser(transport=httpx.MockTransport(respond)).parse(SHORT)
-    assert [asset["kind"] for asset in parsed.assets] == ["image", "video"]
-    url = parsed.assets[1]["urls"][0]
+    assert [asset["kind"] for asset in parsed.assets] == ["video"]
+    url = parsed.assets[0]["urls"][0]
     if "uri" in str(video):
         assert urlsplit(url).hostname == "www.iesdouyin.com"
         assert parse_qs(urlsplit(url).query)["video_id"] == ["v0300_live_sample"]
@@ -72,7 +72,7 @@ async def test_successful_static_gallery_uses_secondary_motion_tracks():
     enriched, notice, used = await enrich_live_photos(
         media, SHORT, "http://127.0.0.1:8051", transport=httpx.MockTransport(respond))
     assert used and not notice and calls == ["/api/v1/parse"]
-    assert [asset["kind"] for asset in enriched.assets] == ["image", "video"]
+    assert [asset["kind"] for asset in enriched.assets] == ["video"]
 
 
 async def test_secondary_failure_keeps_images_and_reports_missing_motion():
@@ -134,9 +134,9 @@ async def test_uri_only_live_photo_download_and_group_return(tmp_path, monkeypat
             job = await context.submit()
             assert job["status"] == "completed", job["error"]
             assert job["delivery_status"] == "sent"
-            assert [file["name"] for file in job["files"]] == ["001.png", "002.mp4"]
+            assert [file["name"] for file in job["files"]] == ["001.mp4"]
             assert not job["media_notice"]
-            assert [path for path, _ in context.hook_calls] == ["/SendTextMsg", "/SendImgMsg", "/send_file_msg"]
+            assert [path for path, _ in context.hook_calls] == ["/SendTextMsg", "/send_file_msg"]
         finally:
             await context.service._client.aclose()
             context.service._client = original
@@ -166,9 +166,9 @@ async def test_static_sdk_success_still_uses_local_enrichment_and_returns_video(
             job = await context.submit()
             assert job["status"] == "completed", job["error"]
             assert job["parser_provider"] == "media_parser" and job["parser_fallback"]
-            assert [file["name"] for file in job["files"]] == ["001.png", "002.mp4"]
+            assert [file["name"] for file in job["files"]] == ["001.mp4"]
             assert not job["media_notice"]
-            assert [path for path, _ in context.hook_calls] == ["/SendTextMsg", "/SendImgMsg", "/send_file_msg"]
+            assert [path for path, _ in context.hook_calls] == ["/SendTextMsg", "/send_file_msg"]
         finally:
             await context.service._client.aclose()
             context.service._client = original

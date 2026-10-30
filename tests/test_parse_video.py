@@ -39,14 +39,13 @@ def test_extracts_three_platforms_from_share_text_and_xml_without_losing_signed_
     assert extract_links(content) == [SHORT]
 
 
-def test_real_sdk_models_preserve_live_photo_pairs_without_cover_or_music():
+def test_real_sdk_models_prefer_live_photo_video_without_duplicate_still():
     images = [ImgInfo(url=f"https://ci.xiaohongshu.com/{i}.jpg", live_photo_url=XHS_VIDEO if i == 0 else "") for i in range(2)]
     info = VideoInfo(video_url=XHS_VIDEO, cover_url="https://ci.xiaohongshu.com/cover.jpg", music_url=VIDEO, images=images, title="图文", author=VideoAuthor(name="作者"))
     result = normalize_media(info, XHS)
     assert result.platform == "xiaohongshu" and result.kind == "images"
     assert result.author == "作者"
     assert result.assets == [
-        {"kind": "image", "urls": [images[0].url]},
         {"kind": "video", "urls": [XHS_VIDEO]},
         {"kind": "image", "urls": [images[1].url]},
     ]
@@ -56,6 +55,18 @@ def test_real_sdk_models_preserve_live_photo_pairs_without_cover_or_music():
 def test_invalid_live_photo_video_is_rejected(live_url):
     with pytest.raises(DouyinError):
         normalize_media({"images": [{"url": "https://ci.xiaohongshu.com/still.jpg", "live_photo_url": live_url}]}, XHS)
+
+
+def test_live_only_gallery_returns_one_video_per_entry_even_without_still_urls():
+    result = normalize_media({"images": [
+        {"live_photo_url": XHS_VIDEO},
+        {"url": "https://ci.xiaohongshu.com/unused.jpg", "live_photo_url": XHS_VIDEO + "?second=1"},
+    ]}, XHS)
+    assert result.kind == "images"
+    assert result.assets == [
+        {"kind": "video", "urls": [XHS_VIDEO]},
+        {"kind": "video", "urls": [XHS_VIDEO + "?second=1"]},
+    ]
 
 
 @pytest.mark.parametrize("info", [{}, {"video_url": "http://127.0.0.1:30001/x"}, {"images": [{}]}, {"images": [ImgInfo(url=VIDEO)] * 101}])
