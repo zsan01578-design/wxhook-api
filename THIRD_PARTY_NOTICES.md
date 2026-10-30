@@ -43,6 +43,15 @@ dependency nor vendored into this repository. The launcher in
 not modify upstream files. Users clone and update the upstream repository
 themselves.
 
+## imageio-ffmpeg
+
+- Project: https://github.com/imageio/imageio-ffmpeg
+- Version: `0.7.0` in the Windows runtime snapshot.
+- Python wrapper license: BSD-2-Clause; FFmpeg binaries have their own bundled license notices.
+
+Used locally to convert downloaded animated images to H.264 MP4. Platform wheels
+include FFmpeg; input frames, temporary files and output stay on the local machine.
+
 ## jieba (optional)
 
 - Project: https://github.com/fxsjy/jieba

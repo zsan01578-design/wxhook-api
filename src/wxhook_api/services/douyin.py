@@ -23,6 +23,7 @@ from wxhook_api.services.douyin_api import DouyinAPIParser
 from wxhook_api.services.parse_video import ParseVideoParser, REFERERS, source_platform
 from wxhook_api.services.groups import GroupManager, event_group, normalize_group_sender
 from wxhook_api.services.media_cache import MediaCache
+from wxhook_api.services.media_conversion import MediaConversionError, animation_to_mp4
 from wxhook_api.services.media_cleanup import ACTIVE_STATES, MEDIA_NAME, cleanup_media, next_cleanup_at, safe_child, timestamp, utcnow, valid_job_record
 from wxhook_api.services.media_parser import MediaParserClient
 from wxhook_api.services.storage_guard import LowDiskSpace, StorageGuard
@@ -508,6 +509,8 @@ class DouyinService:
                 job.update(status="failed", error="网络连接失败或解析下载超时，请检查网络后重试")
             except LowDiskSpace as exc:
                 job.update(status="failed", error=str(exc))
+            except MediaConversionError as exc:
+                job.update(status="failed", error=str(exc))
             except OSError:
                 job.update(status="failed", error="无法保存文件，请检查下载目录权限和剩余磁盘空间")
             except Exception:
@@ -597,6 +600,18 @@ class DouyinService:
                                               job["sender"], parsed.platform)
             job["files"].append(file)
             downloaded += file["size"]
+            if file["kind"] == "image":
+                self._check_download_policy(job["group_id"], job["sender"])
+                await self.storage.ensure()
+                converted = await finish_before_cancel(asyncio.to_thread(
+                    animation_to_mp4, folder / file["name"],
+                    max_bytes=min(self.options.max_file_bytes, MAX_JOB_BYTES - downloaded)))
+                self._check_download_policy(job["group_id"], job["sender"])
+                if converted is not None:
+                    file = {"name": converted.name, "kind": "video", "size": converted.stat().st_size}
+                    job["files"][-1] = file
+                    downloaded += file["size"]
+                    self.storage.written(file["size"])
             self._changed()
 
     def _clear_downloads(self, job: dict, folder: Path) -> None:
