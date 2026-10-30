@@ -82,3 +82,55 @@ def test_fcntl_stub_enables_app_import():
     finally:
         # Never leak the injected stub into other tests.
         sys.modules.pop("fcntl", None)
+
+
+@pytest.fixture
+def douyin_session(tmp_path, monkeypatch):
+    for name in ("DOUYIN_COOKIE", "DY_COOKIE", "DOUYIN_UIFID", "DY_UIFID",
+                 "PARSE_VIDEO_DOUYIN_COOKIE", "PARSE_VIDEO_DOUYIN_UIFID"):
+        monkeypatch.setenv(name, "")
+    # Optional source variables distinguish unset from explicitly empty.
+    monkeypatch.delenv("PARSE_VIDEO_DOUYIN_COOKIE")
+    monkeypatch.delenv("PARSE_VIDEO_DOUYIN_UIFID")
+    path = tmp_path / "parse-video.local.yml"
+    monkeypatch.setenv("WXHOOK_PARSE_VIDEO_CONFIG", str(path))
+    return load_launcher(), path
+
+
+def test_douyin_owned_cookie_and_uifid_are_bridged_locally(douyin_session, capsys):
+    module, path = douyin_session
+    path.write_text("douyin-cookie: 'sessionid=private-test'\ndouyin-uifid: 'owned-test-uifid'\n", encoding="utf-8")
+    module.bridge_douyin_session(PROJECT_ROOT)
+    assert os.environ["DOUYIN_COOKIE"] == "sessionid=private-test"
+    assert os.environ["DOUYIN_UIFID"] == "owned-test-uifid"
+    assert not capsys.readouterr().out
+
+
+def test_douyin_existing_aliases_take_precedence(douyin_session, monkeypatch):
+    module, path = douyin_session
+    path.write_text("douyin-cookie: 'sessionid=file'\ndouyin-uifid: 'file-uifid'\n", encoding="utf-8")
+    monkeypatch.setenv("DY_COOKIE", "sessionid=existing")
+    monkeypatch.setenv("DOUYIN_UIFID", "existing-uifid")
+    module.bridge_douyin_session(PROJECT_ROOT)
+    assert not os.environ["DOUYIN_COOKIE"]
+    assert os.environ["DY_COOKIE"] == "sessionid=existing"
+    assert os.environ["DOUYIN_UIFID"] == "existing-uifid"
+
+
+def test_douyin_environment_sources_work_without_a_file(douyin_session, monkeypatch):
+    module, _ = douyin_session
+    monkeypatch.setenv("PARSE_VIDEO_DOUYIN_COOKIE", "sessionid=env")
+    monkeypatch.setenv("PARSE_VIDEO_DOUYIN_UIFID", "env-uifid")
+    module.bridge_douyin_session(PROJECT_ROOT)
+    assert os.environ["DOUYIN_COOKIE"] == "sessionid=env"
+    assert os.environ["DOUYIN_UIFID"] == "env-uifid"
+
+
+@pytest.mark.parametrize("value", ["invalid\nheader", "非ASCII", "x" * 20000])
+def test_douyin_invalid_session_values_are_not_forwarded(douyin_session, value):
+    import yaml
+
+    module, path = douyin_session
+    path.write_text(yaml.safe_dump({"douyin-cookie": value, "douyin-uifid": value}), encoding="utf-8")
+    module.bridge_douyin_session(PROJECT_ROOT)
+    assert not os.environ["DOUYIN_COOKIE"] and not os.environ["DOUYIN_UIFID"]

@@ -2,11 +2,12 @@ import asyncio
 import json
 import os
 import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from tests.test_callbacks import EVENT
-from tests.test_douyin import GROUP, SHORT, options
+from tests.test_douyin import GROUP, PNG, SHORT, options
 from wxhook_api.schemas.events import CallbackEvent
 from wxhook_api.services import douyin as douyin_module
 from wxhook_api.services.douyin import DouyinService
@@ -82,6 +83,28 @@ def test_cache_rejects_entries_from_a_previous_version(tmp_path):
     meta["version"] = CACHE_VERSION - 1
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
     assert cache.load(key) is None
+
+
+def test_static_only_results_are_rechecked_after_one_minute(tmp_path):
+    cache = MediaCache(tmp_path / "cache")
+    folder = tmp_path / "job"
+    folder.mkdir()
+    (folder / "001.png").write_bytes(PNG)
+    key = cache.key("douyin", SHORT)
+    cache.store(key, folder, {
+        "source_url": SHORT, "platform": "douyin", "kind": "images",
+        "media_notice": "当前仅获取到静态图片",
+        "assets": [], "files": [{"name": "001.png", "kind": "image", "size": len(PNG)}],
+    })
+    assert cache.load(key) is not None
+    meta_path = tmp_path / "cache" / key / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["created_at"] = (datetime.now(timezone.utc) - timedelta(seconds=61)).isoformat()
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    assert cache.load(key) is None
+    meta["media_notice"] = ""
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    assert cache.load(key) is not None  # Complete results keep their normal TTL.
 
 
 def test_cache_cleanup_removes_expired_entries(tmp_path):

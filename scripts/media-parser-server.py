@@ -50,6 +50,35 @@ def bridge_xhs_cookie(project_root: Path) -> None:
         os.environ["XHS_COOKIE"] = value
 
 
+def bridge_douyin_session(project_root: Path) -> None:
+    """Pass the owner's optional Douyin session to this child process only."""
+    path = parse_video_config_path()
+    try:
+        if path.is_file() and path.stat().st_size <= 32 * 1024:
+            import yaml
+
+            data = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
+            if not isinstance(data, dict):
+                data = {}
+        else:
+            data = {}
+    except Exception:
+        data = {}
+    for target, alias, source, key, limit in (
+        ("DOUYIN_COOKIE", "DY_COOKIE", "PARSE_VIDEO_DOUYIN_COOKIE", "douyin-cookie", 16384),
+        ("DOUYIN_UIFID", "DY_UIFID", "PARSE_VIDEO_DOUYIN_UIFID", "douyin-uifid", 4096),
+    ):
+        if os.getenv(target, "").strip() or os.getenv(alias, "").strip():
+            continue
+        value = os.getenv(source)
+        if value is None:
+            value = data.get(key, "")
+        if isinstance(value, str) and len(value) <= limit and all(32 <= ord(char) <= 126 for char in value):
+            value = value.strip()
+            if value:
+                os.environ[target] = value
+
+
 def install_fcntl_stub() -> None:
     try:
         import fcntl  # noqa: F401
@@ -74,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"media-parser source not found at {root}", file=sys.stderr)
         return 2
     bridge_xhs_cookie(PROJECT_ROOT)
+    bridge_douyin_session(PROJECT_ROOT)
     os.environ["API_ONLY"] = "true"
     os.environ.setdefault("TZ", "Asia/Shanghai")
     install_fcntl_stub()

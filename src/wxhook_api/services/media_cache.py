@@ -15,8 +15,9 @@ from uuid import uuid4
 from wxhook_api.services.media_cleanup import MEDIA_NAME, safe_child
 
 
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 CACHE_TTL_DAYS = 7
+STATIC_RECHECK_SECONDS = 60
 KEY_PATTERN = re.compile(r"[a-z]+_[a-f0-9]{32}")
 META_NAME = "meta.json"
 
@@ -68,7 +69,10 @@ class MediaCache:
                 created = datetime.fromtimestamp(meta_path.stat().st_mtime, timezone.utc)
             except OSError:
                 return None
-        if (datetime.now(timezone.utc) - created).total_seconds() > self.ttl_days * 86400:
+        max_age = self.ttl_days * 86400
+        if meta.get("media_notice"):
+            max_age = min(max_age, STATIC_RECHECK_SECONDS)
+        if (datetime.now(timezone.utc) - created).total_seconds() > max_age:
             return None
         files = meta.get("files")
         if not isinstance(files, list) or not files:

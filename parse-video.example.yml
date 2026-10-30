@@ -2,3 +2,9 @@
 # 用本人已登录小红书网页的请求头 Cookie（单行），不要把 Cookie 发到聊天或提交 Git。
 # 不需要登录的公开分享可留空；Cookie 失效时需要在本机更新。
 xiaohongshu-cookie: ''
+
+# 可选：抖音实况详情接口要求有效会话时，填写本人已登录网页的完整 Cookie。
+# 在该网页的开发者工具 Network 中读取本人请求的 Cookie 和同级 uifid 请求头。
+# 仅用于本地 media-parser 子进程；填写后重启服务。不要发送到聊天或提交 Git。
+douyin-cookie: ''
+douyin-uifid: ''
