@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from wxhook_api.core.douyin_config import GroupSettings
 from wxhook_api.services.groups import GroupManager
 
 
@@ -53,6 +54,28 @@ async def test_roster_delta_handles_rename_departure_rejoin_and_local_policies(t
     assert next(row for row in await manager.members(group) if row["id"] == "b")["membership"] == "current"
     await manager.sync_contacts(groups, {group: []})
     assert all(row["membership"] == "left" for row in await manager.members(group))
+
+
+@pytest.mark.asyncio
+async def test_groups_missing_from_wechat_list_are_hidden_until_rejoin(tmp_path):
+    manager = GroupManager(tmp_path / "groups.sqlite3")
+    await manager.start([])
+    rosters = {"a@chatroom": [], "b@chatroom": []}
+    await manager.sync_contacts([{"id": "a@chatroom", "name": "A"}, {"id": "b@chatroom", "name": "B"}], rosters)
+    await manager.update_group("a@chatroom", {"enabled": False})
+    assert manager.allowed("a@chatroom") is False
+    await manager.sync_contacts([{"id": "b@chatroom", "name": "B"}], {"b@chatroom": []})
+    assert [g["id"] for g in await manager.groups(GroupSettings())] == ["b@chatroom"]
+    assert manager.allowed("b@chatroom") is True and manager.allowed("a@chatroom") is False
+    # Rejoining restores the archive and the saved local switch.
+    await manager.sync_contacts([{"id": "a@chatroom", "name": "A"}, {"id": "b@chatroom", "name": "B"}], rosters)
+    restored = {g["id"]: g for g in await manager.groups(GroupSettings())}
+    assert set(restored) == {"a@chatroom", "b@chatroom"} and restored["a@chatroom"]["enabled"] is False
+    # A manual add makes a hidden group visible immediately.
+    await manager.sync_contacts([{"id": "b@chatroom", "name": "B"}], {"b@chatroom": []})
+    assert [g["id"] for g in await manager.groups(GroupSettings())] == ["b@chatroom"]
+    assert await manager.add_group("a@chatroom", "A")
+    assert "a@chatroom" in {g["id"] for g in await manager.groups(GroupSettings())}
 
 
 @pytest.mark.asyncio

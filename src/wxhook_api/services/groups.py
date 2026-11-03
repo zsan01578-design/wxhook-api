@@ -123,7 +123,7 @@ class GroupManager:
                 "groups": {"chat_enabled": "INTEGER", "summary_enabled": "INTEGER NOT NULL DEFAULT 0", "wechat_name": "TEXT NOT NULL DEFAULT ''", "members_sync": "TEXT NOT NULL DEFAULT 'pending'",
                            "members_synced_at": "TEXT NOT NULL DEFAULT ''", "history_complete": "INTEGER NOT NULL DEFAULT 0",
                            "history_next_page": "INTEGER NOT NULL DEFAULT 1", "history_error": "TEXT NOT NULL DEFAULT ''",
-                           "history_synced_at": "TEXT NOT NULL DEFAULT ''"},
+                           "history_synced_at": "TEXT NOT NULL DEFAULT ''", "wechat_present": "INTEGER"},
                 "members": {"wechat_name": "TEXT NOT NULL DEFAULT ''", "membership": "TEXT NOT NULL DEFAULT 'unknown'"},
                 "chat_messages": {"is_self": "INTEGER NOT NULL DEFAULT 0"},
             }
@@ -232,7 +232,8 @@ class GroupManager:
 
     def allowed(self, group: str, sender: str = "") -> bool:
         policy = self._policies.get(group, {})
-        return bool(not self.account_error and policy.get("enabled", True) and not policy.get("blocked") and (group, sender) not in self._blocked_members)
+        return bool(not self.account_error and policy.get("enabled", True) and not policy.get("blocked")
+                    and policy.get("wechat_present", 1) != 0 and (group, sender) not in self._blocked_members)
 
     def suspend_account(self, message: str) -> None:
         # Latch until restart: queued work must not resume under another account.
@@ -272,7 +273,7 @@ class GroupManager:
                 (SELECT count(*) FROM members m WHERE m.group_id=g.id) AS member_count,
                 (SELECT count(*) FROM members m WHERE m.group_id=g.id AND m.blocked=1) AS blocked_member_count
                 , (SELECT count(*) FROM members m WHERE m.group_id=g.id AND m.membership='current') AS current_member_count
-                FROM groups g ORDER BY pinned DESC, last_seen DESC, created_at DESC, id""")]
+                FROM groups g WHERE COALESCE(g.wechat_present,1)<>0 ORDER BY pinned DESC, last_seen DESC, created_at DESC, id""")]
         rows = await self.read(read)
         for row in rows:
             row["local_name"] = row["name"]
@@ -289,9 +290,11 @@ class GroupManager:
     async def add_group(self, group: str, name: str) -> bool:
         def write(db):
             inserted = db.execute("INSERT OR IGNORE INTO groups (id, name, created_at) VALUES (?, ?, ?)", (group, name, now())).rowcount
-            if inserted:
+            hidden = db.execute("SELECT 1 FROM groups WHERE id=? AND wechat_present=0", (group,)).fetchone()
+            db.execute("UPDATE groups SET wechat_present=1 WHERE id=?", (group,))
+            if inserted or hidden:
                 self._audit(db, group, name or group, "添加群聊")
-            return bool(inserted)
+            return bool(inserted or hidden)
         return await self._write_policy(write)
 
     async def claim_chat_reply(self, group: str, key: str) -> bool:
@@ -447,6 +450,14 @@ class GroupManager:
                         ON CONFLICT(id) DO UPDATE SET wechat_name=excluded.wechat_name""", (group["id"], group["name"], timestamp))
                     status = "complete" if group["id"] in rosters else "unsupported"
                     db.execute("UPDATE groups SET members_sync=?, members_synced_at=? WHERE id=?", (status, timestamp if status == "complete" else "", group["id"]))
+                # The contact snapshot is the authoritative membership list: a group
+                # that vanished from it was left or removed. Keep its archive and
+                # settings, but hide it until it reappears.
+                present = {group["id"] for group in groups}
+                visible = {row[0] for row in db.execute("SELECT id FROM groups WHERE COALESCE(wechat_present,1)<>0")}
+                db.executemany("UPDATE groups SET wechat_present=0 WHERE id=?", ((gid,) for gid in visible - present))
+                marked = {row[0] for row in db.execute("SELECT id FROM groups WHERE wechat_present=1")}
+                db.executemany("UPDATE groups SET wechat_present=1 WHERE id=?", ((gid,) for gid in present - marked))
                 for group, people in rosters.items():
                     incoming = {member["id"] for member in people}
                     current = {row[0] for row in db.execute(
@@ -457,10 +468,12 @@ class GroupManager:
                         ON CONFLICT(group_id,id) DO UPDATE SET wechat_name=excluded.wechat_name,membership='current'
                         WHERE members.wechat_name<>excluded.wechat_name OR members.membership<>'current'""",
                         ((group, member["id"], member["name"]) for member in people))
+                return self._read_policies(db)
         async with self._lock:
             if self.account_error:
                 raise AccountMismatchError(self.account_error)
-            await finish_before_cancel(asyncio.to_thread(write))
+            snapshot = await finish_before_cancel(asyncio.to_thread(write))
+            self._policies, self._blocked_members = snapshot
 
     @staticmethod
     def _backfill_account_self(db, account: str):
@@ -700,7 +713,8 @@ class GroupManager:
 
     async def summary_group_ids(self) -> list[str]:
         def read(db):
-            return [row[0] for row in db.execute("SELECT id FROM groups ORDER BY id")]
+            return [row[0] for row in db.execute(
+                "SELECT id FROM groups WHERE COALESCE(wechat_present,1)<>0 ORDER BY id")]
         return await self.read(read)
 
     async def messages(self, group: str, *, page: int = 1, size: int = 50, query: str = "") -> dict:
