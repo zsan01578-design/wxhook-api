@@ -35,6 +35,11 @@ from wxhook_api.services.storage_guard import StorageGuard
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_JSON_BYTES = 28 * 1024 * 1024
+# Nano Banana and 4K generation regularly take minutes; 150s read timeouts cut
+# acceptable requests short. Keep the read budget below the overall generation one.
+IMAGE_READ_TIMEOUT = 300
+IMAGE_GENERATION_TIMEOUT = 330
+IMAGE_CHAIN_TIMEOUT = 420
 TEST_PROMPT = "A simple blue circle on a plain white background."
 
 
@@ -236,11 +241,11 @@ class ImagesProvider:
         generation_accepted = False
         try:
             async with AsyncExitStack() as stack:
-                await stack.enter_async_context(asyncio.timeout(180))
+                await stack.enter_async_context(asyncio.timeout(IMAGE_GENERATION_TIMEOUT))
                 await stack.enter_async_context(self.budget.slots)
                 if self.client is None:
                     client = await stack.enter_async_context(httpx.AsyncClient(
-                        timeout=httpx.Timeout(150, connect=10), transport=self.transport,
+                        timeout=httpx.Timeout(IMAGE_READ_TIMEOUT, connect=10), transport=self.transport,
                         follow_redirects=False, trust_env=True))
                 else:
                     client = self.client
@@ -368,7 +373,7 @@ class ImageModelConfiguration:
             return None
         if self._client is None:
             self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(150, connect=10), follow_redirects=False, trust_env=True)
+                timeout=httpx.Timeout(IMAGE_READ_TIMEOUT, connect=10), follow_redirects=False, trust_env=True)
         return self._client
 
     async def aclose(self) -> None:
@@ -450,7 +455,7 @@ class ImageModelConfiguration:
             await self.storage.ensure(MAX_IMAGE_BYTES)
             profiles = [self.models[key] for key in [self.active_id, *self.fallback_ids]]
             content = await run_model_chain(profiles, lambda profile: self.provider(profile).generate(prompt),
-                                           self.record_route, timeout=240, cooldown=self.cooldown)
+                                           self.record_route, timeout=IMAGE_CHAIN_TIMEOUT, cooldown=self.cooldown)
             check_ai_permission()
             await self.storage.ensure(len(content))
             path = await finish_before_cancel(asyncio.to_thread(self._store, content))

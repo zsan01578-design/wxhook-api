@@ -1099,7 +1099,7 @@ function modelEditorDialog(settings = {}, kind = "chat") {
   const body = showDialog(`${settings.id ? "修改" : "添加"}${label}`, "机器人 · 全部群共用");
   body.append(button("返回模型列表", "text-link", () => modelSettingsDialog(kind)));
   const form = el("form");
-  form.append(el("p", "modal-copy", isImage ? "保存时实际生成一张测试图片，可能产生服务商费用，最多等待 3 分钟。测试通过后保存，第一个生图模型自动启用；切换已保存的生图模型不会额外生成测试图片。" : isVision ? "保存时自动发送一张内置色块图片，测试图片输入与文字回复，可能产生服务商费用。测试通过后保存，第一个视觉模型自动启用。" : "保存时自动发送一条测试消息。第一个模型会自动启用；其他新增模型测试通过后，可在列表中点击启用。"));
+  form.append(el("p", "modal-copy", isImage ? "保存时实际生成一张测试图片，可能产生服务商费用，最多等待约 6 分钟。测试通过后保存，第一个生图模型自动启用；切换已保存的生图模型不会额外生成测试图片。" : isVision ? "保存时自动发送一张内置色块图片，测试图片输入与文字回复，可能产生服务商费用。测试通过后保存，第一个视觉模型自动启用。" : "保存时自动发送一条测试消息。第一个模型会自动启用；其他新增模型测试通过后，可在列表中点击启用。"));
   const name = formField(form, "配置名称", isImage ? "例如：主生图模型" : isVision ? "例如：主视觉模型" : "例如：硅基流动 DeepSeek", settings.name || "", false, 80);
   let protocol = null, size = null, responseFormat = null, aspectRatio = null, imageSize = null, syncImageFields = null;
   if (isImage) {
@@ -1178,7 +1178,7 @@ function modelEditorDialog(settings = {}, kind = "chat") {
     fields.forEach(node => node.disabled = true);
     footer.submit.textContent = "正在测试…"; footer.error.textContent = "";
     result.hidden = false; result.className = "model-test-result";
-    result.textContent = isImage ? "正在生成测试图片，请稍候（最多 3 分钟）…" : isVision ? "正在发送内置图片测试视觉模型，请稍候…" : "正在向模型发送测试消息，请稍候…";
+    result.textContent = isImage ? "正在生成测试图片，请稍候（最多 6 分钟）…" : isVision ? "正在发送内置图片测试视觉模型，请稍候…" : "正在向模型发送测试消息，请稍候…";
     try {
       const path = `/api/manage/${kind}-models${settings.id ? `/${settings.id}` : ""}`;
       const payload = {name: name.value.trim(), base_url: base.value.trim(), model: model.value.trim(), api_key: key.value.trim() || null};
@@ -1187,7 +1187,7 @@ function modelEditorDialog(settings = {}, kind = "chat") {
         : {protocol: "openai-images", size: size.value.trim(), response_format: responseFormat.value});
       else Object.assign(payload, {enable_thinking: thinking.value === "default" ? null : thinking.value === "on",
                                    supports_vision: isVision || Boolean(vision?.checked)});
-      const data = await api(path, payload, settings.id ? "PUT" : "POST", isImage ? 210000 : isVision ? 120000 : 60000);
+      const data = await api(path, payload, settings.id ? "PUT" : "POST", isImage ? 420000 : isVision ? 120000 : 60000);
       if (!data.saved || !data.test?.ok) {
         result.classList.add("failed"); result.textContent = `测试未通过：${data.test?.message || "请检查模型配置。"}\n原有配置保持生效，请修改后重试。`;
         return;
