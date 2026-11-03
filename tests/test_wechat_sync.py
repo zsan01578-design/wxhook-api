@@ -101,6 +101,39 @@ async def test_complete_group_enumeration_has_no_twenty_contact_cap(tmp_path):
         await client.aclose()
 
 
+async def test_session_only_group_is_treated_as_left(tmp_path):
+    fake = FakeWeChat(groups=1, history=0)
+    manager, client, sync = await build(tmp_path, fake)
+    try:
+        fake.db.executescript("""
+            CREATE TABLE session_table (id INTEGER PRIMARY KEY, username TEXT, nick_name TEXT);
+            INSERT INTO session_table VALUES (1,'9999@chatroom','已退出的群');
+        """)
+        groups, rosters, warnings = await sync._contacts()
+        assert [group["id"] for group in groups] == [ROOM]
+        assert "9999@chatroom" not in rosters
+        assert warnings == []
+    finally:
+        await client.aclose()
+
+
+async def test_session_table_remains_a_source_when_membership_tables_are_missing(tmp_path):
+    fake = FakeWeChat(groups=0, history=0)
+    manager, client, sync = await build(tmp_path, fake)
+    try:
+        fake.db.executescript("""
+            DROP TABLE contact;
+            DROP TABLE chat_room;
+            DROP TABLE chatroom_member;
+            CREATE TABLE session_table (id INTEGER PRIMARY KEY, username TEXT, nick_name TEXT);
+            INSERT INTO session_table VALUES (1,'2000@chatroom','只剩会话表的群');
+        """)
+        groups, rosters, warnings = await sync._contacts()
+        assert [group["id"] for group in groups] == ["2000@chatroom"]
+    finally:
+        await client.aclose()
+
+
 async def test_history_backfill_resumes_after_restart_and_then_catches_up(tmp_path):
     fake = FakeWeChat(history=9)
     manager, client, sync = await build(tmp_path, fake)

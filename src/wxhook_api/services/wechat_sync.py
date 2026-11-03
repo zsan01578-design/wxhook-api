@@ -190,7 +190,8 @@ class WeChatSync:
                     group = row.get("username", "")
                     if not re.fullmatch(GROUP_PATTERN, group):
                         continue
-                    existing = groups.setdefault(group, {"id": group, "name": ""})
+                    existing = groups.setdefault(group, {"id": group, "name": "", "sources": set()})
+                    existing["sources"].add(role)
                     if row.get("name"):
                         existing["name"] = str(row["name"])
             if {"contact", "chatroom", "chatroommember"} <= schemas.keys():
@@ -237,10 +238,16 @@ class WeChatSync:
                             rosters[group] = [{"id": item, "name": ""} for item in dict.fromkeys(ids) if item]
         if not recognized:
             raise SyncError("微信数据库表结构尚不受支持，请检查 Hook 版本；未使用有限的联系人搜索冒充全量同步")
+        # Contact/chatroom tables describe actual membership; a session row can
+        # outlive a group the account has left, so it must not keep the group alive.
+        membership = {"contact", "chatroom"}
+        if any(group["sources"] & membership for group in groups.values()):
+            groups = {gid: group for gid, group in groups.items() if group["sources"] & membership}
+            rosters = {gid: people for gid, people in rosters.items() if gid in groups}
         unsupported = len(set(groups) - rosters.keys())
         if unsupported:
             warnings.append(f"{unsupported} 个群暂未提供可读的完整成员关系，成员列表会明确标注为部分发现")
-        return list(groups.values()), rosters, warnings
+        return [{"id": group["id"], "name": group["name"]} for group in groups.values()], rosters, warnings
 
     async def _history(self, group: dict, account: str) -> bool:
         size = self.options.page_size
