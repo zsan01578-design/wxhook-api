@@ -181,25 +181,32 @@ class GroupInsightsService:
         identity = str(self.chatbot.identity or "")
         candidates = list(dict.fromkeys(
             str(item).strip() for item in mentions
-            if str(item).strip() and str(item).strip() not in {identity, group}))
+            if str(item).strip() and str(item).strip() not in {identity, group, "notify@all"}))
         term = request.term.strip().lstrip("@").strip()
-        if term:
-            folded = term.casefold()
-            matches = [row for row in members
-                       if folded in {str(row["id"]).casefold(), str(row["name"] or "").casefold(),
-                                     str(row["wechat_name"] or "").casefold()}]
-            if not matches and term in candidates:
-                return term
-            if not matches:
-                raise ModelError(f"本群没有找到成员“{term}”，请改用群昵称或直接 @ 该成员。")
-            if len(matches) > 1:
-                raise ModelError(f"“{term}”匹配到多个成员，请用更完整的群昵称或直接 @ 该成员。")
-            return matches[0]["id"]
-        if len(candidates) == 1:
-            return candidates[0]
+
+        def matches_for(value):
+            folded = value.casefold()
+            return [row for row in members
+                    if folded in {str(row["id"]).casefold(), str(row["name"] or "").casefold(),
+                                  str(row["wechat_name"] or "").casefold()}]
+
         if len(candidates) > 1:
             raise ModelError("消息里 @ 了多个成员，请只 @ 要画像的一位。")
-        raise ModelError("请用“人物画像：群昵称”指定成员，或在消息里 @ 该成员。")
+        if len(candidates) == 1:
+            # The @ text is often a local remark that cannot be matched to member
+            # records, while the wxid is authoritative.
+            found = matches_for(term) if term else []
+            if len(found) == 1 and found[0]["id"] != candidates[0]:
+                raise ModelError("消息里 @ 的成员与昵称不是同一人，请只保留一种指定方式。")
+            return candidates[0]
+        if not term:
+            raise ModelError("请用“人物画像：群昵称”指定成员，或在消息里 @ 该成员。")
+        matches = matches_for(term)
+        if not matches:
+            raise ModelError(f"本群没有找到成员“{term}”，请改用群昵称或直接 @ 该成员。")
+        if len(matches) > 1:
+            raise ModelError(f"“{term}”匹配到多个成员，请用更完整的群昵称或直接 @ 该成员。")
+        return matches[0]["id"]
 
     async def generate(self, group: str, request: InsightRequest, *, exclude_msgid: str = "", message_ids=(),
                        turn=None, mentions=()) -> dict:

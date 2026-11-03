@@ -275,11 +275,31 @@ async def test_portrait_rejects_unknown_ambiguous_or_multiple_mentions(tmp_path)
         await groups.save_member(GROUP, "wxid_other", {"name": "小王"}, create=True)
         with pytest.raises(ModelError, match="匹配到多个成员"):
             await worker.generate(GROUP, InsightRequest("portrait", term="小王", window="最近7天", limit=50))
+        # An explicit @ is authoritative even when the display nickname is ambiguous.
+        result = await worker.generate(GROUP, InsightRequest("portrait", term="小王", window="最近7天", limit=50),
+                                       mentions=[MEMBER])
+        assert result["image"].is_file()
         request = InsightRequest("portrait", window="最近7天", limit=50)
         with pytest.raises(ModelError, match="群昵称"):
             await worker.generate(GROUP, request, mentions=[BOT])
         with pytest.raises(ModelError, match="只 @"):
             await worker.generate(GROUP, request, mentions=[MEMBER, "wxid_other"])
+
+
+async def test_portrait_mention_id_is_used_when_display_name_is_unknown(tmp_path):
+    async with context(tmp_path, image_hook=confirmed) as state:
+        groups, worker = state.app.state.groups, state.app.state.group_insights
+        await seed(groups)
+        timestamp = int(datetime.now(CHINA).timestamp()) - 20
+        await groups.import_history(GROUP, [
+            {"msgid": 300, "timestamp": timestamp, "type": 1, "sender": "wxid_dad", "content": "我平时说话比较直接"},
+        ])
+        calls = configure_fake(worker)
+        state.app.state.image_model.transport = httpx.MockTransport(lambda request: image_response())
+        await add_image(state)
+        await state.submit(event("@机器人\u2005@爸爸 人物画像", msgid=301, atlist=[BOT, "wxid_dad"]))
+        assert len(calls) == len(state.image_sends) == 1 and not state.sends
+        assert all(row["speaker"] == "wxid_dad" for row in calls[0][0]["records"])
 
 
 async def test_portrait_requires_image_model(tmp_path):
