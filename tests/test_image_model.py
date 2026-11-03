@@ -115,7 +115,62 @@ async def test_key_never_crosses_endpoint_or_profile_and_missing_ids_do_not_crea
         assert len(requests) == 2 and len(config.models) == 2
 
 
-@pytest.mark.parametrize("changes", [{"api_key": "bad\nkey"}, {"base_url": "http://remote.test/v1"}, {"base_url": "https://user:password@image.test"}, {"size": "9999x1024"}, {"size": "hello"}, {"response_format": "html"}, {"enable_thinking": True}])
+GEMINI = {"name": "Nano Banana", "protocol": "gemini", "base_url": "https://uuapi.io", "model": "gemini-2.5-flash-image",
+          "api_key": "nano-private-key", "aspect_ratio": "3:4", "image_size": "2K"}
+
+
+def gemini_response():
+    encoded = base64.b64encode(PNG).decode()
+    return httpx.Response(200, json={"candidates": [{"content": {"parts": [
+        {"thought": True, "inlineData": {"mimeType": "image/png", "data": base64.b64encode(b"draft").decode()}},
+        {"inlineData": {"mimeType": "image/png", "data": encoded}},
+    ]}}]})
+
+
+async def test_gemini_protocol_uses_native_endpoint_and_skips_draft_images(tmp_path):
+    requests = []
+    def respond(request):
+        requests.append(request)
+        return gemini_response()
+    async with context(tmp_path) as state:
+        config = state.app.state.image_model
+        config.transport = httpx.MockTransport(respond)
+        profile = await add(state, **GEMINI)
+        assert profile["protocol"] == "gemini" and profile["aspect_ratio"] == "3:4" and profile["image_size"] == "2K"
+        request = requests[0]
+        assert str(request.url) == "https://uuapi.io/v1beta/models/gemini-2.5-flash-image:generateContent"
+        assert request.headers["x-goog-api-key"] == "nano-private-key"
+        assert "authorization" not in request.headers
+        assert json.loads(request.content) == {
+            "contents": [{"parts": [{"text": "A simple blue circle on a plain white background."}]}],
+            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"], "imageConfig": {"aspectRatio": "3:4", "imageSize": "2K"}},
+        }
+        restarted = ImageModelConfiguration(state.bot, budget=config.budget)
+        assert restarted.settings.protocol == "gemini" and restarted.settings.aspect_ratio == "3:4"
+        snapshot = await state.client.get("/api/manage/image-model")
+        assert "nano-private-key" not in snapshot.text
+
+
+@pytest.mark.parametrize("base_url", ["https://uuapi.io", "https://uuapi.io/", "https://uuapi.io/v1beta", "https://uuapi.io/v1beta/", "https://uuapi.io/v1"])
+async def test_gemini_base_url_is_normalized(tmp_path, base_url):
+    requests = []
+    async with context(tmp_path) as state:
+        state.app.state.image_model.transport = httpx.MockTransport(lambda request: (requests.append(request), gemini_response())[1])
+        await add(state, **{**GEMINI, "base_url": base_url})
+        assert str(requests[0].url) == "https://uuapi.io/v1beta/models/gemini-2.5-flash-image:generateContent"
+
+
+async def test_gemini_text_only_response_does_not_save(tmp_path):
+    async with context(tmp_path) as state:
+        config = state.app.state.image_model
+        config.transport = httpx.MockTransport(lambda request: httpx.Response(200, json={
+            "candidates": [{"content": {"parts": [{"text": "I cannot generate that."}]}}]}))
+        response = await state.client.post("/api/manage/image-models", json={**CONFIG, **GEMINI})
+        assert not response.json()["saved"] and "没有返回图片" in response.json()["test"]["message"]
+        assert not config.path.exists()
+
+
+@pytest.mark.parametrize("changes", [{"api_key": "bad\nkey"}, {"base_url": "http://remote.test/v1"}, {"base_url": "https://user:password@image.test"}, {"size": "9999x1024"}, {"size": "hello"}, {"response_format": "html"}, {"enable_thinking": True}, {"aspect_ratio": "wide"}, {"aspect_ratio": "1:1:1"}, {"image_size": "8K"}, {"protocol": "invalid"}, {"protocol": "gemini", "model": "bad model"}])
 async def test_invalid_fields_are_rejected_without_secrets(tmp_path, changes):
     async with context(tmp_path) as state:
         response = await state.client.post("/api/manage/image-models", json={**CONFIG, **changes})

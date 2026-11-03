@@ -41,10 +41,13 @@ TEST_PROMPT = "A simple blue circle on a plain white background."
 class ImageModelDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=80)] = ""
+    protocol: Literal["openai-images", "gemini"] = "openai-images"
     base_url: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)]
     model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
     api_key: SecretStr | None = None
     size: Annotated[str, StringConstraints(strip_whitespace=True, max_length=20)] = "1024x1024"
+    aspect_ratio: Annotated[str, StringConstraints(strip_whitespace=True, max_length=5)] = ""
+    image_size: Literal["", "1K", "2K", "4K"] = ""
     response_format: Literal["default", "url", "b64_json"] = "default"
 
     @field_validator("base_url")
@@ -68,6 +71,19 @@ class ImageModelDefinition(BaseModel):
         if any(int(side) > 4096 for side in value.split("x")):
             raise ValueError("图片边长不能超过 4096")
         return value
+
+    @field_validator("aspect_ratio")
+    @classmethod
+    def valid_aspect_ratio(cls, value):
+        if value and not re.fullmatch(r"[1-9][0-9]?:[1-9][0-9]?", value):
+            raise ValueError("画面比例须为宽:高，例如 1:1、3:4、16:9，或留空")
+        return value
+
+    @model_validator(mode="after")
+    def valid_gemini_model(self):
+        if self.protocol == "gemini" and not re.fullmatch(r"[A-Za-z0-9._-]{1,200}", self.model.removeprefix("models/")):
+            raise ValueError("Gemini 模型名只能包含字母、数字、点、下划线和短横线")
+        return self
 
 
 class ImageModelProfile(ImageModelDefinition):
@@ -153,17 +169,70 @@ class ImagesProvider:
             body.extend(chunk)
         return bytes(body)
 
-    async def generate(self, prompt: str) -> bytes:
-        if not prompt.strip() or len(prompt) > 8000:
-            raise ModelError("请填写 1–8000 字的生图描述。")
+    def _endpoint(self) -> str:
+        base = self.settings.base_url.rstrip("/")
+        if self.settings.protocol == "gemini":
+            for suffix in ("/v1beta", "/v1"):
+                if base.endswith(suffix):
+                    base = base[:-len(suffix)]
+                    break
+            model = self.settings.model.removeprefix("models/")
+            return f"{base}/v1beta/models/{model}:generateContent"
+        return base + "/images/generations"
+
+    def _payload(self, prompt: str) -> dict:
+        if self.settings.protocol == "gemini":
+            config = {"responseModalities": ["TEXT", "IMAGE"]}
+            image_config = {}
+            if self.settings.aspect_ratio:
+                image_config["aspectRatio"] = self.settings.aspect_ratio
+            if self.settings.image_size:
+                image_config["imageSize"] = self.settings.image_size
+            if image_config:
+                config["imageConfig"] = image_config
+            return {"contents": [{"parts": [{"text": prompt.strip()}]}], "generationConfig": config}
         payload = {"model": self.settings.model, "prompt": prompt.strip(), "n": 1}
         if self.settings.size:
             payload["size"] = self.settings.size
         if self.settings.response_format != "default":
             payload["response_format"] = self.settings.response_format
+        return payload
+
+    def _headers(self) -> dict:
         headers = {"Accept-Encoding": "identity"}
         if self.settings.api_key:
-            headers["Authorization"] = "Bearer " + self.settings.api_key.get_secret_value()
+            key = self.settings.api_key.get_secret_value()
+            if self.settings.protocol == "gemini":
+                headers["x-goog-api-key"] = key
+            else:
+                headers["Authorization"] = "Bearer " + key
+        return headers
+
+    @staticmethod
+    def _gemini_image(body: bytes) -> bytes:
+        try:
+            parts = json.loads(body)["candidates"][0]["content"]["parts"]
+            # Newer models emit low-resolution draft parts marked thought=true.
+            for part in parts:
+                if not isinstance(part, dict) or part.get("thought") is True:
+                    continue
+                inline = part.get("inlineData") or part.get("inline_data")
+                if isinstance(inline, dict) and isinstance(inline.get("data"), str) and inline["data"]:
+                    content = base64.b64decode(inline["data"], validate=True)
+                    if len(content) > MAX_IMAGE_BYTES:
+                        raise ModelError("生图返回的图片超过 20 MiB，请调低分辨率后重试。")
+                    return content
+            raise ModelError("模型没有返回图片，可能被安全策略拦截，请调整描述后重试。")
+        except ModelError:
+            raise
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError, binascii.Error, RecursionError):
+            raise ModelError("生图响应格式无效，需要 candidates[0].content.parts[].inlineData。") from None
+
+    async def generate(self, prompt: str) -> bytes:
+        if not prompt.strip() or len(prompt) > 8000:
+            raise ModelError("请填写 1–8000 字的生图描述。")
+        payload = self._payload(prompt)
+        headers = self._headers()
         generation_accepted = False
         try:
             async with AsyncExitStack() as stack:
@@ -181,49 +250,19 @@ class ImagesProvider:
                 await self.budget.reserve()
                 await self.account_check()
                 check_ai_permission()
-                async with client.stream("POST", self.settings.base_url + "/images/generations",
-                                         headers=headers, json=payload) as response:
+                async with client.stream("POST", self._endpoint(), headers=headers, json=payload) as response:
                     if response.status_code != 200:
                         hints = {400: "生图参数或描述被拒绝，请检查模型、尺寸及返回格式。", 401: "生图 API Key 无效。",
                                  402: "生图账号余额不足，请充值或更换配置。",
-                                 403: "没有生图模型访问权限。", 404: "生图接口或模型不存在，请检查 Base URL 和模型名称。",
+                                 403: "没有生图模型访问权限。", 404: "生图接口或模型不可用，请检查 Base URL、模型名称和密钥分组。",
                                  429: "生图请求受限或额度不足，请稍后重试。"}
                         await upstream_failure(response, hints.get(response.status_code, f"生图服务返回 HTTP {response.status_code}，请稍后重试。"))
                     generation_accepted = True
                     body = await self._body(response, MAX_JSON_BYTES)
-                try:
-                    item = json.loads(body)["data"][0]
-                    encoded, url = item.get("b64_json"), item.get("url")
-                    if isinstance(encoded, str) and encoded:
-                        content = base64.b64decode(encoded, validate=True)
-                        if len(content) > MAX_IMAGE_BYTES:
-                            raise ValueError
-                    elif isinstance(url, str) and url:
-                        # Never send the API credential or cookies to an image URL.
-                        async with AsyncExitStack() as download_stack:
-                            if self.client is None:
-                                download = await download_stack.enter_async_context(httpx.AsyncClient(
-                                    timeout=30, transport=self.transport, follow_redirects=False, trust_env=True))
-                            else:
-                                download = self.client
-                            for _ in range(4):
-                                url = await self._download_url(url)
-                                check_ai_permission()
-                                async with download.stream("GET", url, headers={"Accept-Encoding": "identity"},
-                                                           timeout=httpx.Timeout(30, connect=10)) as image:
-                                    if image.status_code in {301, 302, 303, 307, 308} and image.headers.get("location"):
-                                        url = urljoin(url, image.headers["location"])
-                                        continue
-                                    if image.status_code != 200:
-                                        raise ModelError("无法下载生成的图片，请稍后重试或改用 Base64 返回格式。")
-                                    content = await self._body(image, MAX_IMAGE_BYTES)
-                                    break
-                            else:
-                                raise ModelError("生成的图片重定向次数过多。")
-                    else:
-                        raise ValueError
-                except (ValueError, KeyError, IndexError, TypeError, AttributeError, binascii.Error, RecursionError):
-                    raise ModelError("生图响应格式无效，需要 data[0].url 或 data[0].b64_json。") from None
+                if self.settings.protocol == "gemini":
+                    content = self._gemini_image(body)
+                else:
+                    content = await self._openai_image(body)
                 check_ai_permission()
                 return await asyncio.to_thread(image_png, content)
         except BudgetError as exc:
@@ -232,12 +271,50 @@ class ImagesProvider:
             raise ModelError("生图响应过大或传输不完整，已停止读取。") from None
         except (httpx.ConnectError, httpx.ConnectTimeout):
             if generation_accepted:
+                if self.settings.protocol == "gemini":
+                    raise ModelError("图片已经生成，但连接中断，请稍后重试；本次请求可能已计费。") from None
                 raise ModelError("图片已经生成，但下载连接失败，请检查图片服务或改用 Base64 返回格式。") from None
             raise ProviderUnavailable("无法连接生图服务，请检查地址、网络和代理设置。") from None
         except (TimeoutError, httpx.TimeoutException):
             raise ModelError("生图超时，请稍后重试；本次请求可能已计费。") from None
         except httpx.RequestError:
             raise ModelError("无法连接生图服务，请检查地址、网络和代理设置。") from None
+
+    async def _openai_image(self, body: bytes) -> bytes:
+        try:
+            item = json.loads(body)["data"][0]
+            encoded, url = item.get("b64_json"), item.get("url")
+            if isinstance(encoded, str) and encoded:
+                content = base64.b64decode(encoded, validate=True)
+                if len(content) > MAX_IMAGE_BYTES:
+                    raise ValueError
+            elif isinstance(url, str) and url:
+                # Never send the API credential or cookies to an image URL.
+                async with AsyncExitStack() as download_stack:
+                    if self.client is None:
+                        download = await download_stack.enter_async_context(httpx.AsyncClient(
+                            timeout=30, transport=self.transport, follow_redirects=False, trust_env=True))
+                    else:
+                        download = self.client
+                    for _ in range(4):
+                        url = await self._download_url(url)
+                        check_ai_permission()
+                        async with download.stream("GET", url, headers={"Accept-Encoding": "identity"},
+                                                   timeout=httpx.Timeout(30, connect=10)) as image:
+                            if image.status_code in {301, 302, 303, 307, 308} and image.headers.get("location"):
+                                url = urljoin(url, image.headers["location"])
+                                continue
+                            if image.status_code != 200:
+                                raise ModelError("无法下载生成的图片，请稍后重试或改用 Base64 返回格式。")
+                            content = await self._body(image, MAX_IMAGE_BYTES)
+                            break
+                    else:
+                        raise ModelError("生成的图片重定向次数过多。")
+            else:
+                raise ValueError
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError, binascii.Error, RecursionError):
+            raise ModelError("生图响应格式无效，需要 data[0].url 或 data[0].b64_json。") from None
+        return content
 
 
 class ImageModelConfiguration:

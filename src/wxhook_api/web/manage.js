@@ -993,7 +993,10 @@ async function modelSettingsDialog(kind = "chat") {
     heading.append(copy, el("span", profile.active || fallbackIndex >= 0 ? "badge" : "badge gray", profile.active ? "首选" : fallbackIndex >= 0 ? `备用 ${fallbackIndex + 1}` : "未参与"));
     const thinking = profile.enable_thinking === false ? "关闭" : profile.enable_thinking === true ? "开启" : "跟随默认";
     const vision = isImage ? "" : ` · 图片理解：${profile.supports_vision ? "开启" : "关闭"}`;
-    card.append(heading, el("p", "form-note", `${isImage ? `尺寸：${profile.size || "跟随默认"} · 返回：${profile.response_format === "default" ? "跟随默认" : profile.response_format}` : `深度思考：${thinking}${vision}`} · ${profile.has_api_key ? "已保存 API Key" : "未配置 API Key"}`));
+    const imageDetails = profile.protocol === "gemini"
+      ? `协议：Gemini 原生 · 比例：${profile.aspect_ratio || "跟随模型"} · 清晰度：${profile.image_size || "跟随模型"}`
+      : `协议：OpenAI Images · 尺寸：${profile.size || "跟随默认"} · 返回：${profile.response_format === "default" ? "跟随默认" : profile.response_format}`;
+    card.append(heading, el("p", "form-note", `${isImage ? imageDetails : `深度思考：${thinking}${vision}`} · ${profile.has_api_key ? "已保存 API Key" : "未配置 API Key"}`));
     const actions = el("div", "model-card-actions");
     actions.append(button("查看 / 修改", "button small", () => modelEditorDialog(profile, kind)));
     const activate = button(profile.active ? "当前首选" : "设为首选", "button small primary", () => modelAction(`${modelPath}/${profile.id}/activate`, "POST", isImage ? "正在切换生图模型…" : "正在测试并切换模型…", "首选已更新；原首选需要手动加入备用"));
@@ -1098,10 +1101,22 @@ function modelEditorDialog(settings = {}, kind = "chat") {
   const form = el("form");
   form.append(el("p", "modal-copy", isImage ? "保存时实际生成一张测试图片，可能产生服务商费用，最多等待 3 分钟。测试通过后保存，第一个生图模型自动启用；切换已保存的生图模型不会额外生成测试图片。" : isVision ? "保存时自动发送一张内置色块图片，测试图片输入与文字回复，可能产生服务商费用。测试通过后保存，第一个视觉模型自动启用。" : "保存时自动发送一条测试消息。第一个模型会自动启用；其他新增模型测试通过后，可在列表中点击启用。"));
   const name = formField(form, "配置名称", isImage ? "例如：主生图模型" : isVision ? "例如：主视觉模型" : "例如：硅基流动 DeepSeek", settings.name || "", false, 80);
-  const base = formField(form, "Base URL", "例如 https://api.siliconflow.cn/v1", settings.base_url, false, 2048);
+  let protocol = null, size = null, responseFormat = null, aspectRatio = null, imageSize = null, syncImageFields = null;
+  if (isImage) {
+    const protocolLabel = el("label", "form-label", "接口协议");
+    protocol = el("select", "form-input"); protocol.id = "image-protocol"; protocolLabel.htmlFor = protocol.id;
+    [["openai-images", "OpenAI Images（/images/generations）"], ["gemini", "Gemini 原生（Nano Banana）"]].forEach(([value, text]) => {
+      const option = el("option", "", text); option.value = value; protocol.append(option);
+    });
+    protocol.value = settings.protocol === "gemini" ? "gemini" : "openai-images";
+    form.append(protocolLabel, protocol);
+  }
+  const isGemini = isImage && protocol.value === "gemini";
+  const base = formField(form, "Base URL", isGemini ? "例如 https://uuapi.io（也可填 /v1beta，保存时自动规范化）" : "例如 https://api.siliconflow.cn/v1", settings.base_url, false, 2048);
   base.required = true; base.type = "url";
-  form.append(el("p", "form-note", isImage ? "使用兼容 OpenAI Images 的服务，地址通常以 /v1 结尾；也可填写完整的 /images/generations 地址。" : "使用兼容 OpenAI 的 Chat Completions 服务，地址通常以 /v1 结尾。"));
-  const model = formField(form, "模型名称", "填写服务商的完整模型 ID", settings.model, false, 256);
+  const baseNote = el("p", "form-note", isImage ? (isGemini ? "Nano Banana 走 Gemini 原生 /v1beta/models/{模型}:generateContent；填站点根地址即可，例如 https://uuapi.io。" : "使用兼容 OpenAI Images 的服务，地址通常以 /v1 结尾；也可填写完整的 /images/generations 地址。") : "使用兼容 OpenAI 的 Chat Completions 服务，地址通常以 /v1 结尾。");
+  form.append(baseNote);
+  const model = formField(form, "模型名称", isGemini ? "例如 gemini-2.5-flash-image、gemini-nano-banana-2.1" : "填写服务商的完整模型 ID", settings.model, false, 256);
   model.required = true;
   const thinkingLabel = el("label", "form-label", "深度思考"), thinking = el("select", "form-input");
   thinking.id = "model-thinking"; thinkingLabel.htmlFor = thinking.id;
@@ -1120,16 +1135,33 @@ function modelEditorDialog(settings = {}, kind = "chat") {
       form.append(visionRow, el("p", "form-note", "兼容原有图片理解配置。建议在“视觉模型”中单独添加；未配置独立视觉模型时，带图提问可使用此处已开启图片理解的模型。"));
     }
   }
-  let size, responseFormat;
   if (isImage) {
-    size = formField(form, "图片尺寸", "例如 1024x1024；也可填写 auto 或留空", settings.size ?? "1024x1024", false, 20);
+    const openaiBox = el("div"), geminiBox = el("div");
+    size = formField(openaiBox, "图片尺寸", "例如 1024x1024；也可填写 auto 或留空", settings.size ?? "1024x1024", false, 20);
     const formatLabel = el("label", "form-label", "图片返回格式");
     responseFormat = el("select", "form-input"); responseFormat.id = "image-response-format"; formatLabel.htmlFor = responseFormat.id;
     [["default", "跟随服务默认"], ["b64_json", "Base64 图片"], ["url", "图片 URL"]].forEach(([value, text]) => {
       const option = el("option", "", text); option.value = value; responseFormat.append(option);
     });
     responseFormat.value = settings.response_format || "default";
-    form.append(formatLabel, responseFormat, el("p", "form-note", "尺寸与返回格式须受所选模型支持；不确定时尺寸留空、返回格式跟随默认。每次生成一张图片，生图与对话共用每日 AI 调用额度。"));
+    openaiBox.append(formatLabel, responseFormat, el("p", "form-note", "尺寸与返回格式须受所选模型支持；不确定时尺寸留空、返回格式跟随默认。每次生成一张图片，生图与对话共用每日 AI 调用额度。"));
+    aspectRatio = formField(geminiBox, "画面比例", "例如 1:1、3:4、16:9；留空由模型决定", settings.aspect_ratio || "", false, 5);
+    const imageSizeLabel = el("label", "form-label", "清晰度"), imageSizeSelect = el("select", "form-input");
+    imageSizeSelect.id = "image-size"; imageSizeLabel.htmlFor = imageSizeSelect.id;
+    [["", "跟随模型默认"], ["1K", "1K"], ["2K", "2K"], ["4K", "4K"]].forEach(([value, text]) => {
+      const option = el("option", "", text); option.value = value; imageSizeSelect.append(option);
+    });
+    imageSize = imageSizeSelect; imageSize.value = settings.image_size || "";
+    geminiBox.append(imageSizeLabel, imageSize, el("p", "form-note", "比例写入 imageConfig.aspectRatio，清晰度写入 imageSize；2K/4K 仅新一代模型支持，gemini-2.5-flash-image 只能调比例。参数须受所选模型支持，不确定时留空。"));
+    form.append(openaiBox, geminiBox);
+    syncImageFields = () => {
+      const gemini = protocol.value === "gemini";
+      openaiBox.hidden = gemini; geminiBox.hidden = !gemini;
+      base.placeholder = gemini ? "例如 https://uuapi.io（也可填 /v1beta，保存时自动规范化）" : "例如 https://api.siliconflow.cn/v1";
+      baseNote.textContent = gemini ? "Nano Banana 走 Gemini 原生 /v1beta/models/{模型}:generateContent；填站点根地址即可，例如 https://uuapi.io。" : "使用兼容 OpenAI Images 的服务，地址通常以 /v1 结尾；也可填写完整的 /images/generations 地址。";
+      model.placeholder = gemini ? "例如 gemini-2.5-flash-image、gemini-nano-banana-2.1" : "填写服务商的完整模型 ID";
+    };
+    protocol.addEventListener("change", syncImageFields); syncImageFields();
   }
   const key = formField(form, "API Key", settings.has_api_key ? "已保存密钥；留空沿用，更换地址时请重新填写" : "填写 API Key；本地免密服务可留空", "", false, 4096);
   key.type = "password"; key.spellcheck = false;
@@ -1142,7 +1174,7 @@ function modelEditorDialog(settings = {}, kind = "chat") {
   form.addEventListener("submit", async event => {
     event.preventDefault(); if (modelSaving || mutating) return;
     modelSaving = true; mutating = true;
-    const fields = [name, base, model, thinking, vision, key, size, responseFormat, ...body.querySelectorAll("button"), $("close-modal")].filter(Boolean);
+    const fields = [name, base, model, thinking, vision, key, size, responseFormat, protocol, aspectRatio, imageSize, ...body.querySelectorAll("button"), $("close-modal")].filter(Boolean);
     fields.forEach(node => node.disabled = true);
     footer.submit.textContent = "正在测试…"; footer.error.textContent = "";
     result.hidden = false; result.className = "model-test-result";
@@ -1150,7 +1182,9 @@ function modelEditorDialog(settings = {}, kind = "chat") {
     try {
       const path = `/api/manage/${kind}-models${settings.id ? `/${settings.id}` : ""}`;
       const payload = {name: name.value.trim(), base_url: base.value.trim(), model: model.value.trim(), api_key: key.value.trim() || null};
-      if (isImage) Object.assign(payload, {size: size.value.trim(), response_format: responseFormat.value});
+      if (isImage) Object.assign(payload, protocol.value === "gemini"
+        ? {protocol: "gemini", size: "", aspect_ratio: aspectRatio.value.trim(), image_size: imageSize.value}
+        : {protocol: "openai-images", size: size.value.trim(), response_format: responseFormat.value});
       else Object.assign(payload, {enable_thinking: thinking.value === "default" ? null : thinking.value === "on",
                                    supports_vision: isVision || Boolean(vision?.checked)});
       const data = await api(path, payload, settings.id ? "PUT" : "POST", isImage ? 210000 : isVision ? 120000 : 60000);
@@ -1162,6 +1196,7 @@ function modelEditorDialog(settings = {}, kind = "chat") {
       $("modal-title").textContent = `修改${label}`;
       key.value = ""; key.placeholder = settings.has_api_key ? "已保存密钥；留空沿用，更换地址时请重新填写" : "本地免密服务可留空";
       base.value = settings.base_url; name.value = settings.name;
+      if (isImage) { protocol.value = settings.protocol === "gemini" ? "gemini" : "openai-images"; aspectRatio.value = settings.aspect_ratio || ""; imageSize.value = settings.image_size || ""; syncImageFields(); }
       if (vision) vision.checked = Boolean(settings.supports_vision);
       result.classList.add("passed"); result.textContent = isImage ? data.test.message : `${data.test.message}\n模型回复：${data.test.reply}`;
       if (isImage && data.test.preview?.startsWith("data:image/png;base64,")) {

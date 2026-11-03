@@ -226,10 +226,11 @@ $env:WXHOOK_SYNC_INTERVAL = '180'
 
 ## 群内生图与生图模型配置
 
-打开管理页左侧 **「AI 模型 → 生图模型 → 添加生图模型」**，填写配置名称、Base URL、完整模型 ID、API Key 和图片尺寸。生图模型与对话模型分别保存、分别启用；可以保存多个生图配置，同时启用一个。
+打开管理页左侧 **「AI 模型 → 生图模型 → 添加生图模型」**，先选择接口协议，再填写配置名称、Base URL、完整模型 ID、API Key 和图片参数。生图模型与对话模型分别保存、分别启用；可以保存多个生图配置，同时启用一个。
 
-- 接口使用兼容 OpenAI 的非流式 `POST /images/generations`，地址通常以 `/v1` 结尾，也可直接填写完整生图地址。支持 `data[0].b64_json` 和 `data[0].url` 返回，接口字段参考 [OpenAI Images 官方文档](https://developers.openai.com/api/reference/resources/images/methods/generate)。仅支持此接口协议，暂不支持 Chat Completions 生图、异步任务轮询和图生图。
-- 图片尺寸默认 `1024x1024`，可填写服务商支持的其他尺寸（边长不超过 4096）、`auto` 或留空；留空时不发送尺寸参数。返回格式默认跟随服务，也可指定 Base64 或 URL。模型实际支持的参数以服务商为准。
+- **OpenAI Images**：使用兼容 OpenAI 的非流式 `POST /images/generations`，地址通常以 `/v1` 结尾，也可直接填写完整生图地址。支持 `data[0].b64_json` 和 `data[0].url` 返回，接口字段参考 [OpenAI Images 官方文档](https://developers.openai.com/api/reference/resources/images/methods/generate)。图片尺寸默认 `1024x1024`，可填写服务商支持的其他尺寸（边长不超过 4096）、`auto` 或留空；留空时不发送尺寸参数。返回格式默认跟随服务，也可指定 Base64 或 URL。
+- **Gemini 原生（Nano Banana）**：调用 `POST {站点根地址}/v1beta/models/{模型}:generateContent`，用 `x-goog-api-key` 鉴权，从 `candidates[0].content.parts[].inlineData.data` 读取 Base64 图片，并自动跳过 `thought: true` 的低分辨率草稿图。Base URL 填站点根地址即可，例如 `https://uuapi.io`；填 `/v1beta` 或 `/v1` 也会在保存时自动规范化。Nano Banana 系模型不要走同步 Images 路径。画面比例写入 `generationConfig.imageConfig.aspectRatio`（如 `1:1`、`3:4`、`16:9`），清晰度写入 `imageSize`（`1K`/`2K`/`4K`，仅新一代模型支持；`gemini-2.5-flash-image` 只能调比例）。
+- 两种协议都只支持文字生图，暂不支持 Chat Completions 生图、异步任务轮询和图生图；模型实际支持的参数以服务商为准，参数不被接受时会在测试阶段直接报错。
 - **保存并测试会实际生成一张测试图片，可能产生服务商费用**，最多等待约 3 分钟。测试图只在网页预览，不发微信群；通过后才保存，首个配置自动启用。切换已保存的生图配置不再额外调用测试。失败时保留原配置，启用中的配置需先切换才能删除。
 - 生图与对话共用 AI 并发和每日调用额度；测试也计入全局额度，失败或超时可能已计费，不自动重试。密钥按原模型配置方式受本机 Windows 账户保护，页面不回显；编辑留空沿用该配置的密钥，更换地址须重新填写。
 
