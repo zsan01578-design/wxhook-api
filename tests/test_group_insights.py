@@ -40,6 +40,20 @@ def test_invalid_commands_do_not_fall_through_to_ordinary_models(command):
         parse_command(command)
 
 
+@pytest.mark.parametrize("command,term", [
+    ("人物画像：张三", "张三"),
+    ("人物画像 张三", "张三"),
+    ("@张三 人物画像", "张三"),
+    ("人物画像", ""),
+])
+def test_portrait_commands(command, term):
+    assert parse_command(command) == InsightRequest("portrait", term, "最近7天", 50, None)
+
+
+def test_portrait_question_is_not_a_command():
+    assert parse_command("人物画像是什么") is None
+
+
 def test_bounds_use_china_midnight_and_non_commands_pass_through():
     current = datetime(2026, 10, 26, 0, 30, tzinfo=CHINA)
     start, end = window_bounds("今天", current)
@@ -210,6 +224,71 @@ async def test_comic_model_generation_and_one_image_delivery(tmp_path):
         assert response.json()["image_data_url"].startswith("data:image/png;base64,")
         assert response.json()["text"] and response.json()["sources"]
         assert len(state.image_sends) == 1  # Web preview never sends to WeChat.
+
+
+async def test_portrait_uses_only_target_member_messages_and_one_illustration(tmp_path):
+    async with context(tmp_path, image_hook=confirmed) as state:
+        groups, worker = state.app.state.groups, state.app.state.group_insights
+        await seed(groups)
+        await groups.save_member(GROUP, MEMBER, {"name": "小王"})
+        calls = configure_fake(worker)
+        prompts = []
+        state.app.state.image_model.transport = httpx.MockTransport(
+            lambda request: (prompts.append(json.loads(request.content)["prompt"]), image_response())[1])
+        await add_image(state)
+        prompts.clear()
+        payload = event("人物画像", msgid=200, atlist=[BOT, MEMBER])
+        await state.submit(payload)
+        await state.submit(payload)
+        assert len(calls) == len(state.image_sends) == 1 and not state.sends
+        records = calls[0][0]["records"]
+        assert records and all(row["speaker"] == "小王" for row in records)
+        assert all("周三战神" not in row["content"] for row in records)
+        assert "不推测真实长相" in calls[0][1]["system"]
+        assert "卡通插画风格" in prompts[0] and "群聊创意画像" in prompts[0]
+
+
+async def test_portrait_command_by_group_nickname_delivers_image(tmp_path):
+    async with context(tmp_path, image_hook=confirmed) as state:
+        groups, worker = state.app.state.groups, state.app.state.group_insights
+        await seed(groups)
+        await groups.save_member(GROUP, MEMBER, {"name": "小王"})
+        calls = configure_fake(worker)
+        state.app.state.image_model.transport = httpx.MockTransport(lambda request: image_response())
+        await add_image(state)
+        await state.submit(event("@机器人\u2005人物画像：小王", msgid=201))
+        assert len(calls) == 1 and len(state.image_sends) == 1 and not state.sends
+
+
+async def test_portrait_rejects_unknown_ambiguous_or_multiple_mentions(tmp_path):
+    async with context(tmp_path) as state:
+        groups, worker = state.app.state.groups, state.app.state.group_insights
+        await seed(groups)
+        configure_fake(worker)
+        state.app.state.image_model.transport = httpx.MockTransport(lambda request: image_response())
+        with pytest.raises(ModelError, match="没有找到成员"):
+            await worker.generate(GROUP, InsightRequest("portrait", term="小王", window="最近7天", limit=50))
+        await add_image(state)
+        await groups.save_member(GROUP, MEMBER, {"name": "小王"})
+        result = await worker.generate(GROUP, InsightRequest("portrait", term="小王", window="最近7天", limit=50))
+        assert result["image"].is_file() and result["sources"]
+        await groups.save_member(GROUP, "wxid_other", {"name": "小王"}, create=True)
+        with pytest.raises(ModelError, match="匹配到多个成员"):
+            await worker.generate(GROUP, InsightRequest("portrait", term="小王", window="最近7天", limit=50))
+        request = InsightRequest("portrait", window="最近7天", limit=50)
+        with pytest.raises(ModelError, match="群昵称"):
+            await worker.generate(GROUP, request, mentions=[BOT])
+        with pytest.raises(ModelError, match="只 @"):
+            await worker.generate(GROUP, request, mentions=[MEMBER, "wxid_other"])
+
+
+async def test_portrait_requires_image_model(tmp_path):
+    async with context(tmp_path) as state:
+        worker = state.app.state.group_insights
+        await seed(state.app.state.groups)
+        configure_fake(worker)
+        with pytest.raises(ModelError, match="生图模型"):
+            await worker.generate(GROUP, InsightRequest("portrait", window="最近7天", limit=50), mentions=[MEMBER])
 
 
 async def test_unknown_message_id_does_not_turn_the_question_itself_into_meme_evidence(tmp_path):

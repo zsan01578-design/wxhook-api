@@ -349,7 +349,8 @@ class MentionChatService:
 
     def _enqueue_job(self, event: CallbackEvent, group: str, question: str, report: dict, *,
                      image_msgid: str | None = None, image_question: str | None = None,
-                     image_ambiguous: bool = False, quoted_reply: QuotedReply | None = None) -> bool:
+                     image_ambiguous: bool = False, quoted_reply: QuotedReply | None = None,
+                     mentions=()) -> bool:
         msgid = str(event.msgid)
         if msgid not in {"", "0"}:
             key = "msg:" + (msgid if len(msgid) <= 128 else hashlib.sha256(msgid.encode()).hexdigest())
@@ -375,7 +376,7 @@ class MentionChatService:
                 "group": group, "sender": event.sender, "key": key, "question": question,
                 "image_question": image_question, "image_ambiguous": image_ambiguous,
                 "image_msgid": image_msgid, "report": report, "incoming_msgid": str(event.msgid),
-                "quoted_reply": quoted_reply,
+                "quoted_reply": quoted_reply, "mentions": tuple(mentions),
             })
             self._pending_groups[group] += 1
             self._pending_members[(group, event.sender)] += 1
@@ -476,12 +477,12 @@ class MentionChatService:
             report["model_route"] = ("image_mention_unresolved" if image_ambiguous
                                      else "image" if image_question and IMAGE_REQUEST.search(image_question) else "chat")
         return self._enqueue_job(event, group, question, report, image_msgid=image_msgid or None,
-                                 image_question=image_question, image_ambiguous=image_ambiguous)
+                                 image_question=image_question, image_ambiguous=image_ambiguous, mentions=ids)
 
     async def _answer(self, question: str, group: str = "", *, sender: str | None = None, key: str = "",
                       turn: ConversationTurn | None = None, image_question: str | None = None,
                       image_ambiguous: bool = False, image_msgid: str | None = None, incoming_msgid: str = "",
-                      quoted_reply: QuotedReply | None = None) -> str | Path:
+                      quoted_reply: QuotedReply | None = None, mentions=()) -> str | Path:
         if not question:
             return "我在，请在 @ 后写下你的问题。"
         if len(question) > 8000:
@@ -501,7 +502,7 @@ class MentionChatService:
         if self.insights_service:
             try:
                 result = await self.insights_service.chat_command(question, group, key=key, turn=turn,
-                                                                  exclude_msgid=incoming_msgid)
+                                                                  exclude_msgid=incoming_msgid, mentions=mentions)
                 if result is not None:
                     return result
             except Exception as exc:
@@ -791,7 +792,7 @@ class MentionChatService:
                     answer = await self._answer(job["question"], job["group"], sender=job["sender"], key=job["key"], turn=turn,
                                                 image_question=job["image_question"], image_ambiguous=job["image_ambiguous"],
                                                 image_msgid=job.get("image_msgid"), incoming_msgid=job.get("incoming_msgid", ""),
-                                                quoted_reply=job.get("quoted_reply"))
+                                                quoted_reply=job.get("quoted_reply"), mentions=job.get("mentions", ()))
                 limit = self.options.max_reply_chars
                 is_image = isinstance(answer, Path)
                 if not is_image and len(answer) > limit:
