@@ -260,7 +260,8 @@ class ImagesProvider:
                         hints = {400: "生图参数或描述被拒绝，请检查模型、尺寸及返回格式。", 401: "生图 API Key 无效。",
                                  402: "生图账号余额不足，请充值或更换配置。",
                                  403: "没有生图模型访问权限。", 404: "生图接口或模型不可用，请检查 Base URL、模型名称和密钥分组。",
-                                 429: "生图请求受限或额度不足，请稍后重试。"}
+                                 429: "生图请求受限或额度不足，请稍后重试。",
+                                 451: "上游以内容合规或地区限制拒绝了这次生图，请调整描述后重试。"}
                         await upstream_failure(response, hints.get(response.status_code, f"生图服务返回 HTTP {response.status_code}，请稍后重试。"))
                     generation_accepted = True
                     body = await self._body(response, MAX_JSON_BYTES)
