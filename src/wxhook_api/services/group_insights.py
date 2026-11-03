@@ -172,16 +172,28 @@ class GroupInsightsService:
         self.check(group, rows)
         return total, rows
 
-    async def _portrait_member(self, group: str, request: InsightRequest, mentions) -> str:
+    async def _portrait_member(self, group: str, request: InsightRequest, mentions, quoted_sender: str = "") -> str:
         def read(db):
-            return [dict(row) for row in db.execute(
+            members = [dict(row) for row in db.execute(
                 "SELECT id,name,wechat_name FROM members WHERE group_id=?", (group,))]
+            start, end = window_bounds(request.window)
+            active = {row[0] for row in db.execute(
+                """SELECT DISTINCT c.sender FROM chat_messages c
+                   WHERE c.group_id=? AND c.type=1 AND c.is_self=0 AND c.timestamp>=? AND c.timestamp<?
+                   AND NOT EXISTS (SELECT 1 FROM members b
+                       WHERE b.group_id=c.group_id AND b.id=c.sender AND b.blocked=1)""",
+                (group, start, end))}
+            return members, active
 
-        members = await self.groups.read(read)
+        members, active = await self.groups.read(read)
         identity = str(self.chatbot.identity or "")
+        ignored = {identity, group, "notify@all"}
         candidates = list(dict.fromkeys(
             str(item).strip() for item in mentions
-            if str(item).strip() and str(item).strip() not in {identity, group, "notify@all"}))
+            if str(item).strip() and str(item).strip() not in ignored))
+        quoted = str(quoted_sender or "").strip()
+        if quoted in ignored:
+            quoted = ""
         term = request.term.strip().lstrip("@").strip()
 
         def matches_for(value):
@@ -190,26 +202,39 @@ class GroupInsightsService:
                     if folded in {str(row["id"]).casefold(), str(row["name"] or "").casefold(),
                                   str(row["wechat_name"] or "").casefold()}]
 
+        def conflict(target):
+            found = matches_for(term) if term else []
+            if len(found) == 1 and found[0]["id"] != target:
+                raise ModelError("消息里指定的成员与昵称不是同一人，请只保留一种指定方式。")
+
         if len(candidates) > 1:
             raise ModelError("消息里 @ 了多个成员，请只 @ 要画像的一位。")
         if len(candidates) == 1:
             # The @ text is often a local remark that cannot be matched to member
             # records, while the wxid is authoritative.
-            found = matches_for(term) if term else []
-            if len(found) == 1 and found[0]["id"] != candidates[0]:
-                raise ModelError("消息里 @ 的成员与昵称不是同一人，请只保留一种指定方式。")
+            conflict(candidates[0])
+            if quoted and quoted != candidates[0]:
+                raise ModelError("消息里 @ 的成员和引用的消息不是同一人，请只保留一种指定方式。")
             return candidates[0]
+        if quoted:
+            conflict(quoted)
+            return quoted
         if not term:
-            raise ModelError("请用“人物画像：群昵称”指定成员，或在消息里 @ 该成员。")
+            raise ModelError("请用“人物画像：群昵称”指定成员，或在消息里 @ 该成员，或引用该成员的一条消息。")
         matches = matches_for(term)
         if not matches:
             raise ModelError(f"本群没有找到成员“{term}”，请改用群昵称或直接 @ 该成员。")
         if len(matches) > 1:
-            raise ModelError(f"“{term}”匹配到多个成员，请用更完整的群昵称或直接 @ 该成员。")
+            # Duplicate group nicknames are common; prefer the one who actually spoke recently.
+            active_matches = [row for row in matches if row["id"] in active]
+            if len(active_matches) == 1:
+                return active_matches[0]["id"]
+            detail = "且都有近期发言" if active_matches else "但都没有近期发言"
+            raise ModelError(f"“{term}”匹配到 {len(matches)} 位同名成员{detail}，请引用该成员的一条消息后 @机器人 发送“人物画像”。")
         return matches[0]["id"]
 
     async def generate(self, group: str, request: InsightRequest, *, exclude_msgid: str = "", message_ids=(),
-                       turn=None, mentions=()) -> dict:
+                       turn=None, mentions=(), quoted_sender: str = "") -> dict:
         if request.kind not in {"meme", "catchup", "comic", "portrait"}:
             raise ModelError(HELP)
         maximum = 100 if request.kind in {"comic", "portrait"} else 200
@@ -219,7 +244,8 @@ class GroupInsightsService:
             raise ModelError("请填写1～80字的梗关键词。")
         if request.kind == "portrait" and len(request.term) > 80:
             raise ModelError("请用“人物画像：群昵称”或 @ 该成员指定要画像的人。")
-        member = await self._portrait_member(group, request, mentions) if request.kind == "portrait" else ""
+        member = (await self._portrait_member(group, request, mentions, quoted_sender)
+                  if request.kind == "portrait" else "")
         total, rows = await self.messages(group, request, exclude_msgid=exclude_msgid, message_ids=message_ids, member=member)
         result = {"group_id": group, "kind": request.kind, "message_count": total, "sampled_count": 0, "sources": []}
         if not rows:
@@ -303,13 +329,13 @@ class GroupInsightsService:
         self.check(group, selected)
         return result
 
-    async def chat_command(self, question, group, *, key="", turn=None, exclude_msgid="", mentions=()):
+    async def chat_command(self, question, group, *, key="", turn=None, exclude_msgid="", mentions=(), quoted_sender=""):
         request = parse_command(question)
         if request is None:
             return None
         result = await self.generate(group, request,
                                      exclude_msgid=exclude_msgid or (key[4:] if key.startswith("msg:") else ""),
-                                     turn=turn, mentions=mentions)
+                                     turn=turn, mentions=mentions, quoted_sender=quoted_sender)
         if "image" in result:
             return result["image"]
         sources = "\n".join(f"[#{row['id']}] {datetime.fromtimestamp(row['timestamp'], CHINA):%m-%d %H:%M} {row['name'][:20]}：{row['content'][:80]}"

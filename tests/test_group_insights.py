@@ -9,6 +9,7 @@ import pytest
 from tests.test_chatbot import BOT, MEMBER, context, event
 from tests.test_douyin import GROUP
 from tests.test_image_model import add as add_image, confirmed, image_response
+from tests.test_quoted_advisor import quote_event
 from wxhook_api.core.ai_safety import BudgetError, check_ai_permission, current_ai_group
 from wxhook_api.services.chat_model import ModelError
 from wxhook_api.services.chat_summary import CHINA
@@ -273,9 +274,16 @@ async def test_portrait_rejects_unknown_ambiguous_or_multiple_mentions(tmp_path)
         result = await worker.generate(GROUP, InsightRequest("portrait", term="小王", window="最近7天", limit=50))
         assert result["image"].is_file() and result["sources"]
         await groups.save_member(GROUP, "wxid_other", {"name": "小王"}, create=True)
-        with pytest.raises(ModelError, match="匹配到多个成员"):
+        # A duplicate nickname resolves to the only member who spoke recently.
+        result = await worker.generate(GROUP, InsightRequest("portrait", term="小王", window="最近7天", limit=50))
+        assert result["image"].is_file()
+        await groups.import_history(GROUP, [
+            {"msgid": 310, "timestamp": int(datetime.now(CHINA).timestamp()) - 5, "type": 1,
+             "sender": "wxid_other", "content": "我也在群里说话"},
+        ])
+        with pytest.raises(ModelError, match="匹配到 2 位同名成员"):
             await worker.generate(GROUP, InsightRequest("portrait", term="小王", window="最近7天", limit=50))
-        # An explicit @ is authoritative even when the display nickname is ambiguous.
+        # An explicit @ is authoritative even when both duplicates are active.
         result = await worker.generate(GROUP, InsightRequest("portrait", term="小王", window="最近7天", limit=50),
                                        mentions=[MEMBER])
         assert result["image"].is_file()
@@ -284,6 +292,22 @@ async def test_portrait_rejects_unknown_ambiguous_or_multiple_mentions(tmp_path)
             await worker.generate(GROUP, request, mentions=[BOT])
         with pytest.raises(ModelError, match="只 @"):
             await worker.generate(GROUP, request, mentions=[MEMBER, "wxid_other"])
+
+
+async def test_portrait_quoted_message_targets_its_sender(tmp_path):
+    async with context(tmp_path, image_hook=confirmed) as state:
+        groups, worker = state.app.state.groups, state.app.state.group_insights
+        await seed(groups)
+        await groups.import_history(GROUP, [
+            {"msgid": 300, "timestamp": int(datetime.now(CHINA).timestamp()) - 20, "type": 1,
+             "sender": "wxid_dad", "content": "我平时说话比较直接"},
+        ])
+        calls = configure_fake(worker)
+        state.app.state.image_model.transport = httpx.MockTransport(lambda request: image_response())
+        await add_image(state)
+        await state.submit(quote_event(title="@机器人\u2005人物画像", author="wxid_dad", name="爸爸", msgid=302))
+        assert len(calls) == len(state.image_sends) == 1 and not state.sends
+        assert all(row["speaker"] == "wxid_dad" for row in calls[0][0]["records"])
 
 
 async def test_portrait_mention_id_is_used_when_display_name_is_unknown(tmp_path):

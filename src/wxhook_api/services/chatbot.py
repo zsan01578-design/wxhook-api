@@ -434,10 +434,19 @@ class MentionChatService:
         report["mention_names"] = list(names)
         if quoted_reply is not None:
             question = addressed_question(event, self._identity, names, after_mention=True)
-            if question is None or advisor_command(question) is None:
-                report.update(status="quote_ignored", message="引用消息需在当前提问中 @机器人并填写军师指令")
+            portrait_quote = False
+            if question is not None and advisor_command(question) is None:
+                from wxhook_api.services.group_insights import parse_command
+                try:
+                    request = parse_command(question)
+                except Exception:
+                    request = None
+                portrait_quote = request is not None and request.kind == "portrait"
+            if question is None or (advisor_command(question) is None and not portrait_quote):
+                report.update(status="quote_ignored", message="引用消息需在当前提问中 @机器人并填写军师指令或人物画像")
                 return True
-            report.update(model_route="advisor", mention_source="wxid" if ids else "display_name")
+            report.update(model_route="advisor" if not portrait_quote else "chat",
+                          mention_source="wxid" if ids else "display_name")
             return self._enqueue_job(event, group, question, report, quoted_reply=quoted_reply)
         if image_event:
             msgid = str(event.msgid)
@@ -501,8 +510,9 @@ class MentionChatService:
             return "已识别到绘图请求，但暂时无法确认正文中哪个称呼是机器人。请单独 @机器人并在后面发送“生图：图片描述”，或在管理页配置机器人群内显示名。"
         if self.insights_service:
             try:
-                result = await self.insights_service.chat_command(question, group, key=key, turn=turn,
-                                                                  exclude_msgid=incoming_msgid, mentions=mentions)
+                result = await self.insights_service.chat_command(
+                    question, group, key=key, turn=turn, exclude_msgid=incoming_msgid, mentions=mentions,
+                    quoted_sender=quoted_reply.sender if quoted_reply is not None else "")
                 if result is not None:
                     return result
             except Exception as exc:
